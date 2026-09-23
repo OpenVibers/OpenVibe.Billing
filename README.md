@@ -2,8 +2,10 @@
 
 > The isolated money ledger: providers, receipts, subscriptions, entitlements, refunds and payouts.
 
-**Status:** alpha — runtime built and tested (Wave 8); OpenVibe.Live stays authoritative until the
-cutover below is run.  
+**Status:** alpha — runtime built and tested (Wave 8). Deployed on the host in **shadow** mode
+since 2026-09-23 (`/opt/openvibe.billing`, API on `127.0.0.1:4600`): no provider secret is configured,
+it holds a reconciled import of a Live snapshot, and OpenVibe.Live stays the money authority
+(`BILLING_AUTHORITY` is not set in Live) until the cutover below is run. The cutover has not been run.  
 **Domain:** `billing.openvibe.network` — the staff console (Network SSO, staff only), `/webhooks/*` and
 `/api/health`; the service API `/api/v1` is reachable only on loopback (`127.0.0.1:4600`)  
 **Decision:** [ADR-012](https://github.com/OpenVibers/OpenVibe.Contracts/blob/main/docs/adr/ADR-012-economic-classification.md) —
@@ -104,10 +106,11 @@ are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "typ
 | `POST /api/v1/admin/sweep`, `GET /api/v1/admin/import-holds` | `billing.ledger.admin` | renewal sweep now; unmapped import users |
 | `POST /webhooks/<provider>` | provider signature | `powerchat`, `stripe`, `paypal`, `ccbill` (GET too), `nowpayments` |
 
-Capabilities are proposed in [docs/capabilities-proposal/](docs/capabilities-proposal/) with a service
-manifest in [docs/service-manifest-proposal.json](docs/service-manifest-proposal.json). Until they
-ship in an openvibe-contracts release, grants are matched locally (exact id or a `.*` family such as
-`billing.*`) with contracts' own `capabilities.grants()`.
+The capabilities and the service manifest are released in openvibe-contracts (v0.8.0;
+`billing.staff.action` since v0.17.0); the drafts they came from stay in
+[docs/capabilities-proposal/](docs/capabilities-proposal/) and
+[docs/service-manifest-proposal.json](docs/service-manifest-proposal.json). Grants are matched with
+contracts' own `capabilities.grants()` (exact id or a `.*` family such as `billing.*`).
 
 ## Staff console
 
@@ -196,9 +199,11 @@ Reversing a subscription payment revokes the periods it granted.
 ## Cutover runbook (Live → Billing)
 
 The exact production sequence, rollback, grants and the Live behaviour the switch cannot preserve are in
-[docs/live-cutover.md](docs/live-cutover.md); the Live side is the patch
-[docs/live-patch.diff](docs/live-patch.diff) (a `BILLING_AUTHORITY=live|billing` switch, `live` by default,
-plus the `money_writes_frozen` freeze). In short:
+[docs/live-cutover.md](docs/live-cutover.md); the Live side (a `BILLING_AUTHORITY=live|billing` switch,
+`live` by default, plus the `money_writes_frozen` freeze) was the patch
+[docs/live-patch.diff](docs/live-patch.diff) and is deployed in OpenVibe.Live since `c384787` with the
+switch unset. None of the steps below has been executed yet; step 3 needs the owner (PowerChat
+dashboard). In short:
 
 1. **Shadow import** as often as needed (`node scripts/import-live.js --live-db <snapshot> [--dry-run]`);
    map held users in the Network and explain every adjustment until reconciliation is clean.
@@ -215,14 +220,15 @@ Billing did itself.
 
 ## Launch rule
 
-The domain keeps its placeholder page on
-[OpenVibers/OpenVibe.Sites](https://github.com/OpenVibers/OpenVibe.Sites) until everything in plan §12.12
-holds: owning runtime with health/readiness ✔; canonical identity and scoped service principals ✔;
-server-rendered public routes useful without JavaScript (not yet — the only pages are the staff-only
-console);
-real persistence and end-to-end workflows ✔; capability/event registration against
-OpenVibe.Contracts (proposed, not released); migration strategy ✔ with a security review, sitemap/robots
-still to do; acceptance tests ✔. A placeholder is never counted as an implemented service.
+`billing.openvibe.network` left OpenVibe.Sites on 2026-09-23: it serves the staff console only. Billing
+is not a public product and is not the money authority until the cutover above and everything in plan
+§12.12 holds: owning runtime with health/readiness ✔ (`/metrics` not yet); canonical identity and
+scoped service principals ✔ (principal `billing`); server-rendered public routes useful without
+JavaScript (not yet — the only pages are the staff-only console); real persistence and end-to-end
+workflows ✔ in tests, shadow only in production; capability/event registration against
+OpenVibe.Contracts ✔ (v0.8.0); migration strategy ✔ (shadow import reconciles; restore drill passed
+2026-09-23) with a security review, sitemap/robots still to do; acceptance tests ✔. A shadow deployment
+is never counted as the money authority.
 
 ---
 

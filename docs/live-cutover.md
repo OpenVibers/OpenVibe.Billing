@@ -107,7 +107,7 @@ Shell helpers used below (on the host):
 # billing '<command>' runs one command with Billing's environment, as Billing's service user (ubuntu)
 # so the database files keep their owner — the same way the shadow imports were run.
 billing() { sudo bash -c "set -a; . /etc/openvibe/billing.env; set +a; export NODE_ENV=production BILLING_DB_PATH=/var/lib/openvibe-billing/billing.db; cd /opt/openvibe.billing && sudo -E -u ubuntu $1"; }
-LIVE_DB=/opt/openvibe.live/shared/data/live.db
+LIVE_DB=/opt/openvibe.live/data/live.db
 ```
 
 Live owner calls are made from the browser console on openvibe.live, signed in as the owner:
