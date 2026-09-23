@@ -30,8 +30,9 @@ webhooks land here and nowhere else.
 fnm exec --using=22.22.1 npm install
 cp .env.example .env          # set OV_OAUTH_CLIENT_SECRET, POWERCHAT_WEBHOOK_SECRET, …
 npm run dev                   # http://localhost:4600
-npm test                      # 8 test files: stub Network/Events/providers, temp DBs, random ports
+npm test                      # 9 test files: stub Network/Events/providers, temp DBs, random ports
 npm run reconcile             # reconciliation report (exit 1 on failure)
+npm run freeze -- on "reason" # economy freeze from the host (status | on "<reason>" | off)
 node scripts/import-live.js --live-db <snapshot> [--dry-run] [--json]
 ```
 
@@ -128,30 +129,32 @@ Reversing a subscription payment revokes the periods it granted.
   provider event has exactly one transaction, paid cashouts have payout references, payouts_pending =
   requested cashouts. It also lists negative balances, unprocessed/rejected events, items for review
   and import holds; totals exclude test transactions. Runs are stored in `reconciliation_runs`.
-- **Freeze** before any risky change: `POST /api/v1/admin/freeze {"on": true, "reason": "…"}`.
+- **Freeze** before any risky change: `POST /api/v1/admin/freeze {"on": true, "reason": "…"}`, or on the
+  host `node scripts/freeze.js on "<reason>"` (same switch; after `off` the running service processes the
+  held webhooks on its next retry tick).
 - **Review queue**: chargebacks on donated credit and unattributed site tips appear under
   `warnings`; resolve them with an adjustment (`relates_to` = the transaction).
 - **Backups**: `sqlite3 /var/lib/openvibe-billing/billing.db ".backup billing-$(date +%F).db"`.
 
 ## Cutover runbook (Live → Billing)
 
-1. **Shadow import.** Copy Live's DB (`sqlite3 live.db ".backup live-snapshot.db"`), then
-   `node scripts/import-live.js --live-db live-snapshot.db --dry-run`; read the report (holds,
-   adjustments, duplicate refs, anomalies). Run it for real; it reconciles afterwards.
-2. **Reconcile** and resolve: map held users in the Network (re-running the import releases their
-   holds), investigate every adjustment and anomaly. Re-run the import against fresh snapshots as often
-   as needed — it only adds what changed.
-3. **Freeze Live money writes** (Live's payments/donations/cashouts off; PowerChat checkout links
-   paused) and wait for in-flight PowerChat checkouts (intents live one hour).
-4. **Final import** from a snapshot taken after the freeze; reconcile; the opening balances now equal
-   Live's columns, with every difference listed.
-5. **Switch Live to the Billing client**: checkout → `POST /intents`, donations → `/transfers`,
-   cashouts/recycle/subscriptions/balances → their endpoints, entitlement checks →
-   `/entitlements`; re-point the PowerChat webhook to `https://billing.openvibe.network/webhooks/powerchat`;
-   Live's money columns become legacy read-only.
-6. **Verify**: a small real PowerChat purchase settles once, balances match, `npm run reconcile` is OK,
-   events flow when `EVENTS_URL` is set. Rollback: freeze Billing, export its journal, re-derive Live's
-   columns from it; keep the last Live snapshot.
+The exact production sequence, rollback, grants and the Live behaviour the switch cannot preserve are in
+[docs/live-cutover.md](docs/live-cutover.md); the Live side is the patch
+[docs/live-patch.diff](docs/live-patch.diff) (a `BILLING_AUTHORITY=live|billing` switch, `live` by default,
+plus the `money_writes_frozen` freeze). In short:
+
+1. **Shadow import** as often as needed (`node scripts/import-live.js --live-db <snapshot> [--dry-run]`);
+   map held users in the Network and explain every adjustment until reconciliation is clean.
+2. **Freeze Live money writes**, wait for in-flight PowerChat checkouts (an hour), back up and **freeze Billing**.
+3. **Re-point the PowerChat webhook** to `https://billing.openvibe.network/webhooks/powerchat` (Billing holds
+   the deliveries while frozen), then take the **final snapshot and import**; reconcile.
+4. **Switch Live** (`BILLING_AUTHORITY=billing`, deploy with `--wait-idle`), **unfreeze Billing** (held
+   deliveries settle; ones Live already credited are rejected for review, never credited twice).
+5. **Verify** the reads, **unfreeze Live**, verify with a small real PowerChat purchase.
+
+Import runs are safe after cutover too: an order Live credited is imported as settled-in-Live and never
+settles again here, and opening balances only ever correct the imported part of an account, never what
+Billing did itself.
 
 ## Launch rule
 

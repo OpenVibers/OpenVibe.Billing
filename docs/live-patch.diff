@@ -1,0 +1,2618 @@
+diff --git a/.env.example b/.env.example
+index 85a6505..5b3d8ac 100644
+--- a/.env.example
++++ b/.env.example
+@@ -116,3 +116,13 @@ OV_COMMUNITY_URL=https://openvibe.community
+ # chat calls to Chat and keeps its chat tables as Chat's read mirror. Unset = Live runs chat.
+ #CHAT_AUTHORITY=chat
+ OV_CHAT_INTERNAL_URL=http://127.0.0.1:4400
++
++# Money authority (roadmap Wave 8, ADR-012). live (default): Live's own Vibes columns, exactly as
++# before. billing: OpenVibe.Billing is the ledger — Live calls it for checkouts, donations, cashouts,
++# recycling, subscriptions, balances and entitlements with its service token (audience
++# openvibe.billing) and never writes its legacy money columns; the provider/PowerChat webhooks on
++# Live answer 410. Unset = live. Cutover procedure: docs/live-cutover.md in OpenVibe.Billing.
++#BILLING_AUTHORITY=billing
++OV_BILLING_INTERNAL_URL=http://127.0.0.1:4600
++OV_BILLING_PUBLIC_URL=https://billing.openvibe.network
++# OV_BILLING_TIMEOUT_MS=8000
+diff --git a/AGENTS.md b/AGENTS.md
+index 2bf8235..52df615 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -4,7 +4,7 @@
+ 
+ Self-hosted live streaming platform — Node.js/Express monolith, vanilla JS SPA frontend, SQLite (better-sqlite3). Part of the **OpenVibe network** with SSO via openvibe.network. See [README.md](README.md) for features and [docs/architecture.md](docs/architecture.md) for system design.
+ 
+-**Network context:** SSO/OAuth2 + the OpenCoins wallet come from **OpenVibe.Network** (`server/monetization/wallet-client.js`). The media subsystem (VODs/clips/pastes/thumbnails/files) lives in **OpenVibe.Media** — Live talks to it via [server/media-client.js](server/media-client.js), the thin proxy routers in [server/media-proxy/](server/media-proxy/), and the Media-backed recorder [server/streaming/recorder.js](server/streaming/recorder.js). Media completion events arrive at `POST /internal/media-webhook`. The legacy local `vods`/`clips`/`pastes` tables are READ-ONLY (frozen for the cutover migration — never write them); Live-owned AI/transcript state for Media-hosted content lives in `vod_ai_state`/`clip_ai_state`. See ../CONTRACTS.md for the binding inter-service contracts.
++**Network context:** SSO/OAuth2 + the OpenCoins wallet come from **OpenVibe.Network** (`server/monetization/wallet-client.js`). The media subsystem (VODs/clips/pastes/thumbnails/files) lives in **OpenVibe.Media** — Live talks to it via [server/media-client.js](server/media-client.js), the thin proxy routers in [server/media-proxy/](server/media-proxy/), and the Media-backed recorder [server/streaming/recorder.js](server/streaming/recorder.js). Media completion events arrive at `POST /internal/media-webhook`. The legacy local `vods`/`clips`/`pastes` tables are READ-ONLY (frozen for the cutover migration — never write them); Live-owned AI/transcript state for Media-hosted content lives in `vod_ai_state`/`clip_ai_state`. See ../CONTRACTS.md for the binding inter-service contracts. **Money:** `BILLING_AUTHORITY` (read only in [server/monetization/money-authority.js](server/monetization/money-authority.js)) is `live` by default; `billing` makes OpenVibe.Billing the ledger ([billing-client.js](server/monetization/billing-client.js), [billing-actions.js](server/monetization/billing-actions.js)) and Live's `openvibe_bucks_*`/`transactions`/`payment_orders`/`subscriptions` read-only (a database-level tripwire throws). The owner-only `money_writes_frozen` flag (`/api/admin/money`) refuses money actions in both modes.
+ 
+ ## Commands
+ 
+diff --git a/server/admin/routes.js b/server/admin/routes.js
+index 08b4d84..0e37a9d 100644
+--- a/server/admin/routes.js
++++ b/server/admin/routes.js
+@@ -13,6 +13,9 @@
+  * GET    /api/admin/bans                   - List all bans
+  * GET    /api/admin/vpn-queue              - VPN approval queue
+  * PUT    /api/admin/vpn-queue/:id          - Approve/deny VPN
++ * GET    /api/admin/money                  - Money authority (BILLING_AUTHORITY), freeze state, Billing health
++ * POST   /api/admin/money/freeze           - Owner: freeze/unfreeze Live money writes { on, reason }
++ * POST   /api/admin/money/actions/:id/resolve - Owner: re-send a Billing action whose outcome is unknown
+  * GET    /api/admin/settings               - Get all site settings
+  * PUT    /api/admin/settings               - Update site settings (bulk)
+  * PUT    /api/admin/settings/:key          - Update a single setting
+@@ -41,6 +44,7 @@ const db = require('../db/database');
+ const { requireAuth } = require('../auth/auth');
+ const chatServer = require('../chat/chat-server');
+ const permissions = require('../auth/permissions');
++const money = require('../monetization/money-authority');
+ 
+ const router = express.Router();
+ 
+@@ -73,7 +77,11 @@ router.get('/stats', (req, res) => {
+                 total: db.get('SELECT COUNT(*) as c FROM streams').c,
+                 totalViewers: db.get('SELECT COALESCE(SUM(viewer_count), 0) as c FROM streams WHERE is_live = 1').c,
+             },
+-            openvibeBucks: {
++            // Under BILLING_AUTHORITY=billing these tables are frozen legacy copies: the numbers live
++            // in OpenVibe.Billing (reconciliation report), so none are shown as current here.
++            openvibeBucks: money.onBilling() ? {
++                authority: 'billing', totalCirculating: null, totalTransactions: null, pendingCashouts: null, totalDonated: null,
++            } : {
+                 totalCirculating: db.get('SELECT COALESCE(SUM(openvibe_bucks_balance), 0) as c FROM users').c,
+                 totalTransactions: db.get('SELECT COUNT(*) as c FROM transactions').c,
+                 pendingCashouts: db.get("SELECT COUNT(*) as c FROM transactions WHERE type = 'cashout' AND status = 'escrow'").c,
+@@ -136,6 +144,7 @@ router.get('/users', (req, res) => {
+ 
+         const users = db.all(sql, params);
+         const total = db.get(countSql, countParams).c;
++        if (money.onBilling()) for (const u of users) u.openvibe_bucks_balance = null;   // legacy column; Billing holds Vibes
+ 
+         res.json({ users, total });
+     } catch (err) {
+@@ -478,6 +487,34 @@ router.put('/vpn-queue/:id', (req, res) => {
+ // Site Settings
+ // ═══════════════════════════════════════════════════════════════
+ 
++// ── Money: who holds it, the freeze, and Billing health (roadmap Wave 8) ──────
++// Every admin can see the state; only the owner can freeze/unfreeze or resolve an action.
++router.get('/money', async (req, res) => {
++    const out = { authority: money.authority(), billing_authority_env: process.env.BILLING_AUTHORITY || null, ...money.freezeState() };
++    if (money.onBilling()) {
++        try { out.billing = await require('../monetization/billing-actions').adminStatus(); }
++        catch (err) { out.billing = { error: err.message }; }
++    }
++    res.json(out);
++});
++router.post('/money/freeze', permissions.requireOwner, (req, res) => {
++    const on = req.body && req.body.on;
++    if (typeof on !== 'boolean') return res.status(400).json({ error: 'on must be true or false' });
++    const state = money.setFrozen(on, { reason: req.body.reason || null, by: req.user.username || `user:${req.user.id}` });
++    res.json({ authority: money.authority(), ...state });
++});
++router.post('/money/actions/:id/resolve', permissions.requireOwner, async (req, res) => {
++    if (!money.onBilling()) return res.status(409).json({ error: 'Only used when BILLING_AUTHORITY=billing' });
++    const billingActions = require('../monetization/billing-actions');
++    try {
++        const r = await billingActions.resolveAction(parseInt(req.params.id, 10));
++        res.status(r.status).json(r.body);
++    } catch (err) {
++        if (billingActions.sendError(res, err)) return;
++        res.status(500).json({ error: err.message });
++    }
++});
++
+ // ── Get All Settings ─────────────────────────────────────────
+ router.get('/settings', (req, res) => {
+     try {
+diff --git a/server/auth/permissions.js b/server/auth/permissions.js
+index e6aba03..42f9dd2 100644
+--- a/server/auth/permissions.js
++++ b/server/auth/permissions.js
+@@ -64,7 +64,9 @@ function canModerateContentOwner(actor, contentOwner) {
+ 
+ // Settings whose values are secrets or control money/AI spend — owner-only to view/edit.
+ const SENSITIVE_KEY_RE = /(api[_-]?key|secret|token|password|client_id|client_secret|service_account|private[_-]?key)/i;
+-const SENSITIVE_KEY_PREFIXES = ['ai_', 'stripe_', 'ccbill_', 'crypto_', 'tts_google_'];
++// money_writes_frozen (the Billing-cutover freeze) is owner-only too; every admin can READ it at
++// GET /api/admin/money.
++const SENSITIVE_KEY_PREFIXES = ['ai_', 'stripe_', 'ccbill_', 'crypto_', 'tts_google_', 'money_'];
+ // ytdlp_extra_args feeds process arguments; it is owner-only like the API keys.
+ const SENSITIVE_KEY_EXACT = new Set(['youtube_api_key', 'ytdlp_extra_args']);
+ function isSensitiveSettingKey(key) {
+diff --git a/server/auth/routes.js b/server/auth/routes.js
+index 6df73f5..92e7604 100644
+--- a/server/auth/routes.js
++++ b/server/auth/routes.js
+@@ -665,7 +665,9 @@ function sanitizeUser(user, publicOnly = false) {
+     };
+     if (!publicOnly) {
+         // Balances are real money (Vibes) and the user's own business, like email and the key.
+-        safe.openvibe_bucks_balance = user.openvibe_bucks_balance;
++        // Under BILLING_AUTHORITY=billing the column is a frozen legacy copy (ADR-012 rule 8: never
++        // shown as live); the balance comes from /api/funds/balance.
++        if (!require('../monetization/money-authority').onBilling()) safe.openvibe_bucks_balance = user.openvibe_bucks_balance;
+         safe.openvibe_coins_balance = user.openvibe_coins_balance;
+         safe.email = user.email;
+         safe.stream_key = user.stream_key;
+diff --git a/server/db/database.js b/server/db/database.js
+index 30c778a..e8f5903 100644
+--- a/server/db/database.js
++++ b/server/db/database.js
+@@ -80,6 +80,8 @@ const Database = require('better-sqlite3');
+ const path = require('path');
+ const fs = require('fs');
+ const crypto = require('crypto');
++// BILLING_AUTHORITY tripwire: Live's money columns/tables are only written in `live` mode.
++const { assertLiveLedger } = require('../monetization/money-authority');
+ 
+ const DB_PATH = process.env.DB_PATH || './data/live.db';
+ const dbDir = path.dirname(path.resolve(DB_PATH));
+@@ -1036,6 +1038,7 @@ function initDb() {
+         // Master switch is OFF by default so nothing goes live until an admin enables it.
+         const paymentSeeds = [
+             ['payments_enabled', 'false', 'Master switch: enable real-money purchases & subscriptions', 'boolean'],
++            ['money_writes_frozen', 'false', 'Freeze: refuse every Live money action (checkouts, donations, cashouts, recycling, subscriptions, Vibes media requests) in both billing modes; reads keep working. Owner only — use /api/admin/money/freeze', 'boolean'],
+             ['bucks_per_usd', '100', 'Vibes value per 1 USD (100 Bucks = $1.00 cashout). Purchase price adds a margin, see the buy tiers.', 'number'],
+             ['bucks_min_purchase_bucks', '100', 'Minimum Vibes purchase (bucks)', 'number'],
+             ['sub_price_usd', '4.99', 'Monthly channel subscription price in USD', 'number'],
+@@ -5396,6 +5399,7 @@ function getFollowerIds(streamerId) {
+ // ── Transaction helpers ──────────────────────────────────────
+ 
+ function createTransaction({ from_user_id, to_user_id, stream_id, amount, type, status, message }) {
++    assertLiveLedger('transactions insert');
+     return run(
+         `INSERT INTO transactions (from_user_id, to_user_id, stream_id, amount, type, status, message)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+@@ -5404,11 +5408,13 @@ function createTransaction({ from_user_id, to_user_id, stream_id, amount, type,
+ }
+ 
+ function addVibes(userId, amount) {
++    assertLiveLedger('openvibe_bucks_balance credit');
+     return run(`UPDATE users SET openvibe_bucks_balance = openvibe_bucks_balance + ? WHERE id = ?`,
+         [amount, userId]);
+ }
+ 
+ function deductVibes(userId, amount) {
++    assertLiveLedger('openvibe_bucks_balance debit');
+     const user = getUserById(userId);
+     if (!user || user.openvibe_bucks_balance < amount) return false;
+     run(`UPDATE users SET openvibe_bucks_balance = openvibe_bucks_balance - ? WHERE id = ?`,
+@@ -5418,10 +5424,12 @@ function deductVibes(userId, amount) {
+ 
+ // Streamer cashout balance (received donations; the only cashout-able balance).
+ function addVibesCashout(userId, amount) {
++    assertLiveLedger('openvibe_bucks_cashout_balance credit');
+     return run(`UPDATE users SET openvibe_bucks_cashout_balance = openvibe_bucks_cashout_balance + ? WHERE id = ?`,
+         [amount, userId]);
+ }
+ function deductVibesCashout(userId, amount) {
++    assertLiveLedger('openvibe_bucks_cashout_balance debit');
+     const user = getUserById(userId);
+     if (!user || (user.openvibe_bucks_cashout_balance || 0) < amount) return false;
+     run(`UPDATE users SET openvibe_bucks_cashout_balance = openvibe_bucks_cashout_balance - ? WHERE id = ?`,
+@@ -5432,6 +5440,7 @@ function deductVibesCashout(userId, amount) {
+ // ── Payment orders (idempotent purchase tracking) ────────────
+ 
+ function createPaymentOrder({ user_id, provider, provider_ref = null, kind = 'bucks', amount_cents = 0, currency = 'usd', bucks = 0, streamer_id = null, status = 'pending' }) {
++    assertLiveLedger('payment_orders insert');
+     const res = run(
+         `INSERT INTO payment_orders (user_id, provider, provider_ref, kind, amount_cents, currency, bucks, streamer_id, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+@@ -5460,6 +5469,7 @@ function getPendingPowerchatOrders(days = 3) {
+ }
+ 
+ function updatePaymentOrder(id, fields) {
++    assertLiveLedger('payment_orders update');
+     const allowed = new Set(['provider_ref', 'status', 'amount_cents', 'bucks', 'currency', 'streamer_id']);
+     const entries = Object.entries(fields || {}).filter(([k]) => allowed.has(k));
+     if (!entries.length) return getPaymentOrderById(id);
+@@ -5472,6 +5482,7 @@ function updatePaymentOrder(id, fields) {
+ // ── Subscription helpers ─────────────────────────────────────
+ 
+ function upsertSubscription({ subscriber_id, streamer_id, tier = 1, provider = null, provider_ref = null, price_cents = 0, currency = 'usd', status = 'active', current_period_end = null, auto_renew = null }) {
++    assertLiveLedger('subscriptions upsert');
+     // Reuse an existing (subscriber,streamer) row if present, else insert.
+     // auto_renew: null = leave as-is on update (0 on insert); 0/1 = set explicitly.
+     const existing = get('SELECT * FROM subscriptions WHERE subscriber_id = ? AND streamer_id = ?', [subscriber_id, streamer_id]);
+@@ -5510,6 +5521,11 @@ function getActiveSubscription(subscriberId, streamerId) {
+ 
+ function isActiveSubscriber(subscriberId, streamerId) {
+     if (!subscriberId || !streamerId) return false;
++    // BILLING_AUTHORITY=billing: subscriber perks follow Billing's entitlements (short-lived cache;
++    // legacy subscriptions rows are not consulted).
++    if (process.env.BILLING_AUTHORITY && require('../monetization/money-authority').onBilling()) {
++        return require('../monetization/billing-actions').isSubscriberCached(subscriberId, streamerId);
++    }
+     return !!getActiveSubscription(subscriberId, streamerId);
+ }
+ 
+@@ -5532,6 +5548,7 @@ function getActiveSubscriberCount(streamerId) {
+ }
+ 
+ function setSubscriptionStatus(id, status, fields = {}) {
++    assertLiveLedger('subscriptions status');
+     const cpe = fields.current_period_end !== undefined ? fields.current_period_end : null;
+     const cape = fields.cancel_at_period_end !== undefined ? (fields.cancel_at_period_end ? 1 : 0) : 0;
+     run(`UPDATE subscriptions SET status=?, is_active=?, cancel_at_period_end=?,
+diff --git a/server/integrations/powerchat-checkout.js b/server/integrations/powerchat-checkout.js
+index 6a45705..8ff5d65 100644
+--- a/server/integrations/powerchat-checkout.js
++++ b/server/integrations/powerchat-checkout.js
+@@ -226,6 +226,42 @@ async function buildSubscribeLink(order, streamerUserId, { autoRenew = 0, route
+     return { url: link.url, mode: 'site', feeCents: fee, minted: link.minted, expiresAt: link.expiresAt };
+ }
+ 
++// ── Checkouts for OpenVibe.Billing intents (BILLING_AUTHORITY=billing) ───────
++// Billing owns the order (a payment intent) and prices it; Live only builds the PowerChat link,
++// because Live holds the PowerChat connections that can mint pinned checkouts. The ref is Billing's
++// own checkout_ref ("pcorder:pi_…" / "pcsub:pi_…"): PowerChat echoes it to Billing's webhook, which
++// settles it. Nothing here touches payment_orders.
++async function buildBillingPurchaseLink(intent) {
++    const site = getSiteAccount();
++    if (!site || !intent || !intent.checkout_ref) return null;
++    const bits = Number(intent.bits) || 0;
++    const link = await mintCheckoutLink(site.username, intent.checkout_ref, {
++        purpose: 'vibes', amountCents: intent.amount_cents, returnTo: true,
++        itemName: bits ? `${bits.toLocaleString()} Vibes` : 'Vibes',
++    });
++    return { url: link.url, mode: 'site', minted: link.minted, expiresAt: link.expiresAt };
++}
++
++async function buildBillingSubscribeLink(intent, streamerUserId) {
++    if (!intent || !intent.checkout_ref) return null;
++    const streamer = db.getUserById(streamerUserId);
++    const who = streamer ? (streamer.display_name || streamer.username) : 'channel';
++    const opts = {
++        purpose: 'subscription', amountCents: intent.amount_cents, returnTo: true,
++        itemName: `${who} — 1 month subscription${intent.auto_renew ? ' (auto-renew)' : ''}`,
++    };
++    if (intent.route === 'direct') {
++        const direct = _checkoutConn(streamerUserId);
++        if (!direct) return null;
++        const link = await mintCheckoutLink(direct.powerchat_username, intent.checkout_ref, opts);
++        return { url: link.url, mode: 'direct', minted: link.minted, expiresAt: link.expiresAt };
++    }
++    const site = getSiteAccount();
++    if (!site) return null;
++    const link = await mintCheckoutLink(site.username, intent.checkout_ref, opts);
++    return { url: link.url, mode: 'site', feeCents: intent.fee_cents || 0, minted: link.minted, expiresAt: link.expiresAt };
++}
++
+ /** Which PowerChat subscription routes a streamer currently supports (for the UI). */
+ function subscribeRoutes(streamerUserId) {
+     return { direct: !!_checkoutConn(streamerUserId), site: !!getSiteAccount() };
+@@ -357,6 +393,6 @@ function _notify(userId, title, message) {
+ module.exports = {
+     isAvailable, getSiteAccount, tipLinkFor, mintCheckoutLink, checkoutIntentSupport, subscribeRoutes,
+     _test: { resetIntentSupport: () => _intentSupport.clear() },
+-    buildPurchaseLink, buildSubscribeLink, buildDonateLink,
++    buildPurchaseLink, buildSubscribeLink, buildDonateLink, buildBillingPurchaseLink, buildBillingSubscribeLink,
+     handleAttributedDonation,
+ };
+diff --git a/server/integrations/powerchat-reconcile.js b/server/integrations/powerchat-reconcile.js
+index f0c7a94..48ab5db 100644
+--- a/server/integrations/powerchat-reconcile.js
++++ b/server/integrations/powerchat-reconcile.js
+@@ -82,6 +82,8 @@ function _warnHost(username, msg) {
+ /** One sweep. Returns a summary; never throws. */
+ async function reconcileOnce() {
+     const summary = { orders: 0, hosts: 0, pages: 0, rows: 0, credited: [], underpaid: [], skippedTest: 0, skippedHosts: 0, errors: 0 };
++    // BILLING_AUTHORITY=billing: PowerChat money settles in OpenVibe.Billing; Live credits nothing.
++    if (require('../monetization/money-authority').authority() !== 'live') return { ...summary, skipped: 'billing_authority' };
+     let pending;
+     try { pending = db.getPendingPowerchatOrders(LOOKBACK_DAYS) || []; } catch (e) { summary.errors++; return summary; }
+     summary.orders = pending.length;
+@@ -170,6 +172,7 @@ async function reconcileOnce() {
+ let _timer = null;
+ function startReconciler() {
+     if (_timer) return;
++    if (require('../monetization/money-authority').onBilling()) { console.log('[PowerChat] paid-messages reconciler not started: OpenVibe.Billing settles PowerChat money (BILLING_AUTHORITY=billing)'); return; }
+     // Credits money from paginated upstream calls: a slow sweep must never be joined by the next one.
+     _timer = require('../utils/jobs').every('powerchat-reconcile', SWEEP_MS, () => reconcileOnce(), { initialDelayMs: FIRST_SWEEP_MS, jitterMs: 30 * 1000 });
+     console.log('[PowerChat] paid-messages reconciler started (backfills missed checkout webhooks every 15 min)');
+diff --git a/server/integrations/powerchat-routes.js b/server/integrations/powerchat-routes.js
+index 84ecd5a..4f12f6f 100644
+--- a/server/integrations/powerchat-routes.js
++++ b/server/integrations/powerchat-routes.js
+@@ -440,6 +440,15 @@ router.get('/authorize-url', requireAuth, (req, res) => {
+ // ── POST /webhook — signed event receiver ────────────────────────────────────
+ // No auth middleware: authenticity is the HMAC signature. Ack fast, process async.
+ router.post('/webhook', (req, res) => {
++    // BILLING_AUTHORITY=billing: PowerChat money settles in OpenVibe.Billing, and this receiver
++    // must not process anything. 410 names where the webhook lives now (the PowerChat dashboard
++    // is re-pointed by hand — docs/live-cutover.md in OpenVibe.Billing).
++    if (require('../monetization/money-authority').onBilling()) {
++        return res.status(410).json({
++            error: 'PowerChat webhooks are received by OpenVibe.Billing now.',
++            webhook_url: `${require('../monetization/billing-client').publicUrl()}/webhooks/powerchat`,
++        });
++    }
+     try {
+         const raw = req.rawBody || (req.body ? Buffer.from(JSON.stringify(req.body)) : Buffer.alloc(0));
+         const check = webhook.verifySignature(raw, req.headers);
+diff --git a/server/media/media-queue.js b/server/media/media-queue.js
+index 4e6ebdd..7d94b7c 100644
+--- a/server/media/media-queue.js
++++ b/server/media/media-queue.js
+@@ -132,6 +132,19 @@ class MediaQueue {
+             return;
+         }
+         if (currency === 'vibes') {
++            // Vibes are money (ADR-012): refused while money writes are frozen, in both modes.
++            require('../monetization/money-authority').assertWritable();
++            if (require('../monetization/money-authority').onBilling()) {
++                // A paid interaction through OpenVibe.Billing (the requester's credit → the
++                // streamer's payable); the returned charge is linked to the request for refunds.
++                const billingActions = require('../monetization/billing-actions');
++                try {
++                    return await billingActions.chargeMedia({ userId, streamerId, streamId, cost, label });
++                } catch (e) {
++                    const live = billingActions.toLive(e, { insufficient: `Not enough Vibes — this costs ${cost}.` });
++                    throw new Error(live ? live.body.error : (e?.message || `Could not charge ${cost} Vibes.`));
++                }
++            }
+             // Vibes have no generic spend: paying a streamer for a request IS a donation
+             // to them, so it goes through the same path and shows up in their totals.
+             try {
+@@ -201,8 +214,9 @@ class MediaQueue {
+         if (unpriceable) throw new Error(unpriceable);
+         // A free channel stores cost 0, so the queue does not display a price nobody paid.
+         const cost = currency === 'free' ? 0 : this.calculateCost(settings, normalized.duration_seconds);
++        let billingCharge = null;
+         if (cost > 0) {
+-            await this.charge({
++            billingCharge = await this.charge({
+                 currency, cost, userId, streamerId, streamId,
+                 label: `Media request: ${normalized.title || trimmed}`,
+             });
+@@ -239,6 +253,7 @@ class MediaQueue {
+         }
+ 
+         const request = db.getMediaRequestById(result.lastInsertRowid);
++        if (billingCharge && billingCharge.actionId) require('../monetization/billing-actions').linkMediaCharge(billingCharge.actionId, request.id);
+         this.broadcastQueueUpdate(streamerId);
+ 
+         // Kick off background stream URL extraction for the new request
+@@ -487,6 +502,19 @@ class MediaQueue {
+             if (currency === 'points') {
+                 db.addChannelPoints(request.user_id, request.streamer_id, amount);
+             } else if (currency === 'vibes') {
++                const money = require('../monetization/money-authority');
++                if (money.writeRefusal()) {
++                    // Frozen (or misconfigured): not refunded now and NOT marked refunded, so the
++                    // streamer's refund button works again once money writes are back.
++                    console.warn(`[MediaQueue] refund of request ${request.id} deferred: money writes are frozen`);
++                    return 0;
++                }
++                if (money.onBilling()) {
++                    return require('../monetization/billing-actions').refundMedia(request).then((n) => {
++                        if (n > 0) db.updateMediaRequest(requestId, { refunded: 1 });
++                        return n;
++                    });
++                }
+                 // The charge was booked as a donation to the streamer, so unwind both sides — atomically,
+                 // and only if the streamer still holds the money. Crediting the requester after a failed
+                 // deduction minted Vibes: pay, move the balance out (recycle or cash out), then refund.
+@@ -527,8 +555,8 @@ class MediaQueue {
+             last_error: errorMessage || 'Playback failed',
+         });
+ 
+-        // Auto-refund on failure
+-        this.refund(requestId);
++        // Auto-refund on failure (a Promise when OpenVibe.Billing refunds it)
++        Promise.resolve(this.refund(requestId)).catch((e) => console.warn('[MediaQueue] refund failed:', e.message));
+ 
+         db.renormalizePendingMediaRequestPositions(request.streamer_id);
+         this.broadcastQueueUpdate(request.streamer_id);
+diff --git a/server/media/routes.js b/server/media/routes.js
+index eeecfa9..5bb6d8e 100644
+--- a/server/media/routes.js
++++ b/server/media/routes.js
+@@ -188,7 +188,12 @@ router.post('/quote', optionalAuth, async (req, res) => {
+         // What the viewer can actually pay right now, so the UI can say "you have X".
+         let balance = null;
+         if (req.user && currency === 'points') balance = db.getChannelPoints(req.user.id, streamerId);
+-        else if (req.user && currency === 'vibes') balance = db.getUserById(req.user.id)?.openvibe_bucks_balance ?? null;
++        else if (req.user && currency === 'vibes') {
++            if (require('../monetization/money-authority').onBilling()) {
++                // Billing holds Vibes; unknown (null) when it cannot answer — never the legacy column.
++                try { balance = (await require('../monetization/billing-actions').balance(req.user.id, req.headers)).balance; } catch { balance = null; }
++            } else balance = db.getUserById(req.user.id)?.openvibe_bucks_balance ?? null;
++        }
+ 
+         res.json({
+             title: normalized.title,
+@@ -380,14 +385,14 @@ router.post('/queue/:id/position', requireAuth, (req, res) => {
+ });
+ 
+ // ── Manual refund by streamer ──────────────────────────────
+-router.post('/queue/:id/refund', requireAuth, (req, res) => {
++router.post('/queue/:id/refund', requireAuth, async (req, res) => {
+     try {
+         const request = db.getMediaRequestById(cleanInt(req.params.id, 0));
+         if (!request) return res.status(404).json({ error: 'Request not found' });
+         if (!canManageChannel(req.user, request.streamer_id)) {
+             return res.status(403).json({ error: 'Only the channel owner or its mods can issue refunds' });
+         }
+-        const amount = mediaQueue.refund(request.id);
++        const amount = await mediaQueue.refund(request.id);
+         res.json({ refunded: amount, request: db.getMediaRequestById(request.id) });
+     } catch (err) {
+         res.status(400).json({ error: err.message || 'Failed to refund' });
+diff --git a/server/monetization/billing-actions.js b/server/monetization/billing-actions.js
+new file mode 100644
+index 0000000..8b486ff
+--- /dev/null
++++ b/server/monetization/billing-actions.js
+@@ -0,0 +1,515 @@
++'use strict';
++/**
++ * Live's money actions when BILLING_AUTHORITY=billing (roadmap Wave 8, ADR-012).
++ *
++ * Each function is the Billing-backed twin of what vibes.js / payments-routes.js do against Live's
++ * own columns, returning the SAME response shapes so the routes and the SPA do not change:
++ *
++ *   checkout (Buy Vibes)       → POST /intents {kind: purchase}           billing.intent.create
++ *   PayPal return              → POST /intents/:id/capture                billing.intent.create
++ *   donation / tip             → POST /transfers {kind: donation}         billing.transfer.create
++ *   Vibes-paid media request   → POST /transfers {kind: paid_interaction} billing.transfer.create
++ *   …and its refund            → POST /transfers/:id/refund               billing.transfer.create
++ *   cashout request            → POST /cashouts                           billing.cashout.request
++ *   recycle                    → POST /recycle                            billing.cashout.request
++ *   subscribe (Vibes)          → POST /subscriptions {source: credit}     billing.subscription.manage
++ *   subscribe (PowerChat/Stripe) → POST /intents {kind: subscription}     billing.intent.create
++ *   cancel                     → POST /subscriptions/:id/cancel           billing.subscription.manage
++ *   balance / history          → GET /balances/:s, /transactions          billing.balance.read
++ *   subscriber perks, "subscribed?" → GET /entitlements/:s?streamer=      billing.entitlement.check
++ *
++ * Idempotency: every POST's key is derived once per Live action and kept in billing_actions
++ * (live:<action>:<uuid>, or live:<action>:u<user>:c<client key> when the browser sent an
++ * Idempotency-Key, or a natural key such as live:media_refund:<request id>). A retry of the same
++ * action re-sends the same key and body, so Billing applies it at most once. billing_actions is a
++ * request journal, not a balance: amounts in it are what Live asked for, never what anyone holds.
++ */
++const crypto = require('crypto');
++const db = require('../db/database');
++const config = require('../config');
++const billing = require('./billing-client');
++const { BillingCallError, subjectFor, ref, api } = billing;
++
++let _tablesReady = false;
++function ensureTables() {
++    if (_tablesReady) return;
++    db.getDb().exec(`CREATE TABLE IF NOT EXISTS billing_actions (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        action TEXT NOT NULL,
++        idempotency_key TEXT NOT NULL UNIQUE,
++        live_user_id INTEGER,
++        live_ref TEXT,
++        method TEXT NOT NULL,
++        path TEXT NOT NULL,
++        request_json TEXT NOT NULL,
++        status TEXT NOT NULL DEFAULT 'pending',
++        http_status INTEGER,
++        billing_ref TEXT,
++        response_json TEXT,
++        error TEXT,
++        attempts INTEGER NOT NULL DEFAULT 0,
++        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
++        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
++    );
++    CREATE INDEX IF NOT EXISTS idx_billing_actions_ref ON billing_actions(action, live_ref);
++    CREATE INDEX IF NOT EXISTS idx_billing_actions_status ON billing_actions(status, created_at);`);
++    _tablesReady = true;
++}
++
++const base = () => config.baseUrl.replace(/\/+$/, '');
++
++/** The key for one Live action. */
++function actionKey(action, req) {
++    const client = req && typeof req.get === 'function' ? req.get('Idempotency-Key') : null;
++    if (client && /^[A-Za-z0-9._-]{8,100}$/.test(client) && req.user) return `live:${action}:u${req.user.id}:c${client}`;
++    return `live:${action}:${crypto.randomUUID()}`;
++}
++
++function refOf(out) {
++    if (!out) return null;
++    const x = out.transaction || out.cashout || out.intent || out.subscription;
++    return x && x.id ? String(x.id) : null;
++}
++
++/**
++ * Journal + call. Returns { out, replayed }. A key already done returns its stored answer without
++ * calling Billing; a key already used with another body is refused; anything else is (re)sent.
++ */
++async function perform({ action, method = 'POST', path, body, key, liveUserId = null, liveRef = null, trace }) {
++    ensureTables();
++    const d = db.getDb();
++    const requestJson = JSON.stringify(body || {});
++    const row = d.prepare('SELECT * FROM billing_actions WHERE idempotency_key = ?').get(key);
++    if (row) {
++        if (row.request_json !== requestJson) throw new BillingCallError('refused', { status: 422, code: 'idempotency.key_reused', detail: 'that request id was already used for a different request' });
++        if (row.status === 'done') return { out: JSON.parse(row.response_json || '{}'), replayed: true, actionId: row.id };
++    } else {
++        d.prepare(`INSERT OR IGNORE INTO billing_actions (action, idempotency_key, live_user_id, live_ref, method, path, request_json)
++            VALUES (?, ?, ?, ?, ?, ?, ?)`).run(action, key, liveUserId, liveRef, method, path, requestJson);
++    }
++    const id = d.prepare('SELECT id FROM billing_actions WHERE idempotency_key = ?').get(key).id;
++    d.prepare('UPDATE billing_actions SET attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(id);
++    try {
++        const out = await billing.request(method, path, { body, idempotencyKey: key, trace });
++        d.prepare(`UPDATE billing_actions SET status = 'done', http_status = 200, billing_ref = ?, response_json = ?, error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
++            .run(refOf(out), JSON.stringify(out), id);
++        return { out, replayed: !!out._replayed, actionId: id };
++    } catch (err) {
++        const status = err instanceof BillingCallError ? ({ unknown: 'unknown', refused: 'refused' }[err.kind] || 'failed') : 'failed';
++        d.prepare('UPDATE billing_actions SET status = ?, http_status = ?, error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
++            .run(status, err.status || null, `${err.code || err.kind || 'error'}: ${String(err.detail || err.message).slice(0, 300)}`, id);
++        if (status === 'unknown') console.warn(`[Billing] ${action} ${key}: outcome unknown (${err.detail || err.message}); resolve from /api/admin/money`);
++        throw err;
++    }
++}
++
++// ── Errors → Live's usual { error } shapes ───────────────────
++/**
++ * msgs: { insufficient: string | (details) => string, insufficientStatus, self, unavailable }.
++ * Returns { status, body } or null for errors that are not Billing's.
++ */
++function toLive(err, msgs = {}) {
++    if (!(err instanceof BillingCallError)) return null;
++    switch (err.kind) {
++        case 'no_subject':
++            return { status: 409, body: { error: err.detail, code: 'no_subject' } };
++        case 'unavailable':
++            return { status: 503, body: { error: msgs.unavailable || 'Billing is unavailable right now — nothing was charged. Please try again in a moment.', code: 'billing_unavailable', unavailable: true } };
++        case 'unknown':
++            return { status: 504, body: { error: 'Billing did not confirm this in time. Check your balance before trying again — it may have gone through.', code: 'billing_outcome_unknown' } };
++        case 'misconfigured':
++            return { status: 503, body: { error: 'Payments are unavailable right now (billing service configuration). Nothing was charged.', code: 'billing_misconfigured', unavailable: true } };
++        default: break;
++    }
++    // Billing counts Vibes in "bits"; people read Vibes.
++    const detail = String(err.detail || 'Request refused').replace(/\bbits\b/g, 'Vibes');
++    switch (err.code) {
++        case 'billing.insufficient_funds': {
++            const m = typeof msgs.insufficient === 'function' ? msgs.insufficient(err.details || {}) : (msgs.insufficient || 'Insufficient Vibes');
++            return { status: msgs.insufficientStatus || 400, body: { error: m, code: 'insufficient_funds' } };
++        }
++        case 'billing.self_dealing': return { status: 400, body: { error: msgs.self || 'You cannot send Vibes to yourself', code: 'self_dealing' } };
++        case 'billing.frozen': return { status: 503, body: { error: 'Payments, donations and cashouts are paused for maintenance. Nothing was charged — please try again later.', code: 'billing_frozen' } };
++        case 'billing.provider_disabled': return { status: 403, body: { error: 'Payments are not enabled', code: 'provider_disabled' } };
++        case 'billing.provider_error': return { status: 502, body: { error: 'Payment provider error. Try again.', code: 'provider_error' } };
++        case 'billing.invalid_subject': return { status: 409, body: { error: 'This account is not linked to an OpenVibe account yet — sign out and back in, then try again.', code: 'no_subject' } };
++        case 'idempotency.key_reused': return { status: 409, body: { error: 'That request id was already used for a different request.', code: 'idempotency_key_reused' } };
++        default: break;
++    }
++    if (/_not_found$/.test(String(err.code || ''))) return { status: 404, body: { error: detail, code: 'not_found' } };
++    return { status: err.status === 409 ? 409 : 400, body: { error: detail.charAt(0).toUpperCase() + detail.slice(1), code: String(err.code || 'refused').replace(/^billing\./, '') } };
++}
++
++/** Route helper: answers a Billing failure; returns false for anything else (the caller handles it). */
++function sendError(res, err, msgs) {
++    const r = toLive(err, msgs);
++    if (!r) return false;
++    res.status(r.status).json(r.body);
++    return true;
++}
++
++// ── Donations and paid interactions ──────────────────────────
++function normalizeMessage(message, max) {
++    if (message === undefined || message === null || message === '') return null;
++    const t = String(message).trim();
++    if (!t) return null;
++    if (t.length > max) throw new Error(`Text must be ${max} characters or fewer`);
++    return t;
++}
++
++const streamTarget = (streamId) => (streamId ? { service: 'live', type: 'stream', id: String(streamId) } : undefined);
++
++/** POST /api/funds/donate under Billing. Same result shape as vibes.donate() plus `balance`. */
++async function donate(req, { toUserId, streamId, amount, message, goalId = null }) {
++    const vibes = require('./vibes');
++    const amt = vibes.normalizeBucks(amount);
++    const msg = normalizeMessage(message, 300);
++    const from = await subjectFor(req.user.id);
++    const to = await subjectFor(toUserId, { role: 'recipient' });
++    const body = { from: ref(from), to: ref(to), amount: amt, kind: 'donation', ...(streamTarget(streamId) ? { target: streamTarget(streamId) } : {}), ...(msg ? { message: msg } : {}), on_behalf_of: ref(from) };
++    const { out, replayed } = await perform({ action: 'donation', path: '/transfers', body, key: actionKey('donation', req), liveUserId: req.user.id, liveRef: streamId ? `stream:${streamId}` : null, trace: req.headers });
++    // The goal bar is a Live display counter (not money); a replayed request must not advance it twice.
++    const goalResult = replayed ? null : vibes.applyDonationToGoal(toUserId, amt, goalId);
++    return {
++        success: true, amount: amt, transactionId: out.transaction ? out.transaction.id : null,
++        goal: goalResult ? goalResult.goal : null, goalReached: goalResult && goalResult.reached ? goalResult.goal : null,
++        balance: out.balance && Number.isFinite(out.balance.credit) ? out.balance.credit : null, replayed,
++    };
++}
++
++/** Media request paid in Vibes: a paid interaction to the streamer. Returns { actionId, transactionId }. */
++async function chargeMedia({ userId, streamerId, streamId, cost, label }) {
++    const from = await subjectFor(userId);
++    const to = await subjectFor(streamerId, { role: 'recipient' });
++    const body = { from: ref(from), to: ref(to), amount: cost, kind: 'paid_interaction', ...(streamTarget(streamId) ? { target: streamTarget(streamId) } : {}), message: String(label || 'Media request').slice(0, 500), on_behalf_of: ref(from) };
++    const { out, actionId } = await perform({ action: 'media_charge', path: '/transfers', body, key: `live:media_charge:${crypto.randomUUID()}`, liveUserId: userId });
++    return { actionId, transactionId: out.transaction ? out.transaction.id : null };
++}
++
++/** Tie a media charge to the request it paid for, so a refund can find the Billing transfer. */
++function linkMediaCharge(actionId, requestId) {
++    ensureTables();
++    db.getDb().prepare("UPDATE billing_actions SET live_ref = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND action = 'media_charge'").run(`media_request:${requestId}`, actionId);
++}
++
++/** Refund a Vibes-paid media request through Billing. Resolves the refunded amount, or 0. */
++async function refundMedia(request) {
++    ensureTables();
++    const charge = db.getDb().prepare("SELECT * FROM billing_actions WHERE action = 'media_charge' AND live_ref = ? AND status = 'done' ORDER BY id DESC LIMIT 1").get(`media_request:${request.id}`);
++    if (!charge || !charge.billing_ref) {
++        console.warn(`[MediaQueue] refund of request ${request.id} skipped: no Billing charge on record for it`);
++        return 0;
++    }
++    try {
++        await perform({
++            action: 'media_refund', path: `/transfers/${encodeURIComponent(charge.billing_ref)}/refund`,
++            body: { amount: request.cost, reason: `Refund: ${String(request.title || 'media request').slice(0, 200)}` },
++            key: `live:media_refund:${request.id}`, liveUserId: request.user_id, liveRef: `media_request:${request.id}`,
++        });
++        return request.cost;
++    } catch (err) {
++        console.warn(`[MediaQueue] Billing refund of request ${request.id} refused: ${err.code || err.kind || ''} ${err.detail || err.message}`);
++        return 0;
++    }
++}
++
++// ── Cashouts and recycling ───────────────────────────────────
++async function requestCashout(req, { amount, paypalEmail }) {
++    const vibes = require('./vibes');
++    const amt = vibes.normalizeBucks(amount);
++    const email = String(paypalEmail || '').trim();
++    if (!email) throw new Error('PayPal email required');
++    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw new Error('Invalid PayPal email');
++    const sid = await subjectFor(req.user.id);
++    const body = { subject: ref(sid), amount: amt, payout_method: { type: 'paypal', address: email }, on_behalf_of: ref(sid) };
++    const { out } = await perform({ action: 'cashout', path: '/cashouts', body, key: actionKey('cashout', req), liveUserId: req.user.id, trace: req.headers });
++    const c = out.cashout || {};
++    const holdMs = c.escrow_until ? Date.parse(c.escrow_until) - Date.now() : NaN;
++    return {
++        transaction_id: c.id, amount: c.amount_bits, usd_value: ((c.value_cents || 0) / 100).toFixed(2), status: 'escrow',
++        hold_days: Number.isFinite(holdMs) ? Math.max(0, Math.round(holdMs / 86_400_000)) : config.openvibeBucks.escrowDays,
++        escrow_until: c.escrow_until || null,
++    };
++}
++
++async function recycle(req, amount) {
++    const vibes = require('./vibes');
++    const amt = vibes.normalizeBucks(amount);
++    const sid = await subjectFor(req.user.id);
++    const { out } = await perform({ action: 'recycle', path: '/recycle', body: { subject: ref(sid), amount: amt, on_behalf_of: ref(sid) }, key: actionKey('recycle', req), liveUserId: req.user.id, trace: req.headers });
++    const b = out.balance || {};
++    return { success: true, amount: amt, balance: b.credit, cashout_balance: b.payable };
++}
++
++// ── Reads ────────────────────────────────────────────────────
++/** GET /api/funds/balance shape. Throws BillingCallError when Billing cannot answer. */
++async function balance(liveUserId, trace) {
++    const sid = await subjectFor(liveUserId);
++    const b = await api.balance(sid, { trace });
++    const per = Number(b.bits_per_usd) || 100;
++    const usd = (n) => (Math.round(Number(n) || 0) / per).toFixed(2);
++    return {
++        balance: b.credit, usd_value: usd(b.credit),
++        cashout_balance: b.payable, cashout_usd_value: usd(b.payable),
++        pending_payouts: b.pending_payouts, authority: 'billing',
++    };
++}
++
++const LIVE_TYPE = { cashout_request: 'cashout', cashout_denied: 'refund', cashout_paid: 'cashout_paid' };
++/** GET /api/funds/history rows in Live's transaction shape (the dashboard renders these). */
++async function history(liveUserId, limit = 50) {
++    const sid = await subjectFor(liveUserId);
++    const page = await api.transactions(sid, { limit: Math.min(200, Math.max(1, limit)) });
++    const txns = page.transactions || [];
++    const people = billing.liveUsersForSubjects(txns.flatMap((t) => [t.from_subject, t.to_subject]));
++    return txns.map((t) => {
++        const m = t.metadata || {};
++        const mine = (t.entries || []).filter((e) => e.account && e.account.owner === sid && e.account.currency === 'vibes-bits');
++        const amount = m.amount_bits ?? m.cost_bits ?? m.share_bits ?? m.bits ?? mine.reduce((a, e) => Math.max(a, Math.abs(e.amount)), 0);
++        const from = people.get(t.from_subject);
++        const to = people.get(t.to_subject);
++        return {
++            id: t.id, type: LIVE_TYPE[t.type] || t.type, status: t.status, amount, created_at: t.created_at,
++            message: m.message || null,
++            from_user_id: from ? from.id : (t.from_subject === sid ? liveUserId : null), to_user_id: to ? to.id : (t.to_subject === sid ? liveUserId : null),
++            from_username: from ? from.username : null, from_display: from ? from.display_name : null,
++            to_username: to ? to.username : null, to_display: to ? to.display_name : null,
++        };
++    });
++}
++
++// ── Checkout (Buy Vibes) ─────────────────────────────────────
++const PROVIDER = { crypto: 'nowpayments' };
++
++async function checkout(req, { provider, bucks }) {
++    const sid = await subjectFor(req.user.id);
++    const pc = provider === 'powerchat' ? require('../integrations/powerchat-checkout') : null;
++    if (pc && !pc.isAvailable()) return { status: 400, body: { error: 'PowerChat purchases are not available right now' } };
++    const body = {
++        provider: PROVIDER[provider] || provider, kind: 'purchase', subject: ref(sid), bits: bucks,
++        success_url: provider === 'paypal' ? `${base()}/api/payments/paypal/return` : `${base()}/?purchase=success`,
++        cancel_url: `${base()}/?purchase=cancel`, on_behalf_of: ref(sid),
++    };
++    const { out } = await perform({ action: 'checkout', path: '/intents', body, key: actionKey('checkout', req), liveUserId: req.user.id, trace: req.headers });
++    const intent = out.intent || {};
++    const amountUsd = (intent.amount_cents || 0) / 100;
++    if (pc) {
++        const link = await pc.buildBillingPurchaseLink(intent);
++        if (!link) return { status: 400, body: { error: 'PowerChat purchases are not available right now' } };
++        return {
++            status: 200,
++            body: {
++                url: link.url, powerchat: true, amountUsd, pinned: !!link.minted, expires_at: link.expiresAt || null,
++                note: `Complete the $${amountUsd.toFixed(2)} tip on PowerChat — your Vibes are credited automatically once it confirms.`,
++            },
++        };
++    }
++    if (!out.checkout_url) return { status: 502, body: { error: 'Payment provider error. Try again.' } };
++    return { status: 200, body: { url: out.checkout_url } };
++}
++
++/** PayPal sends the buyer back with ?token=<PayPal order id>: capture that intent through Billing. */
++async function paypalReturn(token) {
++    ensureTables();
++    const row = db.getDb().prepare(`SELECT * FROM billing_actions WHERE action IN ('checkout', 'subscribe_intent') AND status = 'done'
++        AND json_extract(response_json, '$.intent.provider') = 'paypal' AND json_extract(response_json, '$.intent.provider_ref') = ? ORDER BY id DESC LIMIT 1`).get(String(token || ''));
++    if (!row) return false;
++    const intentId = JSON.parse(row.response_json).intent.id;
++    const { out } = await perform({ action: 'paypal_capture', path: `/intents/${encodeURIComponent(intentId)}/capture`, body: {}, key: `live:paypal_capture:${intentId}`, liveUserId: row.live_user_id });
++    return !!(out.intent && out.intent.status === 'settled');
++}
++
++// ── Subscriptions and entitlements ───────────────────────────
++function viewerOrNull(fn) { return fn().catch((e) => { if (e instanceof BillingCallError && e.kind === 'no_subject') return null; throw e; }); }
++
++async function subscribe(req, { streamer, provider, autoRenewRaw }) {
++    const subscriber = await subjectFor(req.user.id);
++    const to = await subjectFor(streamer.id, { role: 'recipient' });
++    const ent = await api.entitlement(subscriber, to, { trace: req.headers });
++    if (ent && ent.active) return { status: 409, body: { error: 'Already subscribed' } };
++
++    if (provider === 'bucks') {
++        const autoRenew = autoRenewRaw === undefined ? true : !!autoRenewRaw;
++        const body = { subscriber: ref(subscriber), streamer: ref(to), source: 'credit', auto_renew: autoRenew, on_behalf_of: ref(subscriber) };
++        const { out, replayed } = await perform({ action: 'subscribe', path: '/subscriptions', body, key: actionKey('subscribe', req), liveUserId: req.user.id, liveRef: `streamer:${streamer.id}`, trace: req.headers });
++        const sub = out.subscription || {};
++        if (!replayed) {
++            // Sub alert on the streamer's PowerChat overlay, keyed by the Billing transaction.
++            try {
++                require('../integrations/powerchat-platform').forwardSubscription(streamer.id, {
++                    subscriberName: req.user.display_name || req.user.username || 'Someone',
++                    externalId: `sub-billing:${out.transaction ? out.transaction.id : sub.id}`, tier: '1',
++                    isResub: !!(out.transaction && out.transaction.metadata && out.transaction.metadata.renewal),
++                });
++            } catch { /* non-critical */ }
++        }
++        invalidateEntitlement(req.user.id, streamer.id);
++        return { status: 200, body: { ok: true, subscription: { streamer: streamer.username, current_period_end: sub.current_period_end, auto_renew: !!sub.auto_renew } } };
++    }
++
++    const viaPowerchat = provider === 'powerchat' || provider === 'powerchat_site';
++    if (viaPowerchat) {
++        const checkout = require('../integrations/powerchat-checkout');
++        const routes = checkout.subscribeRoutes(streamer.id);
++        const wantSite = provider === 'powerchat_site' || !routes.direct;
++        if (wantSite && !routes.site) return { status: 400, body: { error: 'PowerChat payments are not available right now' } };
++        const body = { provider: 'powerchat', kind: 'subscription', subject: ref(subscriber), streamer: ref(to), route: wantSite ? 'site' : 'direct', auto_renew: !!autoRenewRaw, on_behalf_of: ref(subscriber) };
++        const { out } = await perform({ action: 'subscribe_intent', path: '/intents', body, key: actionKey('subscribe_intent', req), liveUserId: req.user.id, liveRef: `streamer:${streamer.id}`, trace: req.headers });
++        const intent = out.intent || {};
++        const link = await checkout.buildBillingSubscribeLink(intent, streamer.id);
++        if (!link) return { status: 400, body: { error: 'PowerChat payments are not available right now' } };
++        const totalUsd = (intent.amount_cents || 0) / 100;
++        const feeUsd = (intent.fee_cents || 0) / 100;
++        return {
++            status: 200,
++            body: {
++                url: link.url, powerchat: true, route: link.mode, amountUsd: totalUsd, feeUsd, pinned: !!link.minted, expires_at: link.expiresAt || null,
++                note: link.mode === 'direct'
++                    ? `Tip $${totalUsd.toFixed(2)} on ${streamer.display_name || streamer.username}'s PowerChat — your subscription activates automatically once the tip confirms.`
++                    : `Tip $${totalUsd.toFixed(2)} on OpenVibe's PowerChat (includes a $${feeUsd.toFixed(2)} platform fee) — your subscription activates automatically once the tip confirms.`,
++            },
++        };
++    }
++
++    if (provider === 'stripe') {
++        const body = {
++            provider, kind: 'subscription', subject: ref(subscriber), streamer: ref(to), auto_renew: true,
++            success_url: `${base()}/@${streamer.username}?sub=success`,
++            cancel_url: `${base()}/@${streamer.username}?sub=cancel`, on_behalf_of: ref(subscriber),
++        };
++        const { out } = await perform({ action: 'subscribe_intent', path: '/intents', body, key: actionKey('subscribe_intent', req), liveUserId: req.user.id, liveRef: `streamer:${streamer.id}`, trace: req.headers });
++        if (!out.checkout_url) return { status: 502, body: { error: 'Payment provider error. Try again.' } };
++        return { status: 200, body: { url: out.checkout_url } };
++    }
++    return { status: 400, body: { error: 'Subscriptions support Stripe or Vibes' } };
++}
++
++function presentSub(s, people) {
++    const st = people.get(s.streamer && s.streamer.id);
++    return {
++        id: s.id, streamer_id: st ? st.id : null, streamer_username: st ? st.username : null,
++        streamer_display: st ? st.display_name : null, streamer_avatar: st ? st.avatar_url : null,
++        tier: s.tier, provider: s.provider, status: s.status, auto_renew: s.auto_renew ? 1 : 0,
++        cancel_at_period_end: s.cancel_at_period_end ? 1 : 0, price_cents: s.price_cents,
++        current_period_end: s.current_period_end, started_at: s.created_at,
++    };
++}
++
++async function mySubscriptions(liveUserId) {
++    const sid = await subjectFor(liveUserId);
++    const out = await api.listSubscriptions({ subscriber: sid });
++    const subs = out.subscriptions || [];
++    const people = billing.liveUsersForSubjects(subs.map((s) => s.streamer && s.streamer.id));
++    return subs.map((s) => presentSub(s, people));
++}
++
++/** { subscribed, subscriberCount } for the channel page. */
++async function channelState(streamer, viewer) {
++    const to = await viewerOrNull(() => subjectFor(streamer.id, { role: 'recipient' }));
++    if (!to) return { subscribed: false, subscriberCount: 0 };
++    const me = viewer ? await viewerOrNull(() => subjectFor(viewer.id)) : null;
++    const [ent, list] = await Promise.all([
++        me ? api.entitlement(me, to) : Promise.resolve(null),
++        api.listSubscriptions({ streamer: to, status: 'active' }),
++    ]);
++    const now = Date.now();
++    const count = (list.subscriptions || []).filter((s) => !s.current_period_end || Date.parse(s.current_period_end) > now).length;
++    return { subscribed: !!(ent && ent.active), subscriberCount: count };
++}
++
++async function cancelSubscription(req, { id, streamerId }) {
++    const sid = await subjectFor(req.user.id);
++    const out = await api.listSubscriptions({ subscriber: sid }, { trace: req.headers });
++    const subs = (out.subscriptions || []).filter((s) => s.subscriber && s.subscriber.id === sid);
++    let sub = subs.find((s) => String(s.id) === String(id));
++    if (!sub && streamerId) {
++        const st = await viewerOrNull(() => subjectFor(streamerId, { role: 'recipient' }));
++        sub = st ? subs.find((s) => s.streamer && s.streamer.id === st && s.status === 'active') : null;
++    }
++    if (!sub) return { status: 404, body: { error: 'Subscription not found' } };
++    if (sub.status !== 'active' || sub.cancel_at_period_end) return { status: 200, body: { ok: true } };
++    await perform({
++        action: 'sub_cancel', path: `/subscriptions/${encodeURIComponent(sub.id)}/cancel`, body: { on_behalf_of: ref(sid) },
++        key: `live:sub_cancel:${sub.id}:${sub.current_period_end || 'open'}`, liveUserId: req.user.id, trace: req.headers,
++    });
++    return { status: 200, body: { ok: true } };
++}
++
++// Subscriber perks (the sub badge sent to PowerChat's overlay, the AI's "subscriber" flag) are read
++// synchronously on hot paths, so they come from a short-lived cache refreshed from Billing's
++// entitlement check. The cache is a display aid, not authorization: an entry is trusted for 60 s,
++// served stale at most 10 min while a refresh runs, and unknown means "not a subscriber".
++const ENT_FRESH_MS = 60 * 1000;
++const ENT_MAX_STALE_MS = 10 * 60 * 1000;
++const _ent = new Map();       // "sub:streamer" -> { active, at }
++const _entInflight = new Map();
++function invalidateEntitlement(subscriberId, streamerId) { _ent.delete(`${subscriberId}:${streamerId}`); }
++function refreshEntitlement(subscriberId, streamerId) {
++    const k = `${subscriberId}:${streamerId}`;
++    if (_entInflight.has(k)) return _entInflight.get(k);
++    const p = (async () => {
++        try {
++            const [a, b] = await Promise.all([subjectFor(subscriberId), subjectFor(streamerId, { role: 'recipient' })]);
++            const e = await api.entitlement(a, b);
++            _ent.set(k, { active: !!(e && e.active), at: Date.now() });
++        } catch (err) {
++            if (err instanceof BillingCallError && err.kind === 'no_subject') _ent.set(k, { active: false, at: Date.now() });
++        } finally { _entInflight.delete(k); }
++        return _ent.has(k) ? _ent.get(k).active : false;
++    })();
++    _entInflight.set(k, p);
++    return p;
++}
++function isSubscriberCached(subscriberId, streamerId) {
++    if (!subscriberId || !streamerId) return false;
++    const hit = _ent.get(`${subscriberId}:${streamerId}`);
++    const age = hit ? Date.now() - hit.at : Infinity;
++    if (age >= ENT_FRESH_MS) refreshEntitlement(subscriberId, streamerId).catch(() => {});
++    return !!(hit && age < ENT_MAX_STALE_MS && hit.active);
++}
++
++// ── Operator view ────────────────────────────────────────────
++async function adminStatus() {
++    ensureTables();
++    const d = db.getDb();
++    const counts = Object.fromEntries(d.prepare('SELECT status, COUNT(*) AS n FROM billing_actions GROUP BY status').all().map((r) => [r.status, r.n]));
++    const attention = d.prepare("SELECT id, action, idempotency_key, live_user_id, live_ref, status, error, attempts, created_at, updated_at FROM billing_actions WHERE status IN ('unknown', 'pending') ORDER BY id DESC LIMIT 50").all();
++    let reachable = null;
++    try { reachable = (await api.ready()).ok; } catch { reachable = false; }
++    let rates = null;
++    try {
++        const r = await api.rates();
++        const pay = require('./payments');
++        const live = {
++            bits_per_usd: pay._num('bucks_per_usd', 100), min_purchase_bits: pay._num('bucks_min_purchase_bucks', 100),
++            sub_price_cents: Math.round(pay._num('sub_price_usd', 4.99) * 100), streamer_share_pct: pay._num('sub_streamer_share_pct', 70),
++            site_route_fee_pct: pay._num('sub_site_route_fee_pct', 10), min_cashout_bits: config.openvibeBucks.minCashoutBucks, escrow_days: config.openvibeBucks.escrowDays,
++        };
++        const billingSide = {
++            bits_per_usd: r.bits_per_usd, min_purchase_bits: r.min_purchase_bits, sub_price_cents: r.subscription && r.subscription.price_cents,
++            streamer_share_pct: r.subscription && r.subscription.streamer_share_pct, site_route_fee_pct: r.subscription && r.subscription.site_route_fee_pct,
++            min_cashout_bits: r.cashout && r.cashout.min_bits, escrow_days: r.cashout && r.cashout.escrow_days,
++        };
++        const drift = Object.keys(live).filter((k) => Number(live[k]) !== Number(billingSide[k])).map((k) => ({ rate: k, live: live[k], billing: billingSide[k] }));
++        rates = { providers: r.providers || null, drift };
++    } catch (err) { rates = { error: err.detail || err.message }; }
++    return { internal_url: billing.baseUrl(), webhook_url: `${billing.publicUrl()}/webhooks/powerchat`, reachable, rates, actions: { counts, attention } };
++}
++
++/** Owner: re-send an action whose outcome is unknown (same key, same body) to learn it. */
++async function resolveAction(id) {
++    ensureTables();
++    const row = db.getDb().prepare('SELECT * FROM billing_actions WHERE id = ?').get(id);
++    if (!row) return { status: 404, body: { error: 'No such action' } };
++    if (row.status === 'done') return { status: 200, body: { action: row.action, status: 'done', billing_ref: row.billing_ref } };
++    const { out } = await perform({ action: row.action, method: row.method, path: row.path, body: JSON.parse(row.request_json), key: row.idempotency_key, liveUserId: row.live_user_id, liveRef: row.live_ref });
++    return { status: 200, body: { action: row.action, status: 'done', billing_ref: refOf(out) } };
++}
++
++module.exports = {
++    ensureTables, actionKey, perform, toLive, sendError,
++    donate, chargeMedia, linkMediaCharge, refundMedia, requestCashout, recycle, balance, history,
++    checkout, paypalReturn, subscribe, mySubscriptions, channelState, cancelSubscription,
++    isSubscriberCached, refreshEntitlement, invalidateEntitlement, adminStatus, resolveAction,
++    _reset() { _ent.clear(); _entInflight.clear(); _tablesReady = false; },
++};
+diff --git a/server/monetization/billing-client.js b/server/monetization/billing-client.js
+new file mode 100644
+index 0000000..2d678d5
+--- /dev/null
++++ b/server/monetization/billing-client.js
+@@ -0,0 +1,202 @@
++'use strict';
++/**
++ * Live as a client of OpenVibe.Billing's /api/v1 (roadmap Wave 8, ADR-012).
++ *
++ * - Service token for audience `openvibe.billing` from OpenVibe.Network (network-principal.js,
++ *   client `live`). Each route on Billing checks one capability; Live needs the grants
++ *   billing.intent.create, billing.transfer.create, billing.balance.read, billing.cashout.request,
++ *   billing.subscription.manage and billing.entitlement.check. A 401 fetches a fresh token once.
++ * - Every POST carries an Idempotency-Key that the caller derives from the Live action
++ *   (billing-actions.js keeps them in billing_actions and re-sends the same key on a retry).
++ * - Timeouts on every call. Failures are thrown as BillingCallError with `kind`:
++ *     refused      Billing answered 4xx (problem+json) — nothing moved
++ *     unavailable  never reached Billing, or Billing answered 5xx before acting — nothing moved
++ *     unknown      the request may have reached Billing but no answer came back (timeout, reset)
++ *   There is deliberately NO fallback to Live's own columns: when Billing is the authority and it
++ *   is down, money actions fail and balance reads say "unavailable".
++ * - People are canonical subjects (usr_…). subjectFor() uses identity-sync's subjectOf() (the
++ *   subject Network put in the person's token) and then Network's identity map; a Live user with
++ *   neither cannot move money. The integer Live id is never sent to Billing.
++ */
++const { http } = require('openvibe-contracts');
++const principal = require('../net/network-principal');
++
++const AUDIENCE = 'openvibe.billing';
++const SUBJECT_RE = /^usr_[0-9A-HJKMNP-TV-Z]{26}$/;
++const KEY_RE = /^[A-Za-z0-9._:-]{8,200}$/;
++
++const baseUrl = () => (process.env.OV_BILLING_INTERNAL_URL || 'http://127.0.0.1:4600').replace(/\/+$/, '');
++const publicUrl = () => (process.env.OV_BILLING_PUBLIC_URL || 'https://billing.openvibe.network').replace(/\/+$/, '');
++const timeoutMs = (write) => {
++    const n = parseInt(process.env.OV_BILLING_TIMEOUT_MS || '', 10);
++    return Number.isFinite(n) && n > 0 ? n : (write ? 8000 : 4000);
++};
++
++class BillingCallError extends Error {
++    constructor(kind, { status = null, code = null, detail = null, details = null, cause = null } = {}) {
++        super(detail || code || kind);
++        this.name = 'BillingCallError';
++        this.kind = kind;          // refused | unavailable | unknown | no_subject | misconfigured
++        this.status = status;      // Billing's HTTP status, when there was one
++        this.code = code;          // Billing's problem code (billing.insufficient_funds, …)
++        this.detail = detail;
++        this.details = details;    // problem `details` (e.g. { available, required })
++        if (cause) this.cause = cause;
++    }
++}
++
++// ── Transport ────────────────────────────────────────────────
++function connectionNeverMade(err) {
++    const c = (err && (err.code || (err.cause && err.cause.code))) || '';
++    return ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'ERR_INVALID_URL'].includes(c);
++}
++
++/**
++ * One call. opts: { body, idempotencyKey, trace (incoming request headers, for traceparent) }.
++ * Resolves the parsed JSON body of a 2xx (plus `_replayed` when Billing replayed the key).
++ */
++async function request(method, path, { body, idempotencyKey, trace, retried = false } = {}) {
++    const write = method !== 'GET';
++    if (write && !KEY_RE.test(String(idempotencyKey || ''))) throw new Error(`billing-client: ${method} ${path} needs a valid Idempotency-Key`);
++    let auth;
++    try { auth = await principal.serviceHeaders(AUDIENCE); }
++    catch (err) {
++        console.warn(`[Billing] no service token for ${AUDIENCE}: ${err.message}`);
++        throw new BillingCallError('unavailable', { code: 'token.unavailable', detail: `no service token: ${err.message}`, cause: err });
++    }
++    const headers = { Accept: 'application/json', ...auth, ...http.outboundHeaders(http.requestContext(trace || {})) };
++    if (write) headers['Idempotency-Key'] = idempotencyKey;
++    let payload;
++    if (body !== undefined) { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
++    let res;
++    try {
++        res = await fetch(`${baseUrl()}/api/v1${path}`, { method, headers, body: payload, signal: AbortSignal.timeout(timeoutMs(write)) });
++    } catch (err) {
++        // Reads are always safe to call unanswered; a write that may have been sent is "unknown".
++        const kind = !write || connectionNeverMade(err) ? 'unavailable' : 'unknown';
++        throw new BillingCallError(kind, { detail: `${method} ${path}: ${err.name === 'TimeoutError' ? 'timed out' : err.message}`, cause: err });
++    }
++    const text = await res.text().catch(() => '');
++    let json = null;
++    try { json = text ? JSON.parse(text) : {}; } catch { /* not JSON */ }
++    if (res.status === 401 && !retried) {           // token rotated/expired under us: once more with a fresh one
++        principal.invalidate(AUDIENCE);
++        return request(method, path, { body, idempotencyKey, trace, retried: true });
++    }
++    if (res.ok) {
++        const out = json || {};
++        if (res.headers.get('idempotent-replayed') === 'true') Object.defineProperty(out, '_replayed', { value: true });
++        return out;
++    }
++    const code = (json && json.code) || null;
++    const detail = (json && (json.detail || json.error)) || `${res.status} ${res.statusText}`;
++    if (res.status === 401 || res.status === 403) {
++        console.error(`[Billing] ${method} ${path} refused Live's service token (${res.status} ${code || ''}): ${detail} — check Live's grants on audience ${AUDIENCE}`);
++        throw new BillingCallError('misconfigured', { status: res.status, code, detail });
++    }
++    if (res.status === 503 && code === 'billing.frozen') throw new BillingCallError('refused', { status: 503, code, detail });
++    if (res.status >= 500) {
++        // 502/503: Billing (or its readiness gate) refused before acting. A 500 or 504 on a write
++        // may have come after the effect committed, so its outcome is unknown until re-sent.
++        const kind = write && (res.status === 500 || res.status === 504) ? 'unknown' : 'unavailable';
++        throw new BillingCallError(kind, { status: res.status, code, detail });
++    }
++    throw new BillingCallError('refused', { status: res.status, code, detail, details: json && json.details });
++}
++
++// ── Subjects ─────────────────────────────────────────────────
++const _subjects = new Map();   // live user id -> usr_ id (only hits are cached)
++const _owners = new Map();     // usr_ id -> live user id
++
++async function resolveViaNetwork(liveUserId) {
++    const net = (process.env.OV_NETWORK_INTERNAL_URL || 'http://127.0.0.1:4000').replace(/\/+$/, '');
++    const res = await fetch(`${net}/internal/identity/resolve-batch`, {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json', ...(await principal.serviceHeaders('openvibe.network')) },
++        body: JSON.stringify({ system: 'live', type: 'user', ids: [String(liveUserId)] }),
++        signal: AbortSignal.timeout(5000),
++    });
++    if (!res.ok) throw new Error(`resolve-batch ${res.status}`);
++    const out = await res.json();
++    const hit = out && out.results && out.results[String(liveUserId)];
++    return hit && hit.subject ? hit.subject.id : null;
++}
++
++/**
++ * Canonical subject of a Live user, or a BillingCallError('no_subject'). `role` only shapes the
++ * message ('self' = the person acting, 'recipient' = the streamer on the other side).
++ */
++async function subjectFor(liveUserId, { role = 'self' } = {}) {
++    const id = Number(liveUserId);
++    if (!Number.isInteger(id) || id <= 0) throw new BillingCallError('no_subject', { detail: 'no account' });
++    if (_subjects.has(id)) return _subjects.get(id);
++    let sid = null;
++    try { sid = require('../auth/identity-sync').subjectOf(id); } catch { /* */ }
++    if (!sid) {
++        try { sid = await resolveViaNetwork(id); }
++        catch (err) { console.warn(`[Billing] subject lookup for live user ${id} failed: ${err.message}`); }
++    }
++    if (!SUBJECT_RE.test(String(sid || ''))) {
++        throw new BillingCallError('no_subject', {
++            detail: role === 'recipient'
++                ? 'This streamer\'s account is not linked to an OpenVibe account yet, so it cannot receive Vibes right now.'
++                : 'Your account is not linked to an OpenVibe account yet — sign out and back in, then try again.',
++        });
++    }
++    _subjects.set(id, sid);
++    _owners.set(sid, id);
++    return sid;
++}
++
++/** Live users for a list of subjects (for history/subscription displays). Map usr_ -> user row. */
++function liveUsersForSubjects(subjects) {
++    const out = new Map();
++    const want = [...new Set((subjects || []).filter((s) => SUBJECT_RE.test(String(s || ''))))];
++    if (!want.length) return out;
++    const db = require('../db/database');
++    const rows = db.getDb().prepare(`SELECT l.subject_id, u.id, u.username, u.display_name, u.avatar_url FROM linked_accounts l JOIN users u ON u.id = l.user_id
++        WHERE l.service = 'network' AND l.subject_id IN (${want.map(() => '?').join(',')})`).all(...want);
++    for (const r of rows) out.set(r.subject_id, r);
++    for (const s of want) {
++        if (out.has(s) || !_owners.has(s)) continue;
++        const u = db.getUserById(_owners.get(s));
++        if (u) out.set(s, { subject_id: s, id: u.id, username: u.username, display_name: u.display_name, avatar_url: u.avatar_url });
++    }
++    return out;
++}
++
++const ref = (sid) => ({ type: 'user', id: sid });
++
++// ── Typed calls (one per Billing operation Live uses) ───────
++const enc = encodeURIComponent;
++const api = {
++    ready: async () => {
++        const res = await fetch(`${baseUrl()}/api/ready`, { signal: AbortSignal.timeout(3000) });
++        return { ok: res.ok, status: res.status };
++    },
++    rates: (o) => request('GET', '/rates', o),
++    /** billing.intent.create */
++    createIntent: (body, o) => request('POST', '/intents', { ...o, body }),
++    getIntent: (id, o) => request('GET', `/intents/${enc(id)}`, o),
++    captureIntent: (id, o) => request('POST', `/intents/${enc(id)}/capture`, { ...o, body: {} }),
++    /** billing.transfer.create */
++    transfer: (body, o) => request('POST', '/transfers', { ...o, body }),
++    refundTransfer: (txnId, body, o) => request('POST', `/transfers/${enc(txnId)}/refund`, { ...o, body }),
++    /** billing.cashout.request */
++    recycle: (body, o) => request('POST', '/recycle', { ...o, body }),
++    requestCashout: (body, o) => request('POST', '/cashouts', { ...o, body }),
++    /** billing.subscription.manage */
++    subscribe: (body, o) => request('POST', '/subscriptions', { ...o, body }),
++    cancelSubscription: (id, body, o) => request('POST', `/subscriptions/${enc(id)}/cancel`, { ...o, body }),
++    /** billing.entitlement.check */
++    listSubscriptions: (q, o) => request('GET', `/subscriptions?${new URLSearchParams(Object.entries(q).filter(([, v]) => v != null))}`, o),
++    entitlement: (subject, streamer, o) => request('GET', `/entitlements/${enc(subject)}?streamer=${enc(streamer)}`, o),
++    /** billing.balance.read */
++    balance: (subject, o) => request('GET', `/balances/${enc(subject)}`, o),
++    transactions: (subject, { limit = 50, cursor } = {}, o) => request('GET', `/transactions?${new URLSearchParams({ subject, limit: String(limit), ...(cursor ? { cursor } : {}) })}`, o),
++};
++
++module.exports = {
++    AUDIENCE, BillingCallError, request, subjectFor, liveUsersForSubjects, ref, api, baseUrl, publicUrl, SUBJECT_RE, KEY_RE,
++    _reset() { _subjects.clear(); _owners.clear(); },
++};
+diff --git a/server/monetization/money-authority.js b/server/monetization/money-authority.js
+new file mode 100644
+index 0000000..2e43817
+--- /dev/null
++++ b/server/monetization/money-authority.js
+@@ -0,0 +1,113 @@
++'use strict';
++/**
++ * Who holds the money, and whether it may move (roadmap Wave 8, ADR-012).
++ *
++ * BILLING_AUTHORITY is read here and nowhere else:
++ *   live     (default) Live's own columns and tables, exactly as before the Billing cutover.
++ *   billing  OpenVibe.Billing is the ledger. Live asks it for every money action (billing-client.js,
++ *            billing-actions.js) and never writes users.openvibe_bucks_balance /
++ *            openvibe_bucks_cashout_balance, transactions, payment_orders or subscriptions — those
++ *            become legacy, read-only (the database-level tripwire below enforces it).
++ *   anything else is a misconfiguration: every Live money write is refused, never guessed.
++ *
++ * money_writes_frozen (site setting, owner-only, both modes) is runbook step 3 of the cutover: it
++ * refuses every money action a person or an operator starts on Live — checkouts, donations and
++ * tips, Vibes-paid media requests and their refunds, cashout requests/approvals/denials, recycling,
++ * subscribing, cancelling, and the renewal sweep. Reads keep working. Provider confirmations of
++ * checkouts that were started BEFORE the freeze (PowerChat/Stripe/PayPal/CCBill/crypto webhooks,
++ * the PayPal return, the PowerChat paid-messages reconciler) still settle in `live` mode: that
++ * money has already been taken by the provider, and refusing it would drop a real payment. The
++ * runbook waits for them before the final snapshot.
++ */
++
++const MODES = ['live', 'billing'];
++
++/** 'live' | 'billing' | 'invalid' — read on every call so tests and the admin page see the truth. */
++function authority() {
++    const raw = process.env.BILLING_AUTHORITY;
++    if (raw === undefined || String(raw).trim() === '') return 'live';
++    const v = String(raw).trim().toLowerCase();
++    return MODES.includes(v) ? v : 'invalid';
++}
++const onBilling = () => authority() === 'billing';
++
++class LedgerReadOnlyError extends Error {
++    constructor(what, mode) {
++        super(mode === 'billing'
++            ? `Live's money columns are read-only (BILLING_AUTHORITY=billing): ${what} must go through OpenVibe.Billing`
++            : `BILLING_AUTHORITY=${JSON.stringify(process.env.BILLING_AUTHORITY)} is not 'live' or 'billing': ${what} refused`);
++        this.name = 'LedgerReadOnlyError';
++        this.status = 503;
++        this.code = 'ledger_read_only';
++    }
++}
++
++/** Tripwire for database.js: a Live money column/table write outside `live` mode throws. */
++function assertLiveLedger(what) {
++    const mode = authority();
++    if (mode !== 'live') throw new LedgerReadOnlyError(what, mode);
++}
++
++// ── Freeze (money_writes_frozen) ─────────────────────────────
++const db = () => require('../db/database');   // lazy: database.js requires this module
++
++function isFrozen() {
++    try {
++        const v = db().getSetting('money_writes_frozen');
++        return v === true || v === 'true' || v === 1 || v === '1';
++    } catch { return false; }
++}
++
++function freezeState() {
++    let meta = null;
++    try { meta = db().getSetting('money_writes_frozen_meta'); } catch { /* */ }
++    if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
++    const frozen = isFrozen();
++    return { frozen, reason: frozen && meta ? meta.reason || null : null, since: frozen && meta ? meta.at || null : null, by: frozen && meta ? meta.by || null : null };
++}
++
++function setFrozen(on, { reason = null, by = null } = {}) {
++    const d = db();
++    d.getDb().transaction(() => {
++        d.setSetting('money_writes_frozen', on ? 'true' : 'false');
++        d.setSetting('money_writes_frozen_meta', JSON.stringify(on ? { reason: reason ? String(reason).slice(0, 300) : null, by, at: new Date().toISOString() } : {}));
++    })();
++    console.warn(`[Money] Live money writes ${on ? 'FROZEN' : 'unfrozen'} by ${by || 'unknown'}${reason ? ` (${reason})` : ''}`);
++    return freezeState();
++}
++
++/**
++ * Why a money write must be refused right now, or null. The shape matches Live's usual
++ * `{ error }` bodies plus a stable `code`.
++ */
++function writeRefusal() {
++    const mode = authority();
++    if (mode === 'invalid') {
++        return { status: 503, body: { error: 'Payments are unavailable: the server\'s billing configuration is invalid.', code: 'billing_misconfigured' } };
++    }
++    if (isFrozen()) {
++        const st = freezeState();
++        return { status: 503, body: { error: 'Payments, donations and cashouts are paused for maintenance. Nothing was charged — please try again later.', code: 'money_writes_frozen', reason: st.reason || undefined } };
++    }
++    return null;
++}
++
++/** Express middleware for every route that starts a money action. */
++function guardWrite(req, res, next) {
++    const r = writeRefusal();
++    if (r) return res.status(r.status).json(r.body);
++    return next();
++}
++
++/** For code paths that are not routes (media requests, sweeps): throws the refusal as an Error. */
++function assertWritable() {
++    const r = writeRefusal();
++    if (r) {
++        const e = new Error(r.body.error);
++        e.status = r.status;
++        e.code = r.body.code;
++        throw e;
++    }
++}
++
++module.exports = { authority, onBilling, assertLiveLedger, LedgerReadOnlyError, isFrozen, freezeState, setFrozen, writeRefusal, guardWrite, assertWritable, MODES };
+diff --git a/server/monetization/payments-routes.js b/server/monetization/payments-routes.js
+index 951f667..4cb4502 100644
+--- a/server/monetization/payments-routes.js
++++ b/server/monetization/payments-routes.js
+@@ -11,6 +11,23 @@ const config = require('../config');
+ const { requireAuth, optionalAuth } = require('../auth/auth');
+ const pay = require('./payments');
+ const openvibeBucks = require('./vibes');
++// BILLING_AUTHORITY=billing: checkouts, subscriptions and entitlements go to OpenVibe.Billing and
++// the provider webhooks below answer 410 (they land in Billing). money_writes_frozen refuses new
++// money actions in both modes; provider confirmations of checkouts started before a freeze still
++// settle in `live` mode (see money-authority.js).
++const money = require('./money-authority');
++const billingActions = require('./billing-actions');
++const billingClient = require('./billing-client');
++const BILLING_WEBHOOK = { stripe: 'stripe', paypal: 'paypal', ccbill: 'ccbill', crypto: 'nowpayments' };
++function webhookMovedToBilling(provider) {
++    return (req, res, next) => {
++        if (!money.onBilling()) return next();
++        return res.status(410).json({
++            error: 'Payment webhooks are received by OpenVibe.Billing now.',
++            webhook_url: `${billingClient.publicUrl()}/webhooks/${BILLING_WEBHOOK[provider]}`,
++        });
++    };
++}
+ 
+ const router = express.Router();
+ function base() { return config.baseUrl.replace(/\/+$/, ''); }
+@@ -21,7 +38,7 @@ router.get('/config', (req, res) => {
+ });
+ 
+ // ── Buy Vibes ───────────────────────────────────────────
+-router.post('/bucks/checkout', requireAuth, async (req, res) => {
++router.post('/bucks/checkout', requireAuth, money.guardWrite, async (req, res) => {
+     const provider = String(req.body.provider || '').toLowerCase();
+     // PowerChat purchases run on their own enablement (powerchat_enabled + site tips
+     // account) — the master payments switch only gates the card/PayPal/crypto rails.
+@@ -34,6 +51,18 @@ router.post('/bucks/checkout', requireAuth, async (req, res) => {
+     if (bucks < minBucks) return res.status(400).json({ error: `Minimum purchase is ${minBucks.toLocaleString()} Vibes` });
+     if (bucks > 1_000_000) return res.status(400).json({ error: 'Amount too large' });
+ 
++    if (money.onBilling()) {
++        if (!['stripe', 'paypal', 'ccbill', 'crypto', 'powerchat'].includes(provider)) return res.status(400).json({ error: 'Unknown payment provider' });
++        try {
++            const r = await billingActions.checkout(req, { provider, bucks });
++            return res.status(r.status).json(r.body);
++        } catch (err) {
++            if (billingActions.sendError(res, err)) return;
++            console.error('[Payments] billing checkout error:', err.message);
++            return res.status(502).json({ error: 'Payment provider error. Try again.' });
++        }
++    }
++
+     const amountUsd = openvibeBucks.priceUsdForBucks(bucks);
+     const order = db.createPaymentOrder({
+         user_id: req.user.id, provider, kind: 'bucks',
+@@ -80,6 +109,11 @@ router.post('/bucks/checkout', requireAuth, async (req, res) => {
+ 
+ // PayPal buyer returns here after approving — capture + fulfill.
+ router.get('/paypal/return', async (req, res) => {
++    if (money.onBilling()) {
++        // Billing's PayPal intents come back with ?token=<PayPal order id>; Billing captures + settles.
++        try { return res.redirect(await billingActions.paypalReturn(req.query.token) ? '/?purchase=success' : '/?purchase=error'); }
++        catch (err) { console.error('[Payments] billing paypal return:', err.detail || err.message); return res.redirect('/?purchase=error'); }
++    }
+     try {
+         const order = db.getPaymentOrderById(parseInt(req.query.order, 10));
+         if (!order || order.provider !== 'paypal' || !order.provider_ref) return res.redirect('/?purchase=error');
+@@ -99,7 +133,7 @@ router.get('/paypal/return', async (req, res) => {
+ });
+ 
+ // ── Subscriptions ────────────────────────────────────────────
+-router.post('/subscribe', requireAuth, async (req, res) => {
++router.post('/subscribe', requireAuth, money.guardWrite, async (req, res) => {
+     const provider = String(req.body.provider || '').toLowerCase();
+     // PowerChat subs run on PowerChat's own enablement; the payments master switch only
+     // gates the card/PayPal/Vibes-purchase rails.
+@@ -108,6 +142,16 @@ router.post('/subscribe', requireAuth, async (req, res) => {
+     const streamer = db.getUserByUsername(String(req.body.streamer || ''));
+     if (!streamer) return res.status(404).json({ error: 'Streamer not found' });
+     if (streamer.id === req.user.id) return res.status(400).json({ error: 'You cannot subscribe to yourself' });
++    if (money.onBilling()) {
++        try {
++            const r = await billingActions.subscribe(req, { streamer, provider, autoRenewRaw: req.body.auto_renew });
++            return res.status(r.status).json(r.body);
++        } catch (err) {
++            if (billingActions.sendError(res, err, { insufficientStatus: 402, insufficient: (d) => `Not enough Vibes${d.required ? ` (need ${d.required})` : ''}`, self: 'You cannot subscribe to yourself' })) return;
++            console.error('[Payments] billing subscribe error:', err.message);
++            return res.status(502).json({ error: 'Payment provider error. Try again.' });
++        }
++    }
+     if (db.isActiveSubscriber(req.user.id, streamer.id)) return res.status(409).json({ error: 'Already subscribed' });
+ 
+     const priceUsd = pay._num('sub_price_usd', 4.99);
+@@ -184,28 +228,51 @@ router.post('/subscribe', requireAuth, async (req, res) => {
+ });
+ 
+ // My subscriptions
+-router.get('/subscriptions/mine', requireAuth, (req, res) => {
++router.get('/subscriptions/mine', requireAuth, async (req, res) => {
++    if (money.onBilling()) {
++        try { return res.json({ subscriptions: await billingActions.mySubscriptions(req.user.id) }); }
++        catch (err) {
++            if (billingActions.sendError(res, err, { unavailable: 'Subscriptions unavailable right now — the billing service is not answering.' })) return;
++            return res.status(503).json({ error: 'Subscriptions unavailable right now', unavailable: true });
++        }
++    }
+     res.json({ subscriptions: db.getSubscriptionsBySubscriber(req.user.id) });
+ });
+ 
+ // Am I subscribed to this channel? + subscriber count
+-router.get('/channel/:username', optionalAuth, (req, res) => {
++router.get('/channel/:username', optionalAuth, async (req, res) => {
+     const streamer = db.getUserByUsername(req.params.username);
+     if (!streamer) return res.status(404).json({ error: 'Not found' });
+-    const subscribed = req.user ? db.isActiveSubscriber(req.user.id, streamer.id) : false;
++    let subscribed = false, subscriberCount = null, billingUnavailable = false;
++    if (money.onBilling()) {
++        try { ({ subscribed, subscriberCount } = await billingActions.channelState(streamer, req.user || null)); }
++        catch { billingUnavailable = true; }
++    } else {
++        subscribed = req.user ? db.isActiveSubscriber(req.user.id, streamer.id) : false;
++        subscriberCount = db.getActiveSubscriberCount(streamer.id);
++    }
+     const priceUsd = pay._num('sub_price_usd', 4.99);
+     let powerchat = { direct: false, site: false };
+     try { powerchat = require('../integrations/powerchat-checkout').subscribeRoutes(streamer.id); } catch { /* */ }
+     const feePct = pay._num('sub_site_route_fee_pct', 10);
+     const siteFeeUsd = Math.round(priceUsd * 100 * feePct / 100) / 100;
+     res.json({
+-        subscribed, subscriberCount: db.getActiveSubscriberCount(streamer.id), priceUsd,
++        subscribed, subscriberCount, priceUsd, ...(billingUnavailable ? { unavailable: true } : {}),
+         powerchat: { ...powerchat, feePct, siteFeeUsd, siteTotalUsd: Math.round((priceUsd + siteFeeUsd) * 100) / 100 },
+     });
+ });
+ 
+ // Cancel a subscription (Stripe: at period end; bucks: immediate)
+-router.post('/subscriptions/:id/cancel', requireAuth, async (req, res) => {
++router.post('/subscriptions/:id/cancel', requireAuth, money.guardWrite, async (req, res) => {
++    if (money.onBilling()) {
++        try {
++            const r = await billingActions.cancelSubscription(req, { id: req.params.id, streamerId: parseInt(req.body.streamerId, 10) || null });
++            return res.status(r.status).json(r.body);
++        } catch (err) {
++            if (billingActions.sendError(res, err)) return;
++            return res.status(502).json({ error: 'Could not cancel right now. Try again.' });
++        }
++    }
+     const sub = db.getActiveSubscription(req.user.id, parseInt(req.body.streamerId, 10)) ||
+         (db.getSubscriptionsBySubscriber(req.user.id) || []).find(x => String(x.id) === String(req.params.id));
+     if (!sub || sub.subscriber_id !== req.user.id) return res.status(404).json({ error: 'Subscription not found' });
+@@ -230,7 +297,7 @@ function payable(order, provider, paidUsd) {
+ }
+ 
+ // Stripe
+-router.post('/webhook/stripe', (req, res) => {
++router.post('/webhook/stripe', webhookMovedToBilling('stripe'), (req, res) => {
+     const event = pay.stripeVerify(rawBody(req), req.headers['stripe-signature']);
+     if (!event) return res.status(400).send('bad signature');
+     try {
+@@ -260,7 +327,7 @@ router.post('/webhook/stripe', (req, res) => {
+ });
+ 
+ // PayPal
+-router.post('/webhook/paypal', async (req, res) => {
++router.post('/webhook/paypal', webhookMovedToBilling('paypal'), async (req, res) => {
+     try {
+         const ok = await pay.paypalVerify(req.headers, rawBody(req));
+         if (!ok) return res.status(400).send('unverified');
+@@ -277,7 +344,7 @@ router.post('/webhook/paypal', async (req, res) => {
+ });
+ 
+ // CCBill (FlexForms datalink / webhook). Verified via shared secret in query.
+-router.all('/webhook/ccbill', (req, res) => {
++router.all('/webhook/ccbill', webhookMovedToBilling('ccbill'), (req, res) => {
+     if (!pay.ccbillVerify(req.query)) return res.status(403).send('forbidden');
+     try {
+         const p = { ...req.query, ...req.body };
+@@ -296,7 +363,7 @@ router.all('/webhook/ccbill', (req, res) => {
+ });
+ 
+ // Crypto (NOWPayments IPN)
+-router.post('/webhook/crypto', (req, res) => {
++router.post('/webhook/crypto', webhookMovedToBilling('crypto'), (req, res) => {
+     const body = pay.cryptoVerify(rawBody(req), req.headers['x-nowpayments-sig']);
+     if (!body) return res.status(400).send('bad signature');
+     try {
+diff --git a/server/monetization/payments.js b/server/monetization/payments.js
+index 43a1bf4..d786bec 100644
+--- a/server/monetization/payments.js
++++ b/server/monetization/payments.js
+@@ -17,6 +17,7 @@
+ const crypto = require('crypto');
+ const db = require('../db/database');
+ const config = require('../config');
++const money = require('./money-authority');
+ 
+ function baseUrl() { return config.baseUrl.replace(/\/+$/, ''); }
+ function s(key) { return (db.getSetting(key) || '').toString().trim(); }
+@@ -61,6 +62,9 @@ function publicConfig() {
+             powerchat: powerchatAvailable,
+         },
+         stripePublishableKey: s('stripe_publishable_key'),
++        // Who holds the money (BILLING_AUTHORITY) and whether money actions are paused.
++        authority: money.authority(),
++        moneyFrozen: money.isFrozen(),
+     };
+ }
+ 
+@@ -328,6 +332,8 @@ function fulfillSubscriptionOrder(order, { providerRef = null, periodEnd = null,
+ //     (or auto_renew off / cancel-at-period-end) → the sub expires with a notification.
+ const STRIPE_GRACE_MS = 3 * 24 * 3600 * 1000;
+ function _sweepRenewals() {
++    // OpenVibe.Billing renews its own subscriptions; a freeze pauses renewals until it lifts.
++    if (money.authority() !== 'live' || money.isFrozen()) return;
+     // Runs from an hourly timer; an uncaught throw there exits the whole server.
+     let due = [];
+     try { due = db.getSubscriptionsDueRenewal(50) || []; }
+@@ -376,6 +382,7 @@ function _renewNotify(sub, message) {
+ let _renewTimer = null;
+ function startRenewalSweeper() {
+     if (_renewTimer) return;
++    if (money.onBilling()) { console.log('[Payments] renewal sweeper not started: OpenVibe.Billing renews subscriptions (BILLING_AUTHORITY=billing)'); return; }
+     _sweepRenewals(); // catch up immediately on boot
+     _renewTimer = setInterval(_sweepRenewals, 60 * 60 * 1000);
+     if (_renewTimer.unref) _renewTimer.unref();
+diff --git a/server/monetization/routes.js b/server/monetization/routes.js
+index 573a125..4809e17 100644
+--- a/server/monetization/routes.js
++++ b/server/monetization/routes.js
+@@ -15,6 +15,14 @@ const { requireAuth, requireAdmin } = require('../auth/auth');
+ const { requireOwner } = require('../auth/permissions');
+ const openvibeBucks = require('./vibes');
+ const db = require('../db/database');
++// BILLING_AUTHORITY=billing: every money action below goes to OpenVibe.Billing instead of Live's
++// columns (billing-actions.js); money_writes_frozen refuses them in both modes.
++const money = require('./money-authority');
++const billingActions = require('./billing-actions');
++const cashoutsInBilling = (res) => res.status(409).json({
++    error: 'Cashouts are decided in OpenVibe.Billing now: approving or denying a payout needs its operator API (billing.cashout.manage) and the PayPal payout reference.',
++    code: 'cashouts_in_billing',
++});
+ 
+ const router = express.Router();
+ 
+@@ -50,7 +58,7 @@ function publicGoal(g) {
+ }
+ 
+ // ── Donate to Streamer ───────────────────────────────────────
+-router.post('/donate', requireAuth, (req, res) => {
++router.post('/donate', requireAuth, money.guardWrite, async (req, res) => {
+     try {
+         let { streamer_id, stream_id, amount, message, goal_id } = req.body;
+         if (!amount || amount <= 0) {
+@@ -73,7 +81,11 @@ router.post('/donate', requireAuth, (req, res) => {
+             if (!s || s.user_id !== streamer_id) return res.status(400).json({ error: 'That stream does not belong to this streamer' });
+         }
+ 
+-        const result = openvibeBucks.donate(req.user.id, streamer_id, stream_id, amount, message, goal_id || null);
++        const result = money.onBilling()
++            ? await billingActions.donate(req, { toUserId: streamer_id, streamId: stream_id, amount, message, goalId: goal_id || null })
++            : openvibeBucks.donate(req.user.id, streamer_id, stream_id, amount, message, goal_id || null);
++        // A request the browser repeated with the same Idempotency-Key: already celebrated.
++        if (result.replayed) return res.json({ success: true, amount: result.amount, balance: result.balance, goal_reached: false });
+ 
+         const chatServer = require('../chat/chat-server');
+         const alerts = require('./alerts');
+@@ -141,30 +153,43 @@ router.post('/donate', requireAuth, (req, res) => {
+             alerts.playAlertSound(chatServer, streamer_id, stream_id, 'goal');
+         }
+ 
+-        const user = db.getUserById(req.user.id);
+-        res.json({ success: true, amount: result.amount, balance: user.openvibe_bucks_balance, goal_reached: !!result.goalReached });
++        const balance = money.onBilling() ? result.balance : db.getUserById(req.user.id).openvibe_bucks_balance;
++        res.json({ success: true, amount: result.amount, balance, goal_reached: !!result.goalReached });
+     } catch (err) {
++        if (billingActions.sendError(res, err, { insufficient: 'Insufficient Vibes', self: 'You cannot donate to yourself' })) return;
+         res.status(400).json({ error: err.message });
+     }
+ });
+ 
+ // ── Request Cashout ──────────────────────────────────────────
+-router.post('/cashout', requireAuth, (req, res) => {
++router.post('/cashout', requireAuth, money.guardWrite, async (req, res) => {
+     try {
+         const { amount, paypal_email } = req.body;
+         if (!amount || !paypal_email) {
+             return res.status(400).json({ error: 'Amount and PayPal email required' });
+         }
+ 
+-        const result = openvibeBucks.requestCashout(req.user.id, amount, paypal_email);
++        const result = money.onBilling()
++            ? await billingActions.requestCashout(req, { amount, paypalEmail: paypal_email })
++            : openvibeBucks.requestCashout(req.user.id, amount, paypal_email);
+         res.json(result);
+     } catch (err) {
++        if (billingActions.sendError(res, err, { insufficient: 'Insufficient cashout balance — only Vibes sent to you can be cashed out' })) return;
+         res.status(400).json({ error: err.message });
+     }
+ });
+ 
+ // ── Get Balance ──────────────────────────────────────────────
+-router.get('/balance', requireAuth, (req, res) => {
++router.get('/balance', requireAuth, async (req, res) => {
++    if (money.onBilling()) {
++        // Billing is the only truth: when it cannot answer, the balance is "unavailable" — never
++        // the frozen legacy column.
++        try { return res.json(await billingActions.balance(req.user.id, req.headers)); }
++        catch (err) {
++            if (billingActions.sendError(res, err, { unavailable: 'Vibes balance unavailable right now — the billing service is not answering.' })) return;
++            return res.status(503).json({ error: 'Vibes balance unavailable right now', unavailable: true });
++        }
++    }
+     const user = db.getUserById(req.user.id);
+     const bal = Math.round(user.openvibe_bucks_balance || 0);
+     const cashout = Math.round(user.openvibe_bucks_cashout_balance || 0);
+@@ -178,18 +203,28 @@ router.get('/balance', requireAuth, (req, res) => {
+ });
+ 
+ // ── Recycle cashout balance → spendable Vibes ───────────
+-router.post('/recycle', requireAuth, (req, res) => {
++router.post('/recycle', requireAuth, money.guardWrite, async (req, res) => {
+     try {
+-        const result = openvibeBucks.recycleCashout(req.user.id, req.body.amount);
++        const result = money.onBilling()
++            ? await billingActions.recycle(req, req.body.amount)
++            : openvibeBucks.recycleCashout(req.user.id, req.body.amount);
+         res.json(result);
+     } catch (err) {
++        if (billingActions.sendError(res, err, { insufficient: 'Insufficient cashout balance' })) return;
+         res.status(400).json({ error: err.message });
+     }
+ });
+ 
+ // ── Transaction History ──────────────────────────────────────
+-router.get('/history', requireAuth, (req, res) => {
++router.get('/history', requireAuth, async (req, res) => {
+     const limit = Math.min(parseInt(req.query.limit || '50'), 200);
++    if (money.onBilling()) {
++        try { return res.json({ transactions: await billingActions.history(req.user.id, limit) }); }
++        catch (err) {
++            if (billingActions.sendError(res, err, { unavailable: 'Vibes history unavailable right now — the billing service is not answering.' })) return;
++            return res.status(503).json({ error: 'Vibes history unavailable right now', unavailable: true });
++        }
++    }
+     const history = openvibeBucks.getHistory(req.user.id, limit);
+     res.json({ transactions: history });
+ });
+@@ -260,7 +295,8 @@ router.get('/goals/:userId', (req, res) => {
+ });
+ 
+ // ── Admin: Approve Cashout ───────────────────────────────────
+-router.post('/cashout/:id/approve', requireOwner, (req, res) => {
++router.post('/cashout/:id/approve', requireOwner, money.guardWrite, (req, res) => {
++    if (money.onBilling()) return cashoutsInBilling(res);
+     try {
+         openvibeBucks.approveCashout(req.params.id);
+         res.json({ message: 'Cashout approved' });
+@@ -270,7 +306,8 @@ router.post('/cashout/:id/approve', requireOwner, (req, res) => {
+ });
+ 
+ // ── Admin: Deny Cashout ──────────────────────────────────────
+-router.post('/cashout/:id/deny', requireOwner, (req, res) => {
++router.post('/cashout/:id/deny', requireOwner, money.guardWrite, (req, res) => {
++    if (money.onBilling()) return cashoutsInBilling(res);
+     try {
+         openvibeBucks.denyCashout(req.params.id, req.body.reason);
+         res.json({ message: 'Cashout denied, funds refunded' });
+@@ -281,6 +318,7 @@ router.post('/cashout/:id/deny', requireOwner, (req, res) => {
+ 
+ // ── Admin: Get Pending Cashouts ──────────────────────────────
+ router.get('/cashouts/pending', requireOwner, (req, res) => {
++    if (money.onBilling()) return cashoutsInBilling(res);
+     const pending = db.all(`
+         SELECT t.*, u.username, u.display_name, u.email
+         FROM transactions t
+diff --git a/test/billing-authority.test.js b/test/billing-authority.test.js
+new file mode 100644
+index 0000000..54ff9fd
+--- /dev/null
++++ b/test/billing-authority.test.js
+@@ -0,0 +1,396 @@
++'use strict';
++/**
++ * BILLING_AUTHORITY=billing (roadmap Wave 8, ADR-012): every Live money action goes to
++ * OpenVibe.Billing with Live's service token (audience openvibe.billing), the one capability that
++ * route needs, a deterministic Idempotency-Key and canonical subjects — and Live's own money
++ * columns and tables (users.openvibe_bucks_*, transactions, payment_orders, subscriptions) are
++ * never written. A person with no subject cannot move money; Billing being down or slow fails
++ * clearly; the provider and PowerChat webhooks on Live answer 410 with Billing's URL.
++ *
++ * Network and Billing are local stand-ins (test/billing-stub.js); sign-in is stubbed with an
++ * x-test-user header like authorization.test.js. Everything after that is the production code.
++ */
++const assert = require('assert');
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const http = require('http');
++const { startNetwork, startBilling } = require('./billing-stub');
++
++const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-billing-authority-'));
++process.env.DB_PATH = path.join(tmp, 'live.db');
++process.env.NODE_ENV = 'test';
++process.env.BILLING_AUTHORITY = 'billing';
++process.env.OV_OAUTH_CLIENT_ID = 'live';
++process.env.OV_OAUTH_CLIENT_SECRET = 'live-secret';
++process.env.OV_BILLING_TIMEOUT_MS = '1500';
++process.env.OV_BILLING_PUBLIC_URL = 'https://billing.openvibe.network';
++const quiet = console.log;
++console.log = (...a) => { if (!/^\[/.test(String(a[0]))) quiet(...a); };
++console.warn = () => {};
++console.error = () => {};
++
++const SID = {
++    ann: 'usr_01JAB2C3D4E5F6G7H8J9K0MNA1',
++    bob: 'usr_01JAB2C3D4E5F6G7H8J9K0MNB2',
++    dan: 'usr_01JAB2C3D4E5F6G7H8J9K0MND4',
++};
++
++let failures = 0;
++async function check(name, fn) {
++    try { await fn(); quiet('  ✓', name); }
++    catch (e) { failures++; quiet('  ✗', name, '\n     ', (e.stack || String(e)).split('\n').slice(0, 9).join('\n      ')); }
++}
++
++(async () => {
++    const network = await startNetwork();
++    const billing = await startBilling({ network });
++    process.env.OV_NETWORK_INTERNAL_URL = network.url;
++    process.env.OV_BILLING_INTERNAL_URL = billing.url;
++    network.legacy['5'] = SID.dan;          // dan: only Network's identity map knows him
++
++    const db = require('../server/db/database');
++    db.initDb();
++    const raw = db.getDb();
++    const addUser = (id, username, role, extra = {}) => raw.prepare(
++        `INSERT INTO users (id, username, display_name, email, password_hash, role, is_owner, openvibe_bucks_balance, openvibe_bucks_cashout_balance)
++         VALUES (?, ?, ?, ?, 'x', ?, ?, ?, ?)`).run(id, username, username, `${username}@x`, role, extra.is_owner ? 1 : 0, extra.bucks || 0, extra.cashout || 0);
++    addUser(1, 'owner', 'admin', { is_owner: 1 });
++    addUser(2, 'ann', 'user', { bucks: 1000 });            // legacy columns carry values: they must never move
++    addUser(3, 'bob', 'streamer', { cashout: 2000 });
++    addUser(4, 'cat', 'user', { bucks: 5000 });            // no subject anywhere
++    addUser(5, 'dan', 'user');
++    addUser(6, 'eve', 'streamer');                          // streamer with no subject
++    addUser(7, 'admin2', 'admin');                          // an admin who is not the owner
++    const link = (uid, sid) => raw.prepare("INSERT INTO linked_accounts (user_id, service, service_user_id, subject_id) VALUES (?, 'network', ?, ?)").run(uid, String(100 + uid), sid);
++    link(2, SID.ann); link(3, SID.bob);
++    db.ensureChannel(3);
++    const streamB = Number(db.createStream({ user_id: 3, channel_id: db.getChannelByUserId(3).id, title: 'B', protocol: 'webrtc' }).lastInsertRowid);
++    db.setSetting('powerchat_enabled', 'true');
++    db.setSetting('powerchat_client_id', 'pca_test');
++    db.setSetting('powerchat_site_tip_username', 'sitepc');
++
++    const ledger = () => ({
++        users: raw.prepare('SELECT id, openvibe_bucks_balance AS b, openvibe_bucks_cashout_balance AS c FROM users ORDER BY id').all(),
++        transactions: raw.prepare('SELECT COUNT(*) AS n FROM transactions').get().n,
++        payment_orders: raw.prepare('SELECT COUNT(*) AS n FROM payment_orders').get().n,
++        subscriptions: raw.prepare('SELECT COUNT(*) AS n, COALESCE(MAX(updated_at), \'\') AS u FROM subscriptions').get(),
++    });
++    const before = ledger();
++
++    const auth = require('../server/auth/auth');
++    const signIn = (req) => { const id = Number(req.headers['x-test-user'] || 0); const u = id ? db.getUserById(id) : null; if (u) req.user = u; return u; };
++    auth.requireAuth = (req, res, next) => (signIn(req) ? next() : res.status(401).json({ error: 'Authentication required' }));
++    auth.optionalAuth = (req, res, next) => { signIn(req); next(); };
++
++    const express = require('express');
++    const app = express();
++    app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
++    app.use((req, res, next) => { signIn(req); next(); });
++    app.use('/api/funds', require('../server/monetization/routes'));
++    app.use('/api/payments', require('../server/monetization/payments-routes'));
++    app.use('/api/admin', require('../server/admin/routes'));
++    app.use('/api/powerchat', require('../server/integrations/powerchat-routes'));
++    const server = http.createServer(app);
++    await new Promise((r) => server.listen(0, '127.0.0.1', r));
++    const call = async (method, p, user, body, headers = {}) => {
++        const res = await fetch(`http://127.0.0.1:${server.address().port}${p}`, {
++            method, redirect: 'manual',
++            headers: { 'content-type': 'application/json', ...(user ? { 'x-test-user': String(user) } : {}), ...headers },
++            body: body ? JSON.stringify(body) : undefined,
++        });
++        const text = await res.text();
++        let json = null; try { json = JSON.parse(text); } catch { /* */ }
++        return { status: res.status, json, text, headers: res.headers };
++    };
++    const lastCall = () => billing.calls[billing.calls.length - 1];
++    const callsSince = (n) => billing.calls.slice(n);
++    const billingActions = require('../server/monetization/billing-actions');
++
++    billing.fund(SID.ann, 3000);
++
++    await check('the switch is read in one place and says billing', async () => {
++        const money = require('../server/monetization/money-authority');
++        assert.strictEqual(money.authority(), 'billing');
++        const cfg = await call('GET', '/api/payments/config');
++        assert.strictEqual(cfg.json.authority, 'billing');
++    });
++
++    await check('donation → POST /transfers with billing.transfer.create, a live:donation key and subjects (never Live ids)', async () => {
++        const n = billing.calls.length;
++        const r = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, stream_id: streamB, amount: 150, message: 'gg' });
++        assert.strictEqual(r.status, 200, r.text);
++        assert.deepStrictEqual({ success: r.json.success, amount: r.json.amount, balance: r.json.balance }, { success: true, amount: 150, balance: 2850 });
++        const c = callsSince(n);
++        assert.strictEqual(c.length, 1, 'one Billing call');
++        assert.strictEqual(c[0].method, 'POST'); assert.strictEqual(c[0].path, '/transfers');
++        assert.strictEqual(c[0].cap, 'billing.transfer.create');
++        assert.strictEqual(c[0].principal, 'svc:live');
++        assert.match(c[0].key, /^live:donation:[0-9a-f-]{36}$/);
++        assert.deepStrictEqual(c[0].body.from, { type: 'user', id: SID.ann });
++        assert.deepStrictEqual(c[0].body.to, { type: 'user', id: SID.bob });
++        assert.deepStrictEqual(c[0].body.target, { service: 'live', type: 'stream', id: String(streamB) });
++        assert.strictEqual(c[0].body.amount, 150); assert.strictEqual(c[0].body.kind, 'donation');
++        assert.ok(!JSON.stringify(c[0].body).includes('"user_id"'), 'no Live user id reaches Billing');
++        assert.ok(c[0].traceparent, 'trace context propagated');
++        assert.strictEqual(billing.payable[SID.bob], 150);
++        const row = raw.prepare("SELECT * FROM billing_actions WHERE idempotency_key = ?").get(c[0].key);
++        assert.strictEqual(row.status, 'done'); assert.match(row.billing_ref, /^txn_/);
++        // The chat celebration (display) is still Live's.
++        const msg = raw.prepare("SELECT * FROM chat_messages WHERE message_type = 'donation' ORDER BY id DESC LIMIT 1").get();
++        assert.ok(msg && /donated 150 Vibes/.test(msg.message));
++    });
++
++    await check('a browser retry with the same Idempotency-Key is one donation', async () => {
++        const n = billing.calls.length;
++        const a = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 10 }, { 'Idempotency-Key': 'click-7f3a9c21' });
++        const b = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 10 }, { 'Idempotency-Key': 'click-7f3a9c21' });
++        assert.strictEqual(a.status, 200, a.text); assert.strictEqual(b.status, 200, b.text);
++        assert.strictEqual(callsSince(n).length, 1, 'second answered from the journal');
++        assert.strictEqual(callsSince(n)[0].key, 'live:donation:u2:cclick-7f3a9c21');
++        assert.strictEqual(billing.payable[SID.bob], 160);
++        const c = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 11 }, { 'Idempotency-Key': 'click-7f3a9c21' });
++        assert.strictEqual(c.status, 409, 'same key, different donation: refused');
++    });
++
++    await check('Billing refusals map to Live\'s error shapes', async () => {
++        const r = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 999999 });
++        assert.strictEqual(r.status, 400); assert.strictEqual(r.json.error, 'Insufficient Vibes');
++        const self = await call('POST', '/api/funds/donate', 2, { streamer_id: 2, amount: 5 });
++        assert.strictEqual(self.status, 400); assert.strictEqual(self.json.error, 'You cannot donate to yourself');
++    });
++
++    await check('no subject, no money: the integer id is never used instead', async () => {
++        const n = billing.calls.length;
++        let r = await call('POST', '/api/funds/donate', 4, { streamer_id: 3, amount: 5 });
++        assert.strictEqual(r.status, 409, r.text); assert.strictEqual(r.json.code, 'no_subject');
++        r = await call('POST', '/api/funds/donate', 2, { streamer_id: 6, amount: 5 });
++        assert.strictEqual(r.status, 409, r.text); assert.match(r.json.error, /streamer/);
++        r = await call('GET', '/api/funds/balance', 4);
++        assert.strictEqual(r.status, 409);
++        assert.strictEqual(callsSince(n).length, 0, 'Billing never asked');
++        // dan has no token-noted subject but Network's identity map knows him: canonical, allowed.
++        r = await call('GET', '/api/funds/balance', 5);
++        assert.strictEqual(r.status, 200, r.text);
++        assert.strictEqual(lastCall().path, `/balances/${SID.dan}`);
++    });
++
++    await check('balance and history read Billing (balance.read), in Live\'s shapes', async () => {
++        const r = await call('GET', '/api/funds/balance', 3);
++        assert.strictEqual(r.status, 200, r.text);
++        assert.strictEqual(lastCall().cap, 'billing.balance.read');
++        assert.deepStrictEqual({ b: r.json.balance, c: r.json.cashout_balance, cu: r.json.cashout_usd_value }, { b: 0, c: 160, cu: '1.60' });
++        const h = await call('GET', '/api/funds/history', 2);
++        assert.strictEqual(h.status, 200, h.text);
++        const d = h.json.transactions.find((t) => t.type === 'donation');
++        assert.strictEqual(d.from_user_id, 2); assert.strictEqual(d.to_username, 'bob');
++    });
++
++    await check('cashout request → POST /cashouts (cashout.request); approving/denying is not Live\'s any more', async () => {
++        billing.payable[SID.bob] = 1000;
++        const r = await call('POST', '/api/funds/cashout', 3, { amount: 600, paypal_email: 'bob@example.com' });
++        assert.strictEqual(r.status, 200, r.text);
++        const c = lastCall();
++        assert.strictEqual(c.path, '/cashouts'); assert.strictEqual(c.cap, 'billing.cashout.request');
++        assert.match(c.key, /^live:cashout:/);
++        assert.deepStrictEqual(c.body.payout_method, { type: 'paypal', address: 'bob@example.com' });
++        assert.deepStrictEqual(c.body.subject, { type: 'user', id: SID.bob });
++        assert.strictEqual(r.json.status, 'escrow'); assert.strictEqual(r.json.amount, 600); assert.strictEqual(r.json.usd_value, '6.00'); assert.match(r.json.transaction_id, /^co_/);
++        const small = await call('POST', '/api/funds/cashout', 3, { amount: 100, paypal_email: 'bob@example.com' });
++        assert.strictEqual(small.status, 400); assert.match(small.json.error, /minimum cashout is 500 Vibes/i);
++        const n = billing.calls.length;
++        assert.strictEqual((await call('POST', '/api/funds/cashout/1/approve', 1)).status, 409);
++        assert.strictEqual((await call('POST', '/api/funds/cashout/1/deny', 1)).status, 409);
++        assert.strictEqual((await call('GET', '/api/funds/cashouts/pending', 1)).status, 409);
++        assert.strictEqual(callsSince(n).length, 0);
++    });
++
++    await check('recycle → POST /recycle (cashout.request)', async () => {
++        const r = await call('POST', '/api/funds/recycle', 3, { amount: 100 });
++        assert.strictEqual(r.status, 200, r.text);
++        assert.strictEqual(lastCall().path, '/recycle'); assert.strictEqual(lastCall().cap, 'billing.cashout.request');
++        assert.match(lastCall().key, /^live:recycle:/);
++        assert.deepStrictEqual({ b: r.json.balance, c: r.json.cashout_balance }, { b: 100, c: 300 });
++    });
++
++    await check('subscribe with Vibes → entitlement check, then POST /subscriptions (subscription.manage)', async () => {
++        const n = billing.calls.length;
++        const r = await call('POST', '/api/payments/subscribe', 2, { streamer: 'bob', provider: 'bucks' });
++        assert.strictEqual(r.status, 200, r.text);
++        const c = callsSince(n);
++        assert.deepStrictEqual(c.map((x) => [x.method, x.path.replace(/\?.*/, ''), x.cap]), [
++            ['GET', `/entitlements/${SID.ann}`, 'billing.entitlement.check'],
++            ['POST', '/subscriptions', 'billing.subscription.manage'],
++        ]);
++        assert.strictEqual(c[1].body.source, 'credit'); assert.deepStrictEqual(c[1].body.streamer, { type: 'user', id: SID.bob });
++        assert.match(c[1].key, /^live:subscribe:/);
++        assert.ok(r.json.subscription.current_period_end);
++        const again = await call('POST', '/api/payments/subscribe', 2, { streamer: 'bob', provider: 'bucks' });
++        assert.strictEqual(again.status, 409); assert.strictEqual(again.json.error, 'Already subscribed');
++        const poor = await call('POST', '/api/payments/subscribe', 5, { streamer: 'bob', provider: 'bucks' });
++        assert.strictEqual(poor.status, 402); assert.match(poor.json.error, /Not enough Vibes \(need 499\)/);
++    });
++
++    await check('channel state, my subscriptions and cancel go through Billing', async () => {
++        const ch = await call('GET', '/api/payments/channel/bob', 2);
++        assert.strictEqual(ch.status, 200, ch.text);
++        assert.strictEqual(ch.json.subscribed, true); assert.strictEqual(ch.json.subscriberCount, 1);
++        const mine = await call('GET', '/api/payments/subscriptions/mine', 2);
++        assert.strictEqual(mine.json.subscriptions[0].streamer_username, 'bob');
++        const sub = billing.subs[0];
++        // Someone else cannot cancel ann's subscription by id.
++        const n = billing.calls.length;
++        const other = await call('POST', `/api/payments/subscriptions/${sub.id}/cancel`, 5, {});
++        assert.strictEqual(other.status, 404);
++        assert.ok(!callsSince(n).some((x) => x.method === 'POST'), 'nothing cancelled');
++        const r = await call('POST', `/api/payments/subscriptions/${sub.id}/cancel`, 2, {});
++        assert.strictEqual(r.status, 200, r.text);
++        assert.strictEqual(lastCall().path, `/subscriptions/${sub.id}/cancel`);
++        assert.strictEqual(lastCall().cap, 'billing.subscription.manage');
++        assert.strictEqual(lastCall().key, `live:sub_cancel:${sub.id}:${sub.current_period_end}`);
++        assert.strictEqual(sub.cancel_at_period_end, true);
++    });
++
++    await check('subscriber perks follow Billing\'s entitlement (cached, refreshed)', async () => {
++        billingActions._reset();
++        assert.strictEqual(db.isActiveSubscriber(2, 3), false, 'unknown until checked');
++        assert.strictEqual(await billingActions.refreshEntitlement(2, 3), true);
++        assert.strictEqual(db.isActiveSubscriber(2, 3), true);
++        assert.strictEqual(lastCall().cap, 'billing.entitlement.check');
++        assert.strictEqual(db.isActiveSubscriber(4, 3), false);
++    });
++
++    await check('Buy Vibes via PowerChat → POST /intents (intent.create); the link carries Billing\'s checkout ref', async () => {
++        const n = billing.calls.length;
++        const r = await call('POST', '/api/payments/bucks/checkout', 2, { provider: 'powerchat', bucks: 500 });
++        assert.strictEqual(r.status, 200, r.text);
++        const c = callsSince(n);
++        assert.strictEqual(c.length, 1); assert.strictEqual(c[0].path, '/intents'); assert.strictEqual(c[0].cap, 'billing.intent.create');
++        assert.deepStrictEqual({ kind: c[0].body.kind, bits: c[0].body.bits, provider: c[0].body.provider, subject: c[0].body.subject }, { kind: 'purchase', bits: 500, provider: 'powerchat', subject: { type: 'user', id: SID.ann } });
++        const intent = billing.intents[billing.intents.length - 1];
++        const u = new URL(r.json.url);
++        assert.strictEqual(u.searchParams.get('app_ref'), `pcorder:${intent.id}`, 'PowerChat echoes Billing\'s ref to Billing');
++        assert.strictEqual(u.searchParams.get('app_amount_cents'), String(intent.amount_cents), 'pinned to the price Billing computed');
++        assert.strictEqual(r.json.amountUsd, intent.amount_cents / 100);
++    });
++
++    await check('subscribe via the site PowerChat → subscription intent with route site', async () => {
++        const r = await call('POST', '/api/payments/subscribe', 5, { streamer: 'bob', provider: 'powerchat_site' });
++        assert.strictEqual(r.status, 200, r.text);
++        const c = lastCall();
++        assert.strictEqual(c.path, '/intents'); assert.strictEqual(c.body.kind, 'subscription'); assert.strictEqual(c.body.route, 'site');
++        assert.deepStrictEqual(c.body.subject, { type: 'user', id: SID.dan });
++        const intent = billing.intents[billing.intents.length - 1];
++        assert.strictEqual(new URL(r.json.url).searchParams.get('app_ref'), `pcsub:${intent.id}`);
++        assert.strictEqual(r.json.feeUsd, 0.5);
++    });
++
++    await check('card rails stay behind Live\'s payments_enabled switch; when on, Stripe checkout is a Billing intent', async () => {
++        const n = billing.calls.length;
++        let r = await call('POST', '/api/payments/bucks/checkout', 2, { provider: 'stripe', bucks: 500 });
++        assert.strictEqual(r.status, 403); assert.strictEqual(callsSince(n).length, 0);
++        db.setSetting('payments_enabled', 'true');
++        r = await call('POST', '/api/payments/bucks/checkout', 2, { provider: 'stripe', bucks: 500 });
++        assert.strictEqual(r.status, 200, r.text);
++        assert.match(r.json.url, /^https:\/\/checkout\.test\/pi_/);
++        r = await call('POST', '/api/payments/bucks/checkout', 2, { provider: 'crypto', bucks: 500 });
++        assert.strictEqual(lastCall().body.provider, 'nowpayments');
++        db.setSetting('payments_enabled', 'false');
++    });
++
++    await check('a Vibes media request is a paid interaction; its refund reverses that exact transfer', async () => {
++        const mediaQueue = require('../server/media/media-queue');
++        const charge = await mediaQueue.charge({ currency: 'vibes', cost: 40, userId: 2, streamerId: 3, streamId: streamB, label: 'Media request: song' });
++        const c = lastCall();
++        assert.strictEqual(c.path, '/transfers'); assert.strictEqual(c.body.kind, 'paid_interaction'); assert.match(c.key, /^live:media_charge:/);
++        const reqId = Number(db.createMediaRequest({ streamer_id: 3, stream_id: streamB, user_id: 2, username: 'ann', input: 'x', canonical_url: 'https://x.test/a', embed_url: null, provider: 'youtube', title: 'song', thumbnail_url: null, duration_seconds: 60, cost: 40, queue_position: 1, currency: 'vibes' }).lastInsertRowid);
++        billingActions.linkMediaCharge(charge.actionId, reqId);
++        const refunded = await mediaQueue.refund(reqId);
++        assert.strictEqual(refunded, 40);
++        const r = lastCall();
++        assert.strictEqual(r.path, `/transfers/${charge.transactionId}/refund`); assert.strictEqual(r.cap, 'billing.transfer.create');
++        assert.strictEqual(r.key, `live:media_refund:${reqId}`);
++        assert.strictEqual(db.getMediaRequestById(reqId).refunded, 1);
++        assert.strictEqual(await mediaQueue.refund(reqId), 0, 'a second refund is a no-op');
++        await assert.rejects(mediaQueue.charge({ currency: 'vibes', cost: 999999, userId: 2, streamerId: 3, streamId: streamB, label: 'x' }), /Not enough Vibes — this costs 999999/);
++    });
++
++    await check('webhooks moved: PowerChat and card webhooks on Live answer 410 with Billing\'s URL', async () => {
++        const pc = await call('POST', '/api/powerchat/webhook', null, { type: 'donation.completed', data: { appExternalRef: 'pcorder:1', amountUsdCents: 500 } });
++        assert.strictEqual(pc.status, 410);
++        assert.strictEqual(pc.json.webhook_url, 'https://billing.openvibe.network/webhooks/powerchat');
++        for (const [p, name] of [['stripe', 'stripe'], ['paypal', 'paypal'], ['ccbill', 'ccbill'], ['crypto', 'nowpayments']]) {
++            const r = await call('POST', `/api/payments/webhook/${p}`, null, {});
++            assert.strictEqual(r.status, 410, p); assert.strictEqual(r.json.webhook_url, `https://billing.openvibe.network/webhooks/${name}`);
++        }
++        const rec = await require('../server/integrations/powerchat-reconcile').reconcileOnce();
++        assert.strictEqual(rec.skipped, 'billing_authority');
++    });
++
++    await check('a missing Network grant fails clearly (misconfigured), nothing moves', async () => {
++        const saved = network.grants['openvibe.billing'];
++        network.grants['openvibe.billing'] = saved.filter((g) => g !== 'billing.transfer.create');
++        require('../server/net/network-principal').invalidate('openvibe.billing');
++        const r = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 5 });
++        assert.strictEqual(r.status, 503, r.text); assert.strictEqual(r.json.code, 'billing_misconfigured');
++        network.grants['openvibe.billing'] = saved;
++        require('../server/net/network-principal').invalidate('openvibe.billing');
++    });
++
++    await check('Billing slow: the outcome is "unknown", journaled, and an owner can resolve it with the same key', async () => {
++        billing.state.delayMs = 2500;
++        const r = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 7 });
++        billing.state.delayMs = 0;
++        assert.strictEqual(r.status, 504, r.text); assert.strictEqual(r.json.code, 'billing_outcome_unknown');
++        const row = raw.prepare("SELECT * FROM billing_actions WHERE action = 'donation' ORDER BY id DESC LIMIT 1").get();
++        assert.strictEqual(row.status, 'unknown');
++        await new Promise((res) => setTimeout(res, 1200));        // the slow request lands on the stub
++        const payableBefore = billing.payable[SID.bob];
++        const st = await call('GET', '/api/admin/money', 1);
++        assert.ok(st.json.billing.actions.attention.some((a) => a.id === row.id));
++        assert.strictEqual((await call('POST', `/api/admin/money/actions/${row.id}/resolve`, 7)).status, 403, 'owner only');
++        const res = await call('POST', `/api/admin/money/actions/${row.id}/resolve`, 1);
++        assert.strictEqual(res.status, 200, res.text); assert.strictEqual(res.json.status, 'done');
++        assert.strictEqual(lastCall().key, row.idempotency_key); assert.strictEqual(lastCall().replayed, true, 'Billing replayed; no second effect');
++        assert.strictEqual(billing.payable[SID.bob], payableBefore);
++    });
++
++    await check('Billing down: money actions fail clearly and balances read "unavailable" (no fallback)', async () => {
++        await billing.close();
++        let r = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 5 });
++        assert.strictEqual(r.status, 503, r.text); assert.strictEqual(r.json.code, 'billing_unavailable'); assert.match(r.json.error, /nothing was charged/);
++        r = await call('GET', '/api/funds/balance', 2);
++        assert.strictEqual(r.status, 503); assert.strictEqual(r.json.unavailable, true);
++        assert.ok(!('balance' in r.json), 'never the legacy column');
++        r = await call('POST', '/api/funds/cashout', 3, { amount: 600, paypal_email: 'bob@example.com' });
++        assert.strictEqual(r.status, 503);
++        r = await call('GET', '/api/payments/channel/bob', 2);
++        assert.strictEqual(r.status, 200); assert.strictEqual(r.json.unavailable, true);
++        const st = await call('GET', '/api/admin/money', 7);
++        assert.strictEqual(st.json.authority, "billing"); assert.strictEqual(st.json.billing.reachable, false, JSON.stringify(st.json));
++    });
++
++    await check('the tripwire: Live\'s money columns cannot be written under billing', async () => {
++        assert.throws(() => db.addVibes(2, 5), /read-only/);
++        assert.throws(() => db.addVibesCashout(3, 5), /read-only/);
++        assert.throws(() => db.createPaymentOrder({ user_id: 2, provider: 'powerchat' }), /read-only/);
++        assert.throws(() => db.upsertSubscription({ subscriber_id: 2, streamer_id: 3 }), /read-only/);
++        assert.throws(() => db.createTransaction({ to_user_id: 2, amount: 1, type: 'purchase' }), /read-only/);
++    });
++
++    await check('legacy balances are not shown as live (admin stats, admin user list)', async () => {
++        const s = await call('GET', '/api/admin/stats', 1);
++        assert.strictEqual(s.json.openvibeBucks.totalCirculating, null);
++        const u = await call('GET', '/api/admin/users', 1);
++        assert.ok(u.json.users.every((x) => x.openvibe_bucks_balance === null));
++    });
++
++    await check('after everything: Live\'s money columns and tables are exactly as before', async () => {
++        assert.deepStrictEqual(ledger(), before);
++    });
++
++    server.close();
++    await network.close();
++    quiet(failures ? `\n${failures} failed` : '\nall passed');
++    process.exit(failures ? 1 : 0);
++})().catch((e) => { quiet(e); process.exit(1); });
+diff --git a/test/billing-stub.js b/test/billing-stub.js
+new file mode 100644
+index 0000000..29163f2
+--- /dev/null
++++ b/test/billing-stub.js
+@@ -0,0 +1,203 @@
++'use strict';
++/**
++ * Stand-ins for OpenVibe.Network and OpenVibe.Billing, used by the BILLING_AUTHORITY tests.
++ * Not a test file itself (run.js only picks *.test.js).
++ *
++ *   startNetwork()  /oauth/token (client_credentials; caps per audience, `grants` editable) and
++ *                   /internal/identity/resolve-batch (live user id -> subject, `legacy` editable)
++ *   startBilling()  the parts of Billing's /api/v1 that Live calls, with Billing's own rules for
++ *                   what matters here: RS256 service token for audience openvibe.billing, ONE
++ *                   capability per route, Idempotency-Key on every POST (replay returns the stored
++ *                   answer with Idempotent-Replayed: true), problem+json errors, funds checks,
++ *                   self-dealing refused by subject. Every call is recorded in `calls`.
++ *                   state: { delayMs, fail500, closed } to simulate trouble.
++ */
++const http = require('http');
++const crypto = require('crypto');
++const { serviceAuth, http: ovHttp, ids } = require('openvibe-contracts');
++
++const read = (req) => new Promise((resolve) => { const c = []; req.on('data', (d) => c.push(d)); req.on('end', () => resolve(Buffer.concat(c).toString('utf8'))); });
++const send = (res, status, obj, headers = {}) => { res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(JSON.stringify(obj)); };
++const problem = (res, status, code, detail, extra) => { res.writeHead(status, { 'Content-Type': 'application/problem+json' }); res.end(JSON.stringify(ovHttp.problem(status, code, { detail, extra }))); };
++const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${server.address().port}`)));
++
++const LIVE_BILLING_GRANTS = ['billing.intent.create', 'billing.transfer.create', 'billing.balance.read', 'billing.cashout.request', 'billing.subscription.manage', 'billing.entitlement.check'];
++
++async function startNetwork() {
++    const keys = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
++    const grants = { 'openvibe.billing': [...LIVE_BILLING_GRANTS], 'openvibe.network': ['identity.subject.resolve'] };
++    const legacy = {};          // live user id -> usr_
++    const tokens = [];
++    const server = http.createServer(async (req, res) => {
++        const raw = await read(req);
++        if (req.url === '/oauth/token') {
++            const body = new URLSearchParams(raw);
++            const aud = body.get('audience');
++            tokens.push({ aud, client: body.get('client_id') });
++            const now = Math.floor(Date.now() / 1000);
++            const claims = { iss: 'https://openvibe.network', sub: `svc:${body.get('client_id')}`, actor_type: 'service', aud: [aud], cap: grants[aud] || [], iat: now, exp: now + 300, jti: `tok_${crypto.randomBytes(6).toString('hex')}` };
++            return send(res, 200, { access_token: serviceAuth.signServiceToken(claims, keys.privateKey), expires_in: 300 });
++        }
++        if (req.url === '/internal/identity/resolve-batch') {
++            const { ids: want } = JSON.parse(raw || '{}');
++            return send(res, 200, { results: Object.fromEntries((want || []).map((id) => [id, legacy[id] ? { subject: { type: 'user', id: legacy[id] } } : null])) });
++        }
++        send(res, 404, {});
++    });
++    const url = await listen(server);
++    return { url, publicKey: keys.publicKey, grants, legacy, tokens, close: () => new Promise((r) => server.close(r)) };
++}
++
++const CAP = [
++    ['POST', /^\/intents$/, 'billing.intent.create'], ['GET', /^\/intents\/[^/]+$/, 'billing.intent.create'], ['POST', /^\/intents\/[^/]+\/capture$/, 'billing.intent.create'],
++    ['POST', /^\/transfers$/, 'billing.transfer.create'], ['POST', /^\/transfers\/[^/]+\/refund$/, 'billing.transfer.create'],
++    ['POST', /^\/recycle$/, 'billing.cashout.request'], ['POST', /^\/cashouts$/, 'billing.cashout.request'],
++    ['POST', /^\/subscriptions$/, 'billing.subscription.manage'], ['POST', /^\/subscriptions\/[^/]+\/cancel$/, 'billing.subscription.manage'],
++    ['GET', /^\/subscriptions$/, 'billing.entitlement.check'], ['GET', /^\/entitlements\/[^/]+$/, 'billing.entitlement.check'],
++    ['GET', /^\/balances\/[^/]+$/, 'billing.balance.read'], ['GET', /^\/transactions$/, 'billing.balance.read'],
++    ['GET', /^\/rates$/, null],
++];
++
++async function startBilling({ network }) {
++    const calls = [];
++    const state = { delayMs: 0, fail500: false };
++    const credit = {};
++    const payable = {};
++    const txns = [];
++    const subs = [];
++    const intents = [];
++    const idem = new Map();
++    const newId = (p) => `${p}_${ids.ulid()}`;
++    const bal = (m, s) => m[s] || 0;
++    const txn = (t) => { const x = { id: newId('txn'), status: 'settled', test: false, created_at: new Date().toISOString(), entries: [], metadata: {}, ...t }; txns.push(x); return x; };
++    const subject = (v) => (v && typeof v === 'object' ? v.id : v);
++
++    function route(method, path, q, b, res) {
++        let m;
++        if (method === 'GET' && path === '/rates') {
++            return send(res, 200, { bits_per_usd: 100, min_purchase_bits: 100, subscription: { price_cents: 499, streamer_share_pct: 70, site_route_fee_pct: 10 }, cashout: { min_bits: 500, escrow_days: 14 }, providers: { powerchat: true, stripe: true } });
++        }
++        if (method === 'POST' && path === '/intents') {
++            const kind = b.kind;
++            const i = { id: newId('pi'), provider: b.provider, provider_ref: b.provider === 'powerchat' ? null : `prov_${intents.length + 1}`, kind, subject: { type: 'user', id: subject(b.subject) }, streamer: b.streamer ? { type: 'user', id: subject(b.streamer) } : null, bits: kind === 'purchase' ? b.bits : 0, route: kind === 'subscription' ? (b.route === 'direct' ? 'direct' : (b.provider === 'powerchat' ? 'site' : null)) : null, auto_renew: !!b.auto_renew, status: 'created' };
++            if (i.streamer && i.streamer.id === i.subject.id) return problem(res, 422, 'billing.self_dealing', 'you cannot subscribe to yourself');
++            i.fee_cents = i.route === 'site' ? 50 : 0;
++            i.amount_cents = kind === 'purchase' ? Math.round(b.bits * 1.5) : 499 + i.fee_cents;
++            if (b.provider === 'powerchat') i.checkout_ref = `${kind === 'purchase' ? 'pcorder' : 'pcsub'}:${i.id}`;
++            intents.push(i);
++            return send(res, 201, { intent: i, checkout_url: b.provider === 'powerchat' ? null : `https://checkout.test/${i.id}` });
++        }
++        if (method === 'POST' && (m = path.match(/^\/intents\/([^/]+)\/capture$/))) {
++            const i = intents.find((x) => x.id === m[1]);
++            if (!i) return problem(res, 404, 'billing.intent_not_found', `no intent ${m[1]}`);
++            i.status = 'settled';
++            return send(res, 200, { result: { effect: 'purchase' }, intent: i });
++        }
++        if (method === 'POST' && path === '/transfers') {
++            const from = subject(b.from); const to = subject(b.to);
++            if (from === to) return problem(res, 422, 'billing.self_dealing', 'a transfer to yourself would turn bought credit into withdrawable money');
++            if (bal(credit, from) < b.amount) return problem(res, 409, 'billing.insufficient_funds', `insufficient credit: ${bal(credit, from)} < ${b.amount} vibes-bits`, { details: { available: bal(credit, from), required: b.amount } });
++            credit[from] = bal(credit, from) - b.amount; payable[to] = bal(payable, to) + b.amount;
++            const t = txn({ type: 'donation', from_subject: from, to_subject: to, metadata: { kind: b.kind, amount_bits: b.amount, target: b.target || null, message: b.message || null } });
++            return send(res, 201, { transaction: t, balance: { credit: credit[from] } });
++        }
++        if (method === 'POST' && (m = path.match(/^\/transfers\/([^/]+)\/refund$/))) {
++            const orig = txns.find((x) => x.id === m[1]);
++            if (!orig) return problem(res, 404, 'billing.transaction_not_found', `no donation ${m[1]}`);
++            const amount = b.amount || orig.metadata.amount_bits;
++            if (bal(payable, orig.to_subject) < amount) return problem(res, 409, 'billing.insufficient_funds', "insufficient recipient's payable", { details: { available: bal(payable, orig.to_subject), required: amount } });
++            payable[orig.to_subject] -= amount; credit[orig.from_subject] = bal(credit, orig.from_subject) + amount;
++            return send(res, 201, { transaction: txn({ type: 'refund', reverses_txn: orig.id, from_subject: orig.to_subject, to_subject: orig.from_subject, metadata: { amount_bits: amount, reason: b.reason || null } }) });
++        }
++        if (method === 'POST' && path === '/recycle') {
++            const s = subject(b.subject);
++            if (bal(payable, s) < b.amount) return problem(res, 409, 'billing.insufficient_funds', 'insufficient creator payable', { details: { available: bal(payable, s), required: b.amount } });
++            payable[s] -= b.amount; credit[s] = bal(credit, s) + b.amount;
++            return send(res, 201, { transaction: txn({ type: 'recycle', from_subject: s, to_subject: s, metadata: { amount_bits: b.amount } }), balance: { credit: credit[s], payable: payable[s] } });
++        }
++        if (method === 'POST' && path === '/cashouts') {
++            const s = subject(b.subject);
++            if (b.amount < 500) return problem(res, 422, 'billing.amount_too_small', 'the minimum cashout is 500 bits');
++            if (bal(payable, s) < b.amount) return problem(res, 409, 'billing.insufficient_funds', 'insufficient creator payable', { details: { available: bal(payable, s), required: b.amount } });
++            payable[s] -= b.amount;
++            const t = txn({ type: 'cashout_request', from_subject: s, metadata: { amount_bits: b.amount } });
++            return send(res, 201, { cashout: { id: newId('co'), subject: { type: 'user', id: s }, amount_bits: b.amount, value_cents: b.amount, status: 'requested', payout_method: b.payout_method, escrow_until: new Date(Date.now() + 14 * 86_400_000).toISOString(), request_txn: t.id } });
++        }
++        if (method === 'POST' && path === '/subscriptions') {
++            const sub = subject(b.subscriber); const str = subject(b.streamer);
++            if (sub === str) return problem(res, 422, 'billing.self_dealing', 'you cannot subscribe to yourself');
++            if (bal(credit, sub) < 499) return problem(res, 409, 'billing.insufficient_funds', `insufficient credit: ${bal(credit, sub)} < 499 vibes-bits`, { details: { available: bal(credit, sub), required: 499 } });
++            credit[sub] -= 499; payable[str] = bal(payable, str) + 349;
++            let s = subs.find((x) => x.subscriber.id === sub && x.streamer.id === str);
++            const end = new Date(Date.now() + 30 * 86_400_000).toISOString();
++            if (!s) { s = { id: newId('sub'), subscriber: { type: 'user', id: sub }, streamer: { type: 'user', id: str }, tier: 1, provider: 'credit', status: 'active', auto_renew: !!b.auto_renew, cancel_at_period_end: false, price_cents: 499, created_at: new Date().toISOString() }; subs.push(s); }
++            Object.assign(s, { status: 'active', current_period_end: end, auto_renew: !!b.auto_renew });
++            const t = txn({ type: 'subscription', from_subject: sub, to_subject: str, metadata: { cost_bits: 499, share_bits: 349, renewal: false } });
++            return send(res, 201, { subscription: s, entitlement: { active: true, expires_at: end }, transaction: t });
++        }
++        if (method === 'POST' && (m = path.match(/^\/subscriptions\/([^/]+)\/cancel$/))) {
++            const s = subs.find((x) => x.id === m[1]);
++            if (!s) return problem(res, 404, 'billing.subscription_not_found', `no subscription ${m[1]}`);
++            Object.assign(s, { cancel_at_period_end: true, auto_renew: false });
++            return send(res, 200, { subscription: s, provider_sync: 'not_needed' });
++        }
++        if (method === 'GET' && path === '/subscriptions') {
++            return send(res, 200, { subscriptions: subs.filter((s) => (!q.get('subscriber') || s.subscriber.id === q.get('subscriber')) && (!q.get('streamer') || s.streamer.id === q.get('streamer')) && (!q.get('status') || s.status === q.get('status'))) });
++        }
++        if (method === 'GET' && (m = path.match(/^\/entitlements\/([^/]+)$/))) {
++            const s = subs.find((x) => x.subscriber.id === m[1] && x.streamer.id === q.get('streamer') && x.status === 'active' && Date.parse(x.current_period_end) > Date.now());
++            return send(res, 200, { subject: { type: 'user', id: m[1] }, streamer: { type: 'user', id: q.get('streamer') }, active: !!s, expires_at: s ? s.current_period_end : null });
++        }
++        if (method === 'GET' && (m = path.match(/^\/balances\/([^/]+)$/))) {
++            return send(res, 200, { subject: { type: 'user', id: m[1] }, currency: 'vibes-bits', credit: bal(credit, m[1]), payable: bal(payable, m[1]), pending_payouts: 0, payable_value_cents: bal(payable, m[1]), bits_per_usd: 100 });
++        }
++        if (method === 'GET' && path === '/transactions') {
++            const s = q.get('subject');
++            return send(res, 200, { transactions: txns.filter((t) => t.from_subject === s || t.to_subject === s).reverse(), next_cursor: null });
++        }
++        return problem(res, 404, 'not_found', `${method} ${path}`);
++    }
++
++    const server = http.createServer(async (req, res) => {
++        const raw = await read(req);
++        const u = new URL(req.url, 'http://x');
++        if (u.pathname === '/api/ready') return send(res, 200, { ready: true });
++        if (!u.pathname.startsWith('/api/v1/')) return send(res, 404, {});
++        const path = u.pathname.slice('/api/v1'.length);
++        const body = raw ? JSON.parse(raw) : {};
++        const auth = String(req.headers.authorization || '');
++        const v = serviceAuth.verifyServiceToken(auth.slice(7), { publicKey: network.publicKey, audience: 'openvibe.billing' });
++        const rule = CAP.find(([m, re]) => m === req.method && re.test(path));
++        const call = { method: req.method, path, query: Object.fromEntries(u.searchParams), key: req.headers['idempotency-key'] || null, body, cap: rule ? rule[2] : undefined, principal: v.ok ? v.claims.sub : null, traceparent: req.headers.traceparent || null };
++        calls.push(call);
++        if (state.delayMs) await new Promise((r) => setTimeout(r, state.delayMs));
++        if (!v.ok) return problem(res, 401, v.code, v.reason);
++        if (!rule) return problem(res, 404, 'not_found', path);
++        if (rule[2] && !(v.claims.cap || []).includes(rule[2])) return problem(res, 403, 'capability.denied', `${rule[2]} not granted`);
++        if (state.fail500) return problem(res, 500, 'billing.internal', 'internal error');
++        if (req.method === 'POST') {
++            if (!/^[A-Za-z0-9._:-]{8,200}$/.test(call.key || '')) return problem(res, 400, 'idempotency.key_required', 'mutating calls need an Idempotency-Key header');
++            const hash = crypto.createHash('sha256').update(`${req.method} ${path}\n${raw}`).digest('hex');
++            const prior = idem.get(call.key);
++            if (prior) {
++                if (prior.hash !== hash) return problem(res, 422, 'idempotency.key_reused', 'this Idempotency-Key was used for a different request');
++                call.replayed = true;
++                return send(res, prior.status, prior.body, { 'Idempotent-Replayed': 'true' });
++            }
++            const json = res.end.bind(res);
++            res.end = (chunk) => {
++                if (res.statusCode >= 200 && res.statusCode < 300) idem.set(call.key, { hash, status: res.statusCode, body: JSON.parse(chunk) });
++                return json(chunk);
++            };
++        }
++        return route(req.method, path, u.searchParams, body, res);
++    });
++    const url = await listen(server);
++    return {
++        url, calls, state, credit, payable, txns, subs, intents,
++        fund: (s, bits) => { credit[s] = bal(credit, s) + bits; },
++        close: () => new Promise((r) => { server.closeAllConnections && server.closeAllConnections(); server.close(r); }),
++    };
++}
++
++module.exports = { startNetwork, startBilling, LIVE_BILLING_GRANTS };
+diff --git a/test/billing-switch-off.test.js b/test/billing-switch-off.test.js
+new file mode 100644
+index 0000000..0e8c784
+--- /dev/null
++++ b/test/billing-switch-off.test.js
+@@ -0,0 +1,138 @@
++'use strict';
++/**
++ * BILLING_AUTHORITY unset (= live, the default): the Billing client changes nothing. The money
++ * routes move Live's own columns exactly as before, OpenVibe.Billing is never called (a stand-in
++ * is running and counts calls), the Live webhooks still receive, and no billing_actions journal
++ * is created. The rest of the suite (authorization, powerchat-*, migrations …) covers the
++ * existing money behaviour unchanged.
++ */
++const assert = require('assert');
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const http = require('http');
++const { startNetwork, startBilling } = require('./billing-stub');
++
++const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-billing-off-'));
++process.env.DB_PATH = path.join(tmp, 'live.db');
++process.env.NODE_ENV = 'test';
++delete process.env.BILLING_AUTHORITY;
++process.env.OV_OAUTH_CLIENT_ID = 'live';
++process.env.OV_OAUTH_CLIENT_SECRET = 'live-secret';
++const quiet = console.log;
++console.log = (...a) => { if (!/^\[/.test(String(a[0]))) quiet(...a); };
++console.warn = () => {};
++
++let failures = 0;
++async function check(name, fn) {
++    try { await fn(); quiet('  ✓', name); }
++    catch (e) { failures++; quiet('  ✗', name, '\n     ', (e.stack || String(e)).split('\n').slice(0, 6).join('\n      ')); }
++}
++
++(async () => {
++    const network = await startNetwork();
++    const billing = await startBilling({ network });
++    process.env.OV_NETWORK_INTERNAL_URL = network.url;
++    process.env.OV_BILLING_INTERNAL_URL = billing.url;
++
++    const db = require('../server/db/database');
++    db.initDb();
++    const raw = db.getDb();
++    const addUser = (id, username, role, extra = {}) => raw.prepare(
++        `INSERT INTO users (id, username, display_name, email, password_hash, role, is_owner, openvibe_bucks_balance, openvibe_bucks_cashout_balance)
++         VALUES (?, ?, ?, ?, 'x', ?, ?, ?, ?)`).run(id, username, username, `${username}@x`, role, extra.is_owner ? 1 : 0, extra.bucks || 0, extra.cashout || 0);
++    addUser(1, 'owner', 'admin', { is_owner: 1 });
++    addUser(2, 'ann', 'user', { bucks: 1000 });
++    addUser(3, 'bob', 'streamer');
++    // Subjects exist, so nothing but the switch keeps these actions on Live's columns.
++    raw.prepare("INSERT INTO linked_accounts (user_id, service, service_user_id, subject_id) VALUES (2, 'network', '102', 'usr_01JAB2C3D4E5F6G7H8J9K0MNA1'), (3, 'network', '103', 'usr_01JAB2C3D4E5F6G7H8J9K0MNB2')").run();
++    const cols = (id) => { const u = db.getUserById(id); return { b: u.openvibe_bucks_balance, c: u.openvibe_bucks_cashout_balance }; };
++
++    const auth = require('../server/auth/auth');
++    const signIn = (req) => { const id = Number(req.headers['x-test-user'] || 0); const u = id ? db.getUserById(id) : null; if (u) req.user = u; return u; };
++    auth.requireAuth = (req, res, next) => (signIn(req) ? next() : res.status(401).json({ error: 'Authentication required' }));
++    auth.optionalAuth = (req, res, next) => { signIn(req); next(); };
++    const express = require('express');
++    const app = express();
++    app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
++    app.use((req, res, next) => { signIn(req); next(); });
++    app.use('/api/funds', require('../server/monetization/routes'));
++    app.use('/api/payments', require('../server/monetization/payments-routes'));
++    app.use('/api/admin', require('../server/admin/routes'));
++    app.use('/api/powerchat', require('../server/integrations/powerchat-routes'));
++    const server = http.createServer(app);
++    await new Promise((r) => server.listen(0, '127.0.0.1', r));
++    const call = async (method, p, user, body) => {
++        const res = await fetch(`http://127.0.0.1:${server.address().port}${p}`, { method, headers: { 'content-type': 'application/json', ...(user ? { 'x-test-user': String(user) } : {}) }, body: body ? JSON.stringify(body) : undefined });
++        const text = await res.text();
++        let json = null; try { json = JSON.parse(text); } catch { /* */ }
++        return { status: res.status, json, text };
++    };
++
++    await check('the switch defaults to live', async () => {
++        assert.strictEqual(require('../server/monetization/money-authority').authority(), 'live');
++        assert.strictEqual((await call('GET', '/api/payments/config')).json.authority, 'live');
++    });
++
++    await check('donate moves Live\'s columns and writes the transactions row, as before', async () => {
++        const r = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 150, message: 'gg' });
++        assert.strictEqual(r.status, 200, r.text);
++        assert.strictEqual(r.json.balance, 850);
++        assert.deepStrictEqual(cols(2), { b: 850, c: 0 });
++        assert.deepStrictEqual(cols(3), { b: 0, c: 150 });
++        const t = raw.prepare("SELECT * FROM transactions WHERE type = 'donation'").get();
++        assert.deepStrictEqual([t.from_user_id, t.to_user_id, t.amount, t.status], [2, 3, 150, 'completed']);
++        const bad = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 99999 });
++        assert.strictEqual(bad.status, 400); assert.strictEqual(bad.json.error, 'Insufficient Vibes');
++    });
++
++    await check('cashout request, owner approval and the balance read use Live\'s columns', async () => {
++        raw.prepare('UPDATE users SET openvibe_bucks_cashout_balance = 1000 WHERE id = 3').run();
++        const r = await call('POST', '/api/funds/cashout', 3, { amount: 600, paypal_email: 'bob@example.com' });
++        assert.strictEqual(r.status, 200, r.text);
++        assert.strictEqual(r.json.status, 'escrow'); assert.strictEqual(r.json.usd_value, '6.00');
++        assert.deepStrictEqual(cols(3), { b: 0, c: 400 });
++        const pending = await call('GET', '/api/funds/cashouts/pending', 1);
++        assert.strictEqual(pending.json.cashouts.length, 1);
++        assert.strictEqual((await call('POST', `/api/funds/cashout/${r.json.transaction_id}/approve`, 1)).status, 200);
++        const bal = await call('GET', '/api/funds/balance', 3);
++        assert.deepStrictEqual({ b: bal.json.balance, c: bal.json.cashout_balance }, { b: 0, c: 400 });
++    });
++
++    await check('recycle behaves exactly as before (including the pre-existing transactions CHECK defect)', async () => {
++        const r = await call('POST', '/api/funds/recycle', 3, { amount: 100 });
++        // Economic inventory defect 7: 'recycle' is not in the transactions type CHECK, so the ledger
++        // insert throws after both balances moved. Unchanged under `live`; Billing fixes it.
++        assert.strictEqual(r.status, 400, r.text);
++        assert.deepStrictEqual(cols(3), { b: 100, c: 300 });
++    });
++
++    await check('subscribe with Vibes, the channel state and cancel use Live\'s subscriptions table', async () => {
++        const r = await call('POST', '/api/payments/subscribe', 2, { streamer: 'bob', provider: 'bucks' });
++        assert.strictEqual(r.status, 200, r.text);
++        assert.deepStrictEqual(cols(2), { b: 351, c: 0 });
++        assert.deepStrictEqual(cols(3), { b: 100, c: 649 });
++        const ch = await call('GET', '/api/payments/channel/bob', 2);
++        assert.deepStrictEqual([ch.json.subscribed, ch.json.subscriberCount], [true, 1]);
++        assert.strictEqual(db.isActiveSubscriber(2, 3), true);
++        const sub = raw.prepare('SELECT * FROM subscriptions').get();
++        assert.strictEqual((await call('POST', `/api/payments/subscriptions/${sub.id}/cancel`, 2, {})).status, 200);
++        assert.strictEqual(raw.prepare('SELECT status FROM subscriptions WHERE id = ?').get(sub.id).status, 'canceled');
++    });
++
++    await check('the PowerChat receiver still runs on Live (verifies, never 410)', async () => {
++        const r = await call('POST', '/api/powerchat/webhook', null, { type: 'donation.completed', data: {} });
++        assert.strictEqual(r.status, 401, r.text);
++    });
++
++    await check('OpenVibe.Billing was never called and no Billing journal exists', async () => {
++        assert.strictEqual(billing.calls.length, 0);
++        assert.strictEqual(raw.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'billing_actions'").get().n, 0);
++    });
++
++    server.close();
++    await billing.close();
++    await network.close();
++    quiet(failures ? `\n${failures} failed` : '\nall passed');
++    process.exit(failures ? 1 : 0);
++})().catch((e) => { quiet(e); process.exit(1); });
+diff --git a/test/money-freeze.test.js b/test/money-freeze.test.js
+new file mode 100644
+index 0000000..b46228c
+--- /dev/null
++++ b/test/money-freeze.test.js
+@@ -0,0 +1,189 @@
++'use strict';
++/**
++ * money_writes_frozen — step 3 of the Live → Billing cutover runbook. In BOTH modes it refuses
++ * every money action a person or an operator starts on Live (checkout, donation, cashout request,
++ * approve/deny, recycle, subscribe, cancel, Vibes media request and refund, renewal sweep) while
++ * reads keep working. Only the owner can set it; every admin can see it at /api/admin/money.
++ * Provider confirmations of checkouts started before the freeze still settle in `live` mode (the
++ * provider already took that money). A BILLING_AUTHORITY that is neither live nor billing refuses
++ * every money write too.
++ */
++const assert = require('assert');
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const http = require('http');
++const { startNetwork, startBilling } = require('./billing-stub');
++
++const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-money-freeze-'));
++process.env.DB_PATH = path.join(tmp, 'live.db');
++process.env.NODE_ENV = 'test';
++delete process.env.BILLING_AUTHORITY;
++process.env.OV_OAUTH_CLIENT_ID = 'live';
++process.env.OV_OAUTH_CLIENT_SECRET = 'live-secret';
++const quiet = console.log;
++console.log = (...a) => { if (!/^\[/.test(String(a[0]))) quiet(...a); };
++console.warn = () => {};
++
++const SID_ANN = 'usr_01JAB2C3D4E5F6G7H8J9K0MNA1';
++const SID_BOB = 'usr_01JAB2C3D4E5F6G7H8J9K0MNB2';
++
++let failures = 0;
++async function check(name, fn) {
++    try { await fn(); quiet('  ✓', name); }
++    catch (e) { failures++; quiet('  ✗', name, '\n     ', (e.stack || String(e)).split('\n').slice(0, 6).join('\n      ')); }
++}
++
++(async () => {
++    const network = await startNetwork();
++    const billing = await startBilling({ network });
++    process.env.OV_NETWORK_INTERNAL_URL = network.url;
++    process.env.OV_BILLING_INTERNAL_URL = billing.url;
++
++    const db = require('../server/db/database');
++    db.initDb();
++    const raw = db.getDb();
++    const addUser = (id, username, role, extra = {}) => raw.prepare(
++        `INSERT INTO users (id, username, display_name, email, password_hash, role, is_owner, openvibe_bucks_balance, openvibe_bucks_cashout_balance)
++         VALUES (?, ?, ?, ?, 'x', ?, ?, ?, ?)`).run(id, username, username, `${username}@x`, role, extra.is_owner ? 1 : 0, extra.bucks || 0, extra.cashout || 0);
++    addUser(1, 'owner', 'admin', { is_owner: 1 });
++    addUser(2, 'ann', 'user', { bucks: 2000 });
++    addUser(3, 'bob', 'streamer', { cashout: 1000 });
++    addUser(4, 'admin2', 'admin');
++    raw.prepare("INSERT INTO linked_accounts (user_id, service, service_user_id, subject_id) VALUES (2, 'network', '102', ?), (3, 'network', '103', ?)").run(SID_ANN, SID_BOB);
++    db.setSetting('powerchat_enabled', 'true');
++    db.setSetting('powerchat_client_id', 'pca_test');
++    db.setSetting('powerchat_site_tip_username', 'sitepc');
++    const snapshot = () => ({
++        users: raw.prepare('SELECT id, openvibe_bucks_balance AS b, openvibe_bucks_cashout_balance AS c FROM users ORDER BY id').all(),
++        tx: raw.prepare('SELECT COUNT(*) AS n FROM transactions').get().n,
++        orders: raw.prepare('SELECT COUNT(*) AS n FROM payment_orders').get().n,
++        subs: raw.prepare('SELECT COUNT(*) AS n, COALESCE(MAX(updated_at), \'\') AS u, COALESCE(GROUP_CONCAT(status), \'\') AS s FROM subscriptions').get(),
++    });
++
++    const auth = require('../server/auth/auth');
++    const signIn = (req) => { const id = Number(req.headers['x-test-user'] || 0); const u = id ? db.getUserById(id) : null; if (u) req.user = u; return u; };
++    auth.requireAuth = (req, res, next) => (signIn(req) ? next() : res.status(401).json({ error: 'Authentication required' }));
++    auth.optionalAuth = (req, res, next) => { signIn(req); next(); };
++    const express = require('express');
++    const app = express();
++    app.use(express.json());
++    app.use((req, res, next) => { signIn(req); next(); });
++    app.use('/api/funds', require('../server/monetization/routes'));
++    app.use('/api/payments', require('../server/monetization/payments-routes'));
++    app.use('/api/admin', require('../server/admin/routes'));
++    const server = http.createServer(app);
++    await new Promise((r) => server.listen(0, '127.0.0.1', r));
++    const call = async (method, p, user, body) => {
++        const res = await fetch(`http://127.0.0.1:${server.address().port}${p}`, { method, headers: { 'content-type': 'application/json', ...(user ? { 'x-test-user': String(user) } : {}) }, body: body ? JSON.stringify(body) : undefined });
++        const text = await res.text();
++        let json = null; try { json = JSON.parse(text); } catch { /* */ }
++        return { status: res.status, json, text };
++    };
++    const money = require('../server/monetization/money-authority');
++    const mediaQueue = require('../server/media/media-queue');
++
++    // Every write route a person or operator can start. Each must answer 503 money_writes_frozen.
++    const writes = [
++        ['POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 10 }],
++        ['POST', '/api/funds/cashout', 3, { amount: 600, paypal_email: 'bob@example.com' }],
++        ['POST', '/api/funds/recycle', 3, { amount: 10 }],
++        ['POST', '/api/funds/cashout/1/approve', 1, {}],
++        ['POST', '/api/funds/cashout/1/deny', 1, {}],
++        ['POST', '/api/payments/bucks/checkout', 2, { provider: 'powerchat', bucks: 500 }],
++        ['POST', '/api/payments/subscribe', 2, { streamer: 'bob', provider: 'bucks' }],
++        ['POST', '/api/payments/subscriptions/1/cancel', 2, {}],
++    ];
++    async function expectAllRefused(label) {
++        for (const [m, p, u, b] of writes) {
++            const r = await call(m, p, u, b);
++            assert.strictEqual(r.status, 503, `${label} ${p}: ${r.text}`);
++            assert.strictEqual(r.json.code, 'money_writes_frozen', `${label} ${p}`);
++        }
++        await assert.rejects(mediaQueue.charge({ currency: 'vibes', cost: 10, userId: 2, streamerId: 3, streamId: null, label: 'x' }), /paused/);
++    }
++
++    await check('only the owner can freeze; every admin can see it', async () => {
++        assert.strictEqual((await call('POST', '/api/admin/money/freeze', 4, { on: true })).status, 403);
++        assert.strictEqual((await call('POST', '/api/admin/money/freeze', 2, { on: true })).status, 403);
++        assert.strictEqual((await call('PUT', '/api/admin/settings/money_writes_frozen', 4, { value: 'true' })).status, 403, 'not through the generic settings either');
++        assert.strictEqual(money.isFrozen(), false);
++        const r = await call('POST', '/api/admin/money/freeze', 1, { on: true, reason: 'Billing cutover step 3' });
++        assert.strictEqual(r.status, 200, r.text);
++        assert.strictEqual(r.json.frozen, true);
++        const seen = await call('GET', '/api/admin/money', 4);
++        assert.deepStrictEqual([seen.json.authority, seen.json.frozen, seen.json.reason, seen.json.by], ['live', true, 'Billing cutover step 3', 'owner']);
++        assert.strictEqual((await call('GET', '/api/admin/money', 2)).status, 403, 'not for non-admins');
++        assert.strictEqual((await call('GET', '/api/payments/config')).json.moneyFrozen, true);
++    });
++
++    await check('live mode, frozen: every money write is refused and nothing moves', async () => {
++        const before = snapshot();
++        // A due auto-renewing subscription: the sweep must not renew or expire it while frozen.
++        raw.prepare("INSERT INTO subscriptions (subscriber_id, streamer_id, tier, provider, price_cents, status, is_active, current_period_end, auto_renew) VALUES (2, 3, 1, 'bucks', 499, 'active', 1, datetime('now', '-1 hour'), 1)").run();
++        const withSub = snapshot();
++        await expectAllRefused('live');
++        require('../server/monetization/payments').startRenewalSweeper();   // sweeps once immediately
++        assert.deepStrictEqual(snapshot(), withSub, 'no column, ledger, order or subscription change');
++        assert.notDeepStrictEqual(before, withSub);
++    });
++
++    await check('live mode, frozen: a Vibes media refund is deferred (not lost, not marked refunded)', async () => {
++        const id = Number(db.createMediaRequest({ streamer_id: 3, stream_id: null, user_id: 2, username: 'ann', input: 'x', canonical_url: 'https://x.test/1', embed_url: null, provider: 'youtube', title: 't', thumbnail_url: null, duration_seconds: 60, cost: 10, queue_position: 1, currency: 'vibes' }).lastInsertRowid);
++        assert.strictEqual(await mediaQueue.refund(id), 0);
++        assert.strictEqual(db.getMediaRequestById(id).refunded, 0);
++    });
++
++    await check('live mode, frozen: reads work', async () => {
++        const b = await call('GET', '/api/funds/balance', 2);
++        assert.strictEqual(b.status, 200); assert.strictEqual(b.json.balance, 2000);
++        assert.strictEqual((await call('GET', '/api/funds/history', 2)).status, 200);
++        assert.strictEqual((await call('GET', '/api/payments/channel/bob', 2)).status, 200);
++    });
++
++    await check('live mode, frozen: a checkout started before the freeze still settles when the provider confirms it', async () => {
++        money.setFrozen(false);
++        const order = db.createPaymentOrder({ user_id: 2, provider: 'powerchat', kind: 'bucks', amount_cents: 500, bucks: 500 });
++        money.setFrozen(true, { reason: 'x', by: 'test' });
++        const consumed = require('../server/integrations/powerchat-checkout').handleAttributedDonation(null, { appExternalRef: `pcorder:${order.id}`, amountUsdCents: 500 });
++        assert.strictEqual(consumed, true);
++        assert.strictEqual(db.getPaymentOrderById(order.id).status, 'credited');
++        assert.strictEqual(db.getUserById(2).openvibe_bucks_balance, 2500);
++    });
++
++    await check('unfreeze: money moves again', async () => {
++        const r = await call('POST', '/api/admin/money/freeze', 1, { on: false });
++        assert.strictEqual(r.json.frozen, false);
++        const d = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 10 });
++        assert.strictEqual(d.status, 200, d.text);
++    });
++
++    await check('billing mode, frozen: refused before Billing is ever called; unfrozen: Billing is called', async () => {
++        process.env.BILLING_AUTHORITY = 'billing';
++        billing.fund(SID_ANN, 1000);
++        money.setFrozen(true, { reason: 'cutover', by: 'test' });
++        const n = billing.calls.length;
++        await expectAllRefused('billing');
++        assert.strictEqual(billing.calls.length, n, 'zero Billing calls while frozen');
++        assert.strictEqual((await call('GET', '/api/funds/balance', 2)).status, 200, 'reads still served (from Billing)');
++        money.setFrozen(false);
++        const d = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 10 });
++        assert.strictEqual(d.status, 200, d.text);
++        assert.strictEqual(billing.calls[billing.calls.length - 1].path, '/transfers');
++    });
++
++    await check('a BILLING_AUTHORITY typo refuses money writes instead of guessing', async () => {
++        process.env.BILLING_AUTHORITY = 'bilIing';
++        assert.strictEqual(money.authority(), 'invalid');
++        const r = await call('POST', '/api/funds/donate', 2, { streamer_id: 3, amount: 10 });
++        assert.strictEqual(r.status, 503); assert.strictEqual(r.json.code, 'billing_misconfigured');
++        assert.throws(() => db.addVibes(2, 1), /not 'live' or 'billing'/);
++        delete process.env.BILLING_AUTHORITY;
++    });
++
++    server.close();
++    await billing.close();
++    await network.close();
++    quiet(failures ? `\n${failures} failed` : '\nall passed');
++    process.exit(failures ? 1 : 0);
++})().catch((e) => { quiet(e); process.exit(1); });
