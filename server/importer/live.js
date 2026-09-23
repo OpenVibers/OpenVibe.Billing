@@ -61,6 +61,10 @@ async function importLive(ctx, { live, resolveLiveUsers, dryRun = false, log = c
     const users = live.prepare(`SELECT id, username, COALESCE(openvibe_bucks_balance, 0) AS credit${hasCashout ? ', COALESCE(openvibe_bucks_cashout_balance, 0) AS payable' : ', 0 AS payable'} FROM users`).all();
     const txns = tableExists(live, 'transactions') ? live.prepare('SELECT * FROM transactions ORDER BY id').all() : [];
     const orders = tableExists(live, 'payment_orders') ? live.prepare('SELECT * FROM payment_orders ORDER BY id').all() : [];
+    // A direct subscription settles only on the streamer's own PowerChat account (providers/powerchat.js).
+    const pcAccount = new Map(tableExists(live, 'powerchat_connections')
+        ? live.prepare('SELECT user_id, powerchat_username FROM powerchat_connections WHERE powerchat_username IS NOT NULL').all().map(r => [r.user_id, String(r.powerchat_username).toLowerCase()])
+        : []);
     const subCols = columns(live, 'subscriptions');
     const subs = subCols.length ? live.prepare('SELECT * FROM subscriptions ORDER BY id').all() : [];
     let resetAt = null;
@@ -119,6 +123,7 @@ async function importLive(ctx, { live, resolveLiveUsers, dryRun = false, log = c
                     route = ref.split(':')[0];
                     fee = Number((ref.match(/:fee=(\d+)/) || [])[1] || 0);
                     renew = /:renew$/.test(ref) ? 1 : 0;
+                    if (route === 'direct' && pcAccount.has(o.streamer_id)) meta.receiving_account = pcAccount.get(o.streamer_id);
                     ref = null;
                     report.route_markers++;
                 }

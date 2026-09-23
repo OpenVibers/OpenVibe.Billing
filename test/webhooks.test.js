@@ -80,7 +80,7 @@ const { boot, check, done } = require('./helpers/app');
 
     await check('pcsub direct is EXTERNAL: the entitlement is granted, no money is booked', async () => {
         const other = t.user(24);
-        const i = await intent({ kind: 'subscription', subject: other, streamer, route: 'direct' });
+        const i = await intent({ kind: 'subscription', subject: other, streamer, route: 'direct', receiving_account: 'StreamerPC' });
         assert.strictEqual(i.amount_cents, 499);
         const before = (await t.balances(streamer.id)).payable;
         const r = await t.powerchat(donation({ amountUsdCents: 499, appExternalRef: i.checkout_ref }, 'streamerpc'));

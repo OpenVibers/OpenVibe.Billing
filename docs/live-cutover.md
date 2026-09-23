@@ -19,7 +19,7 @@ default**: applied and deployed with `BILLING_AUTHORITY` unset, Live behaves exa
 | Cashout request / recycle | Live columns | `POST /api/v1/cashouts` / `POST /api/v1/recycle` |
 | Cashout approve / deny / pending list (owner) | Live | **409** — decided in Billing's **staff console** (`https://billing.openvibe.network/cashouts`; payout reference required, escrow enforced; ADR-012 rule 10) |
 | Subscribe with Vibes | Live columns + `subscriptions` | entitlement check, then `POST /api/v1/subscriptions` (source `credit`) |
-| Subscribe via PowerChat / Stripe | Live order + link | `POST /api/v1/intents` (kind subscription, route `site`/`direct`) |
+| Subscribe via PowerChat / Stripe | Live order + link | `POST /api/v1/intents` (kind subscription, route `site`/`direct`; `direct` also needs `receiving_account` = the streamer's PowerChat username from `powerchat_connections`) |
 | Cancel, "my subscriptions", channel "subscribed?" + count | Live `subscriptions` | Billing subscriptions/entitlements (cancel keeps the paid period) |
 | Balance, history | Live columns / `transactions` | `GET /api/v1/balances/:subject`, `GET /api/v1/transactions`; **unavailable** (503) when Billing does not answer — never the legacy column |
 | Subscriber perks (PowerChat overlay sub badge, AI "subscriber" flag) | `subscriptions` row | Billing entitlement, cached 60 s (served stale at most 10 min while refreshing; unknown = not a subscriber) |

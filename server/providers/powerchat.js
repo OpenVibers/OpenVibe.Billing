@@ -125,6 +125,16 @@ function createPowerchat(cfg, { network } = {}) {
             if (!intent || intent.kind !== 'subscription' || !intent.streamer_subject) return { effect: 'none', reason: `subscription checkout ${ref} has no subscription intent` };
             const route = intent.route === 'direct' ? 'direct' : 'site';
             if (route === 'site' && !onSite) return offSite('site-routed subscription checkout');
+            if (route === 'direct') {
+                // Direct: only a tip on the streamer's own account (named when the intent was made) counts.
+                const expected = String((intent.metadata && intent.metadata.receiving_account) || '').toLowerCase();
+                if (!expected || host !== expected) {
+                    return { effect: 'none', review: true, hold: true,
+                        reason: expected
+                            ? `direct subscription checkout ${ref} was paid to PowerChat account "${host || 'unknown'}", not the streamer's "${expected}" — nothing granted, held for review`
+                            : `direct subscription checkout ${ref} names no receiving account — nothing granted, held for review` };
+                }
+            }
             if (cents + 1 < intent.amount_cents && intents.settledInLive(intent)) {
                 return { effect: 'none', reason: `underpaid delivery for ${ref}, which Live already credited before the cutover — review`, review: true };
             }

@@ -48,6 +48,18 @@ const { boot, check, done } = require('./helpers/app');
         assert.strictEqual(e.json.active, false);
     });
 
+    await check('a direct pcsub needs the streamer\'s receiving account, and a tip elsewhere grants nothing', async () => {
+        const missing = await t.call('POST', '/api/v1/intents', { cap: ['billing.intent.create'], body: { provider: 'powerchat', kind: 'subscription', subject: attacker, streamer: victim, route: 'direct' } });
+        assert.strictEqual(missing.status, 422, missing.text);
+        const i = await intent({ kind: 'subscription', subject: attacker, streamer: victim, route: 'direct', receiving_account: 'victimpc' });
+        const r = await tipTo('attackerpc', { amountUsdCents: 499, appExternalRef: i.checkout_ref });
+        assert.strictEqual(r.json.result.effect, 'none', JSON.stringify(r.json));
+        const e = await t.call('GET', `/api/v1/entitlements/${attacker.id}?streamer=${victim.id}`, { cap: ['billing.entitlement.check'] });
+        assert.strictEqual(e.json.active, false, 'no subscription from a tip to the subscriber\'s own account');
+        const ok = await tipTo('VictimPC', { amountUsdCents: 499, appExternalRef: i.checkout_ref });
+        assert.strictEqual(ok.json.result.effect, 'settled', JSON.stringify(ok.json));
+    });
+
     await check('the same refs paid to the site account still settle', async () => {
         const r = await tipTo('openvibe', { amountUsdCents: 250, appExternalRef: `pcdon:${attackerLiveId}:0` });
         assert.strictEqual(r.json.result.effect, 'settled', JSON.stringify(r.json));

@@ -48,10 +48,18 @@ function create(ctx, input) {
         row.route = input.route === 'direct' ? 'direct' : (provider === 'powerchat' ? 'site' : null);
         row.fee_cents = row.route === 'site' ? rates.siteFeeCents(base) : 0;
         row.amount_cents = base + row.fee_cents;
+        // A direct subscription is paid to the streamer's own provider account. Without naming that
+        // account, anyone's tip carrying the ref (to their OWN account) would grant the subscription.
+        if (row.route === 'direct' && provider === 'powerchat') {
+            const acct = String(input.receiving_account || '').trim().toLowerCase();
+            if (!/^[a-z0-9_.-]{1,64}$/.test(acct)) fail(422, 'billing.invalid_input', "a direct PowerChat subscription needs receiving_account (the streamer's PowerChat username)");
+            row.receiving_account = acct;
+        }
     } else {
         fail(422, 'billing.invalid_input', "kind must be 'purchase' or 'subscription'");
     }
     row.metadata = { rates: rates.snapshot({ price_tiers: kind === 'purchase' ? rates.priceTiers : undefined, sub_share_pct: rates.subSharePct, site_route_fee_pct: rates.siteRouteFeePct }) };
+    if (row.receiving_account) row.metadata.receiving_account = row.receiving_account;
     db.prepare(`INSERT INTO payment_intents (id, provider, provider_ref, kind, subject, streamer_subject, amount_cents, fee_cents, bits, route,
             auto_renew, status, metadata, created_at, updated_at)
         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?)`).run(row.id, provider, kind, subject, row.streamer_subject,
