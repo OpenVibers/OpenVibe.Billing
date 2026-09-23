@@ -5,10 +5,9 @@
  * from OpenVibe.Network for audience 'openvibe.billing'; the capability is checked here against
  * the token's `cap` claim.
  *
- * The billing.* capabilities are proposed (docs/capabilities-proposal/) and not yet in an
- * openvibe-contracts release, so contracts' capabilities.check() would answer capability.unknown.
- * Until they ship, the grant is matched locally with contracts' own grants(): an exact id, or a
- * trailing ".*" family grant ("billing.*", "billing.cashout.*").
+ * The billing.* capabilities ship in openvibe-contracts v0.8.0. The grant is matched with
+ * contracts' own grants(): an exact id, or a trailing ".*" family grant ("billing.*",
+ * "billing.cashout.*").
  */
 const { serviceAuth, capabilities, http, validate } = require('openvibe-contracts');
 
