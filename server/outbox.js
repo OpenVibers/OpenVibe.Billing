@@ -12,14 +12,15 @@ const { ids, validate, serviceAuth } = require('openvibe-contracts');
 
 const ACTOR = { type: 'service', id: 'billing' };
 
-function enqueue(ctx, { event_type, subject, payload, priority = 'important', traceId }) {
+/** actor defaults to the service itself; staff actions pass the person ({ type: 'user', id }). */
+function enqueue(ctx, { event_type, subject, payload, priority = 'important', traceId, actor }) {
     const ms = ctx.now();
     const env = {
         event_id: ids.newId('event', ms),
         event_type,
         version: 1,
         source: 'billing',
-        actor: ACTOR,
+        actor: actor || ACTOR,
         timestamp: new Date(ms).toISOString(),
         priority,
         visibility: 'internal',

@@ -37,17 +37,27 @@ function parseTiers(raw) {
     return [...tiers].sort((a, b) => b.min - a.min);
 }
 
+// Canonical user subject ids (usr_ + ULID). Anything else in BILLING_STAFF_SUBJECTS is ignored
+// (and reported at boot) — a typo must never widen access, and must not stop the money API.
+const USER_SUBJECT_RE = /^usr_[0-9A-HJKMNP-TV-Z]{26}$/;
+function parseStaff(raw) {
+    const items = String(raw || '').split(',').map((s) => s.trim()).filter(Boolean);
+    return { subjects: [...new Set(items.filter((s) => USER_SUBJECT_RE.test(s)))], invalid: items.filter((s) => !USER_SUBJECT_RE.test(s)) };
+}
+
 function loadConfig(env = process.env) {
     const nodeEnv = env.NODE_ENV || 'development';
     const isProduction = nodeEnv === 'production';
     const port = int(env.PORT, 4600);
     const networkUrl = trim(env.OV_NETWORK_URL || 'https://openvibe.network');
+    const baseUrl = trim(env.BASE_URL || (isProduction ? 'https://billing.openvibe.network' : `http://localhost:${port}`));
+    const staff = parseStaff(env.BILLING_STAFF_SUBJECTS);
     return {
         nodeEnv,
         isProduction,
         port,
         host: env.HOST || '127.0.0.1',
-        baseUrl: trim(env.BASE_URL || (isProduction ? 'https://billing.openvibe.network' : `http://localhost:${port}`)),
+        baseUrl,
         trustProxy: env.TRUST_PROXY != null ? Number(env.TRUST_PROXY) : 1,
         dbPath: env.BILLING_DB_PATH || './data/billing.db',
 
@@ -123,7 +133,25 @@ function loadConfig(env = process.env) {
             sweepIntervalMs: int(env.BILLING_SWEEP_INTERVAL_MS, 60 * 60 * 1000),
             webhookRetryMs: int(env.BILLING_WEBHOOK_RETRY_MS, 60 * 1000),
         },
+
+        // Staff console (server/console): Network SSO (authorization code + PKCE S256, OAuth
+        // client `billing`), only for Network admins listed in BILLING_STAFF_SUBJECTS.
+        console: {
+            staffSubjects: staff.subjects,
+            invalidStaffSubjects: staff.invalid,
+            // Signs the sign-in flow cookie and keys the IP hashes in staff_audit. Required in
+            // production (the console answers 503 without it); tests/dev get an ephemeral one.
+            sessionSecret: env.BILLING_SESSION_SECRET || '',
+            sessionTtlMin: Math.max(5, Math.min(12 * 60, int(env.BILLING_SESSION_TTL_MIN, 60))),
+            redirectUri: `${baseUrl}/auth/callback`,
+            // Secure cookies whenever the console is served over https (always in production).
+            cookieSecure: baseUrl.startsWith('https://'),
+            // Audience a Network user token must carry (Network user tokens are not minted for
+            // openvibe.billing; the Network's own audience is always present).
+            ssoAudience: env.BILLING_SSO_AUDIENCE || 'openvibe.network',
+            staffRole: 'admin',
+        },
     };
 }
 
-module.exports = { loadConfig, DEFAULT_PRICE_TIERS };
+module.exports = { loadConfig, DEFAULT_PRICE_TIERS, USER_SUBJECT_RE };

@@ -79,6 +79,11 @@ function fabricateLive(file) {
         assert.strictEqual(bal('user_credit', alice), 500);
         const rec = t.assertReconciled('after a refused legacy delivery');
         assert.ok(rec.warnings.rejected_events.some((e) => e.id === r.json.event), 'listed for review');
+        const queue = require('../server/console/queries').reviewQueue(t.db);
+        const shown = queue.rejected.find((e) => e.id === r.json.event);
+        assert.ok(shown, 'listed in the staff console review queue');
+        assert.strictEqual(shown.result.code, 'billing.intent_settled_in_live');
+        assert.ok(!('payload' in shown), 'without its payload');
     });
 
     await check('a subscription order Live credited is not paid (or granted) again either', async () => {

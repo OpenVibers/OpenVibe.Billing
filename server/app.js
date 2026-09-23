@@ -7,6 +7,7 @@
  *   GET  /api/health, /api/ready          liveness / readiness
  *   /api/v1/*                             operations API (service tokens, see api/v1.js)
  *   /webhooks/<provider>                  provider receipts (see api/webhooks.js)
+ *   /, /auth/*, /cashouts, …               staff console (Network SSO, server-rendered; see console/index.js)
  *
  * createApp({ config, db, keys, identity, adapters, now, fetchImpl, log }) — everything injectable.
  */
@@ -19,6 +20,7 @@ const { createKeyProvider, createIdentity } = require('./network');
 const { createAuth } = require('./api/auth');
 const { v1Router } = require('./api/v1');
 const { webhooksRouter } = require('./api/webhooks');
+const { consoleRouter } = require('./console');
 const providers = require('./providers');
 const { isFrozen } = require('./ops/common');
 
@@ -57,7 +59,8 @@ function createApp(opts = {}) {
     app.use('/webhooks', webhooksRouter({ ctx, adapters }));
     app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters }));
 
-    app.get('/', (req, res) => res.type('text/plain').send('OpenVibe.Billing — the OpenVibe money ledger. Service API only; see https://github.com/OpenVibers/OpenVibe.Billing\n'));
+    app.get('/robots.txt', (req, res) => res.type('text/plain').send('User-agent: *\nDisallow: /\n'));
+    app.use(consoleRouter({ ctx, adapters, keys, fetchImpl }));
     app.use((req, res) => http.sendProblem(res, 404, 'not_found', { ctx: req.ov }));
     // Malformed JSON and other body-parser errors.
     // eslint-disable-next-line no-unused-vars

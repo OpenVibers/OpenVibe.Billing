@@ -3,7 +3,8 @@
  * Stand-ins for the services Billing talks to, each on a random port with a real RS256 key pair.
  *
  *   startNetwork()  JWKS, client-credentials token endpoint (scope → cap), resolve-batch
- *                   (insists on a service token for openvibe.network holding identity.subject.resolve)
+ *                   (insists on a service token for openvibe.network holding identity.subject.resolve),
+ *                   and SSO: authorize() issues a PKCE-bound code, /oauth/token redeems it, /oauth/revoke
  *   startStripe()   /checkout/sessions and /subscriptions/:id, recording calls; `fail` makes it 500
  *   startEvents()   POST /api/v1/events recording batches and the bearer tokens it saw
  */
@@ -33,6 +34,23 @@ async function startNetwork() {
         const now = Math.floor(Date.now() / 1000);
         return serviceAuth.signServiceToken({ iss: iss || issuer, sub, actor_type: 'service', aud, cap, iat: now, exp: now + expSec, jti: crypto.randomBytes(8).toString('hex') }, privatePem);
     }
+    // SSO: authorize() stands in for the account chooser + /oauth/confirm — it issues a code bound
+    // to the PKCE challenge and redirect URI; /oauth/token (authorization_code) checks both and
+    // returns a user access token shaped like Network's issueTokenPair().
+    const codes = new Map();
+    const revoked = [];
+    function authorize({ subject_id, role = 'user', username = 'someone', challenge, redirect_uri, nowMs = Date.now() }) {
+        const code = crypto.randomBytes(16).toString('hex');
+        codes.set(code, { subject_id, role, username, challenge, redirect_uri, nowMs });
+        return code;
+    }
+    function userToken(u) {
+        const now = Math.floor(u.nowMs / 1000);
+        return serviceAuth.signServiceToken({
+            sub: 42, id: 42, subject_id: u.subject_id, username: u.username, display_name: u.username, role: u.role,
+            iss: issuer, aud: ['openvibe.live', 'openvibe.tools', 'openvibe.games', 'openvibe.media', 'openvibe.network'], iat: now, exp: now + 86400,
+        }, privatePem);
+    }
     function addUser(liveId) {
         const subject = ids.newId('user');
         if (liveId != null) legacy[String(liveId)] = subject;
@@ -46,9 +64,19 @@ async function startNetwork() {
             const body = Object.fromEntries(new URLSearchParams(raw));
             grants.push(body);
             if (body.client_secret !== 'shh') return send(res, 401, { error: 'invalid_client' });
+            if (body.grant_type === 'authorization_code') {
+                const c = codes.get(body.code);
+                if (!c) return send(res, 400, { error: 'invalid_grant', error_description: 'Invalid authorization code' });
+                codes.delete(body.code);
+                if (c.redirect_uri !== body.redirect_uri) return send(res, 400, { error: 'invalid_grant', error_description: 'Redirect URI mismatch' });
+                const digest = crypto.createHash('sha256').update(String(body.code_verifier || '')).digest('base64url');
+                if (!c.challenge || digest !== c.challenge) return send(res, 400, { error: 'invalid_grant', error_description: 'PKCE verification failed' });
+                return send(res, 200, { access_token: userToken(c), refresh_token: `rt_${crypto.randomBytes(8).toString('hex')}`, token_type: 'Bearer', expires_in: 86400, user: { id: 42, role: c.role } });
+            }
             const cap = String(body.scope || '').split(/\s+/).filter(Boolean);
             return send(res, 200, { access_token: signService({ sub: `svc:${body.client_id}`, aud: [body.audience], cap }), token_type: 'Bearer', expires_in: 300 });
         }
+        if (req.url === '/oauth/revoke' && req.method === 'POST') { revoked.push(JSON.parse(raw || '{}').token); return send(res, 200, { revoked: true }); }
         if (req.url === '/internal/identity/resolve-batch' && req.method === 'POST') {
             const auth = String(req.headers.authorization || '');
             const v = serviceAuth.verifyServiceToken(auth.slice(7), { publicKey: publicPem, issuer, audience: 'openvibe.network' });
@@ -68,7 +96,7 @@ async function startNetwork() {
     });
     const url = await listen(server);
     issuer = url;
-    return { url, publicPem, signService, addUser, legacy, resolveCalls, grants, state, close: () => new Promise((r) => server.close(r)) };
+    return { url, publicPem, signService, addUser, authorize, revoked, legacy, resolveCalls, grants, state, close: () => new Promise((r) => server.close(r)) };
 }
 
 async function startStripe() {

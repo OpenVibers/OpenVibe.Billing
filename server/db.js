@@ -240,6 +240,43 @@ CREATE TABLE IF NOT EXISTS outbox (
     last_error TEXT
 );
 CREATE INDEX IF NOT EXISTS outbox_unsent ON outbox (sent_at, seq);
+
+-- Staff console (server/console). Every staff action — and every refused one — is one row here,
+-- never updated or deleted. Done actions are also announced as billing.staff.action (outbox).
+CREATE TABLE IF NOT EXISTS staff_audit (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    at TEXT NOT NULL,
+    actor_subject TEXT,
+    actor_username TEXT,
+    action TEXT NOT NULL,
+    target_type TEXT,
+    target_id TEXT,
+    reason TEXT,
+    outcome TEXT NOT NULL CHECK (outcome IN ('done', 'refused')),
+    detail TEXT NOT NULL DEFAULT '{}',
+    request_id TEXT,
+    ip_hash TEXT
+);
+CREATE INDEX IF NOT EXISTS staff_audit_target ON staff_audit (target_type, target_id);
+CREATE TRIGGER IF NOT EXISTS staff_audit_no_update BEFORE UPDATE ON staff_audit
+BEGIN SELECT RAISE(ABORT, 'staff_audit is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS staff_audit_no_delete BEFORE DELETE ON staff_audit
+BEGIN SELECT RAISE(ABORT, 'staff_audit is append-only'); END;
+
+-- Console sessions: the cookie holds a random id, the table only its SHA-256.
+CREATE TABLE IF NOT EXISTS staff_sessions (
+    id_hash TEXT PRIMARY KEY,
+    subject TEXT NOT NULL,
+    username TEXT,
+    role TEXT NOT NULL,
+    csrf TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT,
+    ip_hash TEXT
+);
+CREATE INDEX IF NOT EXISTS staff_sessions_expiry ON staff_sessions (expires_at);
 `;
 
 function openDb(dbPath) {
