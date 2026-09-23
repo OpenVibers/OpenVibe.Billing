@@ -39,6 +39,9 @@ function createApp(opts = {}) {
 
     const app = express();
     app.disable('x-powered-by');
+    // nginx matches `location ^~ /api/v1 { deny all; }` case-sensitively; Express would otherwise
+    // route /API/v1/… to the same API, walking past the public-host deny.
+    app.set('case sensitive routing', true);
     app.set('trust proxy', config.trustProxy);
     app.use(http.middleware());
     app.use((req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });

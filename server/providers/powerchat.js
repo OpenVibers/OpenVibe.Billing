@@ -18,6 +18,8 @@
  *                               site-routed tip to the streamer; direct → EXTERNAL tip, no effect.
  *   pcdon:<streamer>:<donor>    site-routed tip for a creator → MONEY into their payable
  *                               (legacy links carry Live user ids; they are resolved to subjects)
+ *   (pcorder, site pcsub and pcdon count only when the tip was paid to POWERCHAT_SITE_USERNAME:
+ *    the ref is buyer-editable in the fallback tip link; from any other account they are held)
  *   anything else               a tip on a streamer's own PowerChat → EXTERNAL, no Billing effect
  *                               (recorded as an interaction by OpenVibe.Tips).
  * Test deliveries (isTest, or source manual_test) move no money and are ignored unless
@@ -98,8 +100,21 @@ function createPowerchat(cfg, { network } = {}) {
         const receiptRef = `powerchat:${paymentId}`;
         const ref = String(data.appExternalRef || '');
         const meta = { powerchat_event: paymentId, donor_name: data.donorName ? String(data.donorName).slice(0, 80) : null, app_ref: ref || null };
+        const host = String((envelope.streamer && envelope.streamer.username) || '').toLowerCase();
+        // Money only reaches OpenVibe when it was paid to the SITE account. app_ref rides in the
+        // buyer-editable fallback tip link (?app_ref=…), so a creator could put `pcorder:` / `pcdon:` /
+        // a site `pcsub:` ref on a tip to their OWN PowerChat (money they keep) and have Billing mint
+        // credit or cash-out-able payable for it. Site-routed refs from any other account are held.
+        const onSite = !!cfg.siteUsername && host === cfg.siteUsername;
+        const offSite = (what) => ({
+            effect: 'none', review: true,
+            reason: cfg.siteUsername
+                ? `${what} ${ref} was paid to PowerChat account "${host || 'unknown'}", not the site account — nothing credited, held for review`
+                : `${what} ${ref}: POWERCHAT_SITE_USERNAME is not set, so the receiving account cannot be verified — nothing credited, held for review`,
+        });
         let m;
         if ((m = ref.match(/^pcorder:(.+)$/))) {
+            if (!onSite) return offSite('purchase checkout');
             const intent = intents.find(ctx.db, m[1]);
             if (!intent || intent.kind !== 'purchase') return { effect: 'none', reason: `purchase checkout ${ref} has no purchase intent` };
             if (cents < 1) return { effect: 'none', reason: 'zero-amount purchase' };
@@ -109,6 +124,7 @@ function createPowerchat(cfg, { network } = {}) {
             const intent = intents.find(ctx.db, m[1]);
             if (!intent || intent.kind !== 'subscription' || !intent.streamer_subject) return { effect: 'none', reason: `subscription checkout ${ref} has no subscription intent` };
             const route = intent.route === 'direct' ? 'direct' : 'site';
+            if (route === 'site' && !onSite) return offSite('site-routed subscription checkout');
             if (cents + 1 < intent.amount_cents && intents.settledInLive(intent)) {
                 return { effect: 'none', reason: `underpaid delivery for ${ref}, which Live already credited before the cutover — review`, review: true };
             }
@@ -126,14 +142,14 @@ function createPowerchat(cfg, { network } = {}) {
             };
         }
         if ((m = ref.match(/^pcdon:([^:]+):([^:]*)$/))) {
+            if (!onSite) return offSite('site-routed tip');
             const to = await resolveUser(m[1]);
             if (!to) return { effect: 'none', reason: `site-routed tip for unknown streamer ${m[1]} — held for review`, hold: true };
             const from = await resolveUser(m[2]);
             if (cents < 1) return { effect: 'none', reason: 'zero-amount tip' };
             return { effect: 'tip', args: { provider: 'powerchat', receiptRef, paidCents: cents, from, to, test: isTest, idempotencyKey: key, actor, metadata: meta } };
         }
-        const host = String((envelope.streamer && envelope.streamer.username) || '').toLowerCase();
-        if (cfg.siteUsername && host === cfg.siteUsername) {
+        if (onSite) {
             // Money on the SITE account without one of our refs: Live ignored these. They are
             // recorded here and listed by reconciliation instead of vanishing.
             return { effect: 'none', reason: 'unattributed tip to the site PowerChat account — review', review: true };
