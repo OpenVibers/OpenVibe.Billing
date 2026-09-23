@@ -4,9 +4,17 @@
 the sequence below. Binding decision: [ADR-012](https://github.com/OpenVibers/OpenVibe.Contracts/blob/main/docs/adr/ADR-012-economic-classification.md).
 
 The Live side is the patch [`live-patch.diff`](live-patch.diff), made against OpenVibe.Live branch
-`seadragon` at `e032d78` and `git apply --check` clean on `9f4f1da` (that commit only touches the nginx
-config). It adds a switch that is **off by
-default**: applied and deployed with `BILLING_AUTHORITY` unset, Live behaves exactly as before.
+`seadragon` at `e032d78`. It has been merged into Live and deployed there since `c384787`. It adds a
+switch that is **off by default**. `BILLING_AUTHORITY` is not set in `/etc/openvibe/live.env`, so Live
+behaves exactly as before.
+
+Billing has a switch of the same name (`BILLING_AUTHORITY` in `/etc/openvibe/billing.env`, `live` by
+default). It decides one thing: whether an EXTERNAL tip (a tip paid on a streamer's own PowerChat)
+that reaches Billing's webhook is **announced** as `billing.receipt.external`. OpenVibe.Tips turns that
+event into the Live chat line, the alert and goal progress. Under `live` the tip is only recorded,
+because Live's own webhook announces it. The two switches are flipped in the same maintenance window
+(steps 3 and 6). Only one of Live and Billing ever receives the PowerChat webhook, so a tip is
+celebrated exactly once.
 
 ## What the patch does
 
@@ -55,17 +63,22 @@ default**: applied and deployed with `BILLING_AUTHORITY` unset, Live behaves exa
 
 ## Before the day
 
-1. **Billing** runs this repository at the commit that carries this document (it includes the
-   cutover guards: an order Live already credited is never settled again, a later import never
-   adjusts away Billing's own movements, `scripts/freeze.js`). `/etc/openvibe/billing.env`:
+1. **Billing** runs this repository at the commit that carries this document. That commit includes the
+   cutover guards (an order Live already credited is never settled again, and a later import never
+   adjusts away Billing's own movements), `scripts/freeze.js`, the EXTERNAL-receipt announcement, the
+   hourly reconciliation and `/metrics`. This release adds the `openvibe-shared` dependency, so the deploy
+   runs `npm ci --omit=dev` before the restart. Afterwards, `curl -s http://127.0.0.1:4600/metrics | head`
+   answers on the host and `/api/health` shows `"authority":"live"`. `/etc/openvibe/billing.env`:
    - `POWERCHAT_WEBHOOK_SECRET` = the PowerChat app's webhook signing secret (the value Live has in the
      `powerchat_webhook_secret` setting — the webhook is only re-pointed, not re-created);
-   - `POWERCHAT_SITE_USERNAME` = Live's `powerchat_site_tip_username`;
+   - `POWERCHAT_SITE_USERNAME` = Live's `powerchat_site_tip_username` (already set since 2026-09-23);
+   - `BILLING_AUTHORITY` **unset** (= `live`) until step 3;
    - `POWERCHAT_ALLOW_TEST_FULFILLMENT` off; `BILLING_*` rates equal to Live's settings
      (`bucks_per_usd`, `bucks_min_purchase_bucks`, `sub_price_usd`, `sub_streamer_share_pct`,
      `sub_site_route_fee_pct`, `MIN_CASHOUT_BUCKS`, `ESCROW_HOLD_DAYS`) — Live shows its own prices, Billing
      charges its own, so they must match (`GET /api/admin/money` lists any drift once the switch is on).
-2. **Network grants** for Live's client (`live`):
+2. **Network grants** for Live's client (`live`). These have been in place since 2026-09-23 (Network
+   `server/identity/principals.js`):
 
    | client | capability | audience |
    |---|---|---|
@@ -79,8 +92,9 @@ default**: applied and deployed with `BILLING_AUTHORITY` unset, Live behaves exa
 
    Live is deliberately **not** granted `billing.cashout.manage` or `billing.ledger.admin`.
    Those are held only by people, through Billing's staff console (below).
-3. **Staff console** (it replaces Live's cashout admin — without it nobody can approve a payout after
-   the switch):
+3. **Staff console**. It replaces Live's cashout admin: without it, nobody can approve a payout after
+   the switch. It has been live at `https://billing.openvibe.network` since 2026-09-23, with the owner as
+   the only staff member; the items below are how it was set up:
    - **Network:** OAuth client `billing` (today a service client with no redirect URI) gets the redirect
      URI `https://billing.openvibe.network/auth/callback` — add
      `{ client_id: 'billing', name: 'OpenVibe.Billing', redirect_uris: ['https://billing.openvibe.network/auth/callback'] }`
@@ -93,13 +107,22 @@ default**: applied and deployed with `BILLING_AUTHORITY` unset, Live behaves exa
      (console proxied, `/api/v1` denied on the public host, `/webhooks/*` public) and reload.
    - **Check:** sign in at `https://billing.openvibe.network/`, open Cashouts, run a reconciliation from the
      dashboard; the Audit log shows the sign-in and the run. Someone not listed gets 403.
-4. **Live** has the patch applied and deployed with `BILLING_AUTHORITY` unset (no behaviour change;
-   `GET /api/admin/money` answers `authority: "live"`).
+4. **Live** has the patch applied and deployed with `BILLING_AUTHORITY` unset (done since `c384787`;
+   no behaviour change; `GET /api/admin/money` answers `authority: "live"`).
 5. **Identity:** Live's daily legacy-map sync (`identity-legacy-sync`) has run since the last
    sign-ups (restart Live or wait a day), and Live's log has no `[Identity] live user N is mapped to …`
    conflict for a user who holds money. A shadow import against a fresh snapshot shows **no import
    holds** for users with a non-zero balance (a held user's Vibes sit on `hold:live:<id>` and would read
    as 0 under their subject until a later import releases them) and every adjustment is explained.
+   The same report's `PowerChat accounts: … unmapped` line should list nobody. Every Live PowerChat
+   connection maps to a creator (`provider_accounts`); an EXTERNAL tip on an unmapped account is held for
+   review instead of announced.
+6. **Tips** (for EXTERNAL tips): OpenVibe.Tips runs a release that consumes `billing.receipt.external`
+   (Tips `6d14574` or later). Its Events subscriptions include `billing.receipt.*`. To add it, run
+   `sudo bash -c "set -a; . /etc/openvibe/tips.env; set +a; cd /opt/openvibe.tips && sudo -E -u ubuntu node scripts/subscribe.js"`.
+   It creates the missing `billing.receipt.*` subscription and reports the existing
+   `billing.transaction.*` one. Tips already holds `live.tips_delivery.write`. `TIPS_CHAT_ADAPTER` stays
+   `none` until step 6.
 
 Shell helpers used below (on the host):
 
@@ -107,7 +130,10 @@ Shell helpers used below (on the host):
 # billing '<command>' runs one command with Billing's environment, as Billing's service user (ubuntu)
 # so the database files keep their owner — the same way the shadow imports were run.
 billing() { sudo bash -c "set -a; . /etc/openvibe/billing.env; set +a; export NODE_ENV=production BILLING_DB_PATH=/var/lib/openvibe-billing/billing.db; cd /opt/openvibe.billing && sudo -E -u ubuntu $1"; }
-LIVE_DB=/opt/openvibe.live/data/live.db
+LIVE_DB=/opt/openvibe.live/data/live.db     # production runs Live's legacy layout (a git checkout); there is no shared/
+# /var/backups/openvibe is root-only (0700), so Billing's user cannot read a snapshot there: the import reads
+# its copy from Billing's own state directory, and a second copy stays in /var/backups/openvibe for rollback.
+SNAPDIR=/var/lib/openvibe-billing
 ```
 
 Live owner calls are made from the browser console on openvibe.live, signed in as the owner:
@@ -117,17 +143,23 @@ Live owner calls are made from the browser console on openvibe.live, signed in a
 
 0. **Check who is live**: `curl -s https://openvibe.live/api/streams` — the deploy in step 6 restarts
    Live (RTMP/WHIP sessions reconnect); pick a quiet moment.
-1. **Freeze Live money writes** (runbook step 3): `api('/admin/money/freeze', { method: 'POST', body: { on: true, reason: 'Billing cutover' } })`;
+1. **Freeze Live money writes**: `api('/admin/money/freeze', { method: 'POST', body: { on: true, reason: 'Billing cutover' } })`;
    `api('/admin/money')` → `frozen: true`. New checkouts, donations, cashouts, subscriptions stop.
 2. **Let in-flight checkouts land** on Live: wait at least **60 minutes** after step 1 (minted PowerChat
    checkout links live one hour), then run the backfill once: `api('/powerchat/reconcile', { method: 'POST' })`.
    Look at what is still open:
-   `sqlite3 "$LIVE_DB" "SELECT id, provider, kind, amount_cents, status, created_at FROM payment_orders WHERE status IN ('pending','paid') AND created_at >= datetime('now','-3 days')"`.
+   `sudo sqlite3 -readonly "$LIVE_DB" "SELECT id, provider, kind, amount_cents, status, created_at FROM payment_orders WHERE status IN ('pending','paid') AND created_at >= datetime('now','-3 days')"`.
    A `paid` row is an anomaly to fix first; a `pending` one is carried into Billing as an intent and
    settles there if it is ever paid (canonical, un-minted links do not expire).
 3. **Back up and freeze Billing** so it holds PowerChat deliveries until the final import is in:
    `billing "sqlite3 /var/lib/openvibe-billing/billing.db '.backup /var/lib/openvibe-billing/billing-pre-cutover.db'"`
    (kept for rollback), then `billing "node scripts/freeze.js on 'Live cutover'"` → `frozen: true`.
+   Then make Billing the authority for EXTERNAL tips: add `BILLING_AUTHORITY=billing` to
+   `/etc/openvibe/billing.env` and `sudo systemctl restart openvibe-billing`. The freeze is kept in the
+   database, so it survives the restart. `curl -s http://127.0.0.1:4600/api/health` →
+   `"frozen":true,"authority":"billing"`. From step 4 on, an EXTERNAL tip that reaches Billing is held
+   with the other deliveries and announced when step 7 processes it. Live receives none of them, so it
+   announces none.
 4. **Re-point the PowerChat webhook** (manual, PowerChat developer dashboard for OpenVibe.Live's app):
    `https://openvibe.live/api/powerchat/webhook` → **`https://billing.openvibe.network/webhooks/powerchat`**,
    same signing secret. From this moment every delivery is stored (202) and held by Billing; Live gets none.
@@ -135,27 +167,37 @@ Live owner calls are made from the browser console on openvibe.live, signed in a
 5. **Final snapshot and import** (after step 4, so every delivery either reached Live before the snapshot
    or is held by Billing):
    ```bash
-   SNAP=/var/backups/openvibe/live-cutover-$(date +%F-%H%M).db      # keep this file (rollback)
-   sudo mkdir -p /var/backups/openvibe && sudo sqlite3 "$LIVE_DB" ".backup $SNAP" && sudo chown ubuntu "$SNAP" && sudo chmod 600 "$SNAP"
+   SNAP=$SNAPDIR/live-cutover-$(date +%F-%H%M).db
+   sudo sqlite3 "$LIVE_DB" ".backup $SNAP" && sudo chown ubuntu:ubuntu "$SNAP" && sudo chmod 600 "$SNAP"
+   sudo cp -p "$SNAP" /var/backups/openvibe/      # keep this copy (rollback)
    billing "node scripts/import-live.js --live-db $SNAP --dry-run"
    billing "node scripts/import-live.js --live-db $SNAP"
    billing 'node scripts/reconcile.js'
    ```
    Read the report: `holds` (must be empty for anyone with money), `adjustments`, `anomalies`,
-   `intents_updated` (orders Live credited since the shadow import). Reconciliation must print **OK**.
+   `intents_updated` (orders Live credited since the shadow import), and `PowerChat accounts` (nobody
+   `unmapped`). Reconciliation must print **OK**. The `receipts.stale` check does not count while Billing
+   is frozen, so the held deliveries are listed only as `unprocessed events`. What each Live table becomes is in
+   [live-mapping.md](live-mapping.md).
 6. **Switch Live**: add to `/etc/openvibe/live.env`
    ```
    BILLING_AUTHORITY=billing
    OV_BILLING_INTERNAL_URL=http://127.0.0.1:4600
    OV_BILLING_PUBLIC_URL=https://billing.openvibe.network
    ```
-   then `sudo /opt/openvibe.live/deploy/scripts/deploy.sh --wait-idle` (an env change needs the
-   restart; the systemd socket keeps accepting while it boots). Wait for `GET /api/ready`.
+   then `sudo /opt/openvibe.live/deploy/scripts/deploy.sh --restart --wait-idle`. `--restart` is
+   required: with no new commit, deploy.sh changes nothing unless told to restart, and only a restart
+   reads the new env. The systemd socket keeps accepting while Live boots. Wait for `GET /api/ready`.
    `api('/admin/money')` → `authority: "billing"`, `billing.reachable: true`, `billing.rates.drift: []`.
+   Then let Tips post chat lines: set `TIPS_CHAT_ADAPTER=live-chat` in `/etc/openvibe/tips.env` and run
+   `sudo systemctl restart openvibe-tips`. `curl -s http://127.0.0.1:4610/api/health` →
+   `"chat_adapter":"live-chat"`.
 7. **Unfreeze Billing**: `billing 'node scripts/freeze.js off'`. Within a minute the service processes the
    held deliveries in arrival order: a checkout Live never credited settles once; a delivery for an order
    Live already credited is **rejected** (`billing.intent_settled_in_live`) and listed for review — never
-   credited twice. `billing 'node scripts/reconcile.js'` → OK; read its `rejected events` line.
+   credited twice. An EXTERNAL tip that arrived since step 4 is announced now: Tips posts its chat
+   line and advances the goal. `billing 'node scripts/reconcile.js'` → OK; read its `rejected events`
+   and `EXTERNAL receipts` lines.
 8. **Verify the reads** (Live still frozen): as the owner, `api('/funds/balance')` equals your Billing
    balance and your frozen Live column; spot-check a streamer's `cashout_balance` the same way.
    `api('/admin/money')` → `billing.actions.attention: []`. In the staff console, Cashouts lists the
@@ -164,8 +206,11 @@ Live owner calls are made from the browser console on openvibe.live, signed in a
 9. **Unfreeze Live**: `api('/admin/money/freeze', { method: 'POST', body: { on: false } })`.
 10. **Verify with a small real PowerChat purchase**: Buy Vibes on openvibe.live with PowerChat (100 Vibes).
     After the tip: one new settled `powerchat` provider event in Billing, the balance rises by 100 once,
-    `billing 'node scripts/reconcile.js'` is OK, and Live's legacy columns did not move. If anything is off,
-    freeze Live and Billing again and roll back.
+    `billing 'node scripts/reconcile.js'` is OK, and Live's legacy columns did not move. Then a small tip on
+    a connected streamer's **own** PowerChat while they are live: Billing records one `external` receipt,
+    announced (`EXTERNAL receipts: 1, announced 1`). No transaction is booked for it. Tips records one
+    `billing-external` interaction, and Live chat shows one "… tipped N Vibes … (PowerChat)" line with the
+    alert sound. If anything is off, freeze Live and Billing again and roll back.
 
 **Why this order differs from the brief** (freeze → final import → reconcile → switch → deploy → verify →
 re-point → unfreeze): the verification purchase cannot work before the re-point (its webhook would reach
@@ -181,15 +226,19 @@ which money moved where.
 
 - **Before step 6** (Live still on its own columns): re-point the PowerChat webhook back to
   `https://openvibe.live/api/powerchat/webhook`; leave Billing **frozen** (its held deliveries are
-  not processed, and must not be until a fresh final import); unfreeze Live. Payments whose webhook went to Billing in the window are still pending
+  not processed, and must not be until a fresh final import); unfreeze Live. Remove
+  `BILLING_AUTHORITY` from billing.env and restart Billing (it stays frozen). When the held deliveries
+  are eventually processed, the EXTERNAL tips among them are then recorded, not announced hours late.
+  Payments whose webhook went to Billing in the window are still pending
   orders on Live and are backfilled by Live's paid-messages reconciler (every 15 min, or
   `api('/powerchat/reconcile', { method: 'POST' })`). Before a later attempt, run a fresh final import
   before unfreezing Billing (the guards then reject the held deliveries Live has since credited).
 - **After step 6, before step 9** (Live frozen; only held stragglers settled in Billing): remove
-  `BILLING_AUTHORITY` from `/etc/openvibe/live.env`, deploy with `--wait-idle`, re-point PowerChat to
-  Live, unfreeze Live. The stragglers Billing settled are still pending orders on Live and are
-  backfilled by Live's reconciler from PowerChat's paid-messages feed — so Billing must forget them:
-  stop `openvibe-billing`, restore `billing-pre-cutover.db` from step 3 over `billing.db` (remove the
+  `BILLING_AUTHORITY` from `/etc/openvibe/live.env` and deploy with `--restart --wait-idle`; set
+  `TIPS_CHAT_ADAPTER=none` in tips.env and restart Tips; re-point PowerChat to Live; unfreeze Live.
+  The billing.env `BILLING_AUTHORITY` goes too, with the Billing restore below. The stragglers Billing
+  settled are still pending orders on Live and are backfilled by Live's reconciler from PowerChat's
+  paid-messages feed — so Billing must forget them: stop `openvibe-billing`, restore `billing-pre-cutover.db` from step 3 over `billing.db` (remove the
   `-wal`/`-shm` files), freeze it (`billing "node scripts/freeze.js on 'rollback'"`), start it again.
   Otherwise a later attempt would count those payments twice (Live's credit arrives through the import,
   Billing's own settlement stays).
@@ -203,13 +252,17 @@ which money moved where.
 
 Said plainly, for whoever runs this and for Wave 9 (Tips) / Wave 10 (VIP):
 
-1. **Everything else that arrived on Live's PowerChat webhook stops once it points at Billing.** Tips
-   on a streamer's own PowerChat (EXTERNAL money) no longer post Live's donation chat line and global
-   mirror, play the donation sound, or advance the streamer's Live donation goal; PowerChat
-   follow/host/channel-points/subscription notices no longer appear in Live chat. PowerChat has one
-   webhook URL per app. Billing stores these deliveries (EXTERNAL, no liability) but nothing forwards
-   them to Live; that needs an Events consumer (Billing's outbox emits `billing.*` when `EVENTS_URL` is
-   set) or the Tips service.
+1. **Tips on a streamer's own PowerChat (EXTERNAL) move to the Billing → Tips → Live path, and lose
+   Live's own goals.** Billing records each one once (`external_receipts`, no journal entry). It
+   announces it as `billing.receipt.external`, attributed through `provider_accounts`. Tips posts the
+   chat line through Live's `/internal/tips/deliveries`: channel room, global mirror, saved `donation`
+   message, donation sound. Tips also advances its own goal and overlay. **Not carried:** Live's own
+   `donation_goals` (`applyDonationToGoal`) and their `goal-update` / `goal-reached` frames and "Goal
+   reached" chat line. Live's `/internal/tips/deliveries` does not credit Live goals; that is a Live-side
+   change. Carrying them also needs a durable idempotency key there, because the route dedupes in
+   memory only. A tip on a PowerChat account no creator has connected is held for review, not announced.
+   PowerChat follow/host/channel-points/subscription notices no longer appear in Live chat: they carry no
+   money, and nobody forwards them. PowerChat has one webhook URL per app.
 2. **Live no longer learns about PowerChat settlements:** no "Vibes credited" / "Subscribed!"
    notification to the buyer, no sub alert forwarded to the streamer's PowerChat overlay for
    PowerChat-paid subscriptions (Vibes-paid ones still get it), no celebration for legacy site-routed
