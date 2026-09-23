@@ -80,6 +80,7 @@ function pay(ctx, input) {
     return db.transaction(() => {
         const existingTxn = db.prepare('SELECT id FROM transactions WHERE idempotency_key = ?').get(input.idempotencyKey);
         if (existingTxn) return result(db, getTxn(db, existingTxn.id), ctx, true);
+        if (input.intentId) intents.refuseIfSettledInLive(intents.find(db, input.intentId));
         const r = input.receipt;
         if (r) {
             const dup = db.prepare('SELECT id FROM transactions WHERE receipt_ref = ?').get(r.receiptRef);

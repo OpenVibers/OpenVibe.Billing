@@ -109,6 +109,9 @@ function createPowerchat(cfg, { network } = {}) {
             const intent = intents.find(ctx.db, m[1]);
             if (!intent || intent.kind !== 'subscription' || !intent.streamer_subject) return { effect: 'none', reason: `subscription checkout ${ref} has no subscription intent` };
             const route = intent.route === 'direct' ? 'direct' : 'site';
+            if (cents + 1 < intent.amount_cents && intents.settledInLive(intent)) {
+                return { effect: 'none', reason: `underpaid delivery for ${ref}, which Live already credited before the cutover — review`, review: true };
+            }
             if (cents + 1 < intent.amount_cents) {
                 if (route === 'direct') return { effect: 'none', reason: 'underpaid direct subscription: an EXTERNAL tip to the streamer' };
                 return { effect: 'tip', args: { provider: 'powerchat', receiptRef, paidCents: cents, from: intent.subject, to: intent.streamer_subject, test: isTest, idempotencyKey: key, actor, metadata: { ...meta, underpaid_subscription_intent: intent.id } } };

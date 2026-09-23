@@ -33,6 +33,7 @@ function settle(ctx, input) {
             if (intent.provider !== input.provider) fail(422, 'billing.intent_mismatch', `intent ${intent.id} belongs to ${intent.provider}, not ${input.provider}`);
             if (input.subject && input.subject !== intent.subject) fail(422, 'billing.intent_mismatch', 'the intent belongs to another subject');
             if (intent.status === 'settled' && intent.settled_txn) return { txn: getTxn(db, intent.settled_txn), replay: true };
+            intents.refuseIfSettledInLive(intent);
         }
         const subject = intent ? intent.subject : input.subject;
         if (!subject) fail(422, 'billing.invalid_subject', 'a purchase needs a subject or an intent');

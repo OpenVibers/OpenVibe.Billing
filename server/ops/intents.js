@@ -59,6 +59,21 @@ function create(ctx, input) {
     return find(db, row.id);
 }
 
+/**
+ * An intent imported from a Live payment order that Live had already credited before the cutover.
+ * Its money effect lives in the imported history/opening balances, not in a Billing settlement, so
+ * a provider delivery for it that reaches Billing afterwards (a retry of a delivery Live had
+ * acknowledged, a manual resend) must not settle it again.
+ */
+function settledInLive(i) {
+    return !!(i && i.legacy_order_id != null && i.status === 'settled' && !i.settled_txn);
+}
+function refuseIfSettledInLive(i) {
+    if (settledInLive(i)) {
+        fail(409, 'billing.intent_settled_in_live', `intent ${i.id} (Live order ${i.legacy_order_id}) was already credited by Live before the cutover; this delivery is held for review, not settled again`);
+    }
+}
+
 function setProviderRef(ctx, id, ref) {
     ctx.db.prepare('UPDATE payment_intents SET provider_ref = ?, updated_at = ? WHERE id = ?').run(ref, iso(ctx.now()), id);
 }
@@ -85,4 +100,4 @@ function present(i) {
     };
 }
 
-module.exports = { find, findByProviderRef, create, setProviderRef, mergeMetadata, setStatus, markSettled, present, parse };
+module.exports = { find, findByProviderRef, create, setProviderRef, mergeMetadata, setStatus, markSettled, present, parse, settledInLive, refuseIfSettledInLive };

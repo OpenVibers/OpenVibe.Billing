@@ -14,9 +14,13 @@
  *                   first order's ref; the others are reported.
  *   3. history      every Live `transactions` row becomes a historical journal transaction (type
  *                   import, status imported, test=1 before site_settings.stats_vibes_reset_at).
- *   4. opening      per user, an import transaction makes user_credit = users.openvibe_bucks_balance
- *                   and creator_payable = users.openvibe_bucks_cashout_balance; the difference against
- *                   the replayed history is booked against import_adjustment and listed.
+ *   4. opening      per user, an import transaction makes the IMPORTED part of user_credit =
+ *                   users.openvibe_bucks_balance and of creator_payable = users.openvibe_bucks_cashout_balance;
+ *                   the difference against the replayed history is booked against import_adjustment and
+ *                   listed. Billing-native movements (a legacy checkout settled here, everything after the
+ *                   cutover) are never adjusted away by a later run.
+ *   Orders Live credited are imported as intents settled-in-Live (no settled_txn); a later run follows
+ *   an order Live credited or failed since, and settlement refuses a delivery for such an intent.
  *   5. subscriptions  → Billing subscriptions + an entitlement for the current paid period.
  *
  * Idempotent: every write is keyed (import:live:txn:<id>, legacy ids, target-state keys), so a
@@ -92,9 +96,20 @@ async function importLive(ctx, { live, resolveLiveUsers, dryRun = false, log = c
         // ── 2. payment_orders → intents + receipts ───────────
         const refSeen = new Map(db.prepare('SELECT provider, provider_ref, legacy_order_id FROM payment_intents WHERE provider_ref IS NOT NULL').all()
             .map((r) => [`${r.provider}|${r.provider_ref}`, r.legacy_order_id]));
-        let intentsNew = 0; let receiptsNew = 0;
+        let intentsNew = 0; let receiptsNew = 0; let intentsUpdated = 0;
         for (const o of orders) {
-            const existing = db.prepare('SELECT id FROM payment_intents WHERE legacy_order_id = ?').get(o.id);
+            const existing = db.prepare('SELECT id, status, settled_txn FROM payment_intents WHERE legacy_order_id = ?').get(o.id);
+            if (existing && !existing.settled_txn) {
+                // Live moved the order on since an earlier run (credited or failed after the shadow
+                // import): follow it, so a later delivery of a Live-credited order is recognised as
+                // settled-in-Live (intents.settledInLive) instead of settling a second time. An intent
+                // Billing settled itself (settled_txn) is never rewound.
+                const want = o.status === 'credited' ? 'settled' : (o.status === 'failed' && ['created', 'expired'].includes(existing.status) ? 'failed' : null);
+                if (want && existing.status !== want && existing.status !== 'settled') {
+                    db.prepare('UPDATE payment_intents SET status = ?, updated_at = ? WHERE id = ?').run(want, at, existing.id);
+                    intentsUpdated++;
+                }
+            }
             const legacy = { status: o.status, provider_ref: o.provider_ref, bucks: o.bucks, amount_cents: o.amount_cents, user_id: o.user_id, streamer_id: o.streamer_id };
             if (!existing) {
                 let ref = o.provider_ref || null;
@@ -135,6 +150,7 @@ async function importLive(ctx, { live, resolveLiveUsers, dryRun = false, log = c
             }
         }
         report.counts.intents_new = intentsNew;
+        report.counts.intents_updated = intentsUpdated;
         report.counts.receipts_new = receiptsNew;
 
         // ── 3. history ───────────────────────────────────────
@@ -191,6 +207,14 @@ async function importLive(ctx, { live, resolveLiveUsers, dryRun = false, log = c
         const upsertHold = db.prepare(`INSERT INTO import_holds (live_user_id, owner, reason, credit_bits, payable_bits, first_seen_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (live_user_id) DO UPDATE SET credit_bits = excluded.credit_bits, payable_bits = excluded.payable_bits, updated_at = excluded.updated_at`);
         const byId = new Map(users.map((u) => [String(u.id), u]));
+        // What the imports themselves put in an account (history, earlier opening balances, released
+        // holds) — the part the Live column describes. Anything Billing did natively (a legacy checkout
+        // that settled here, and everything after the cutover) is not Live's to overwrite, so a later
+        // run (a hold release, a late snapshot) never books an adjustment against it.
+        const importedStmt = db.prepare(`SELECT COALESCE(SUM(e.amount), 0) AS n FROM ledger_entries e
+            JOIN accounts a ON a.id = e.account_id JOIN transactions t ON t.id = e.txn_id
+            WHERE a.kind = ? AND a.owner_subject IS ? AND a.currency = ? AND t.type = 'import'`);
+        const imported = (acct) => importedStmt.get(acct.kind, acct.owner, acct.currency).n;
         const openingIds = new Set([...ids].filter((i) => byId.has(i)));
         for (const i of openingIds) {
             const u = byId.get(i);
@@ -211,7 +235,7 @@ async function importLive(ctx, { live, resolveLiveUsers, dryRun = false, log = c
             for (const [acct, name, raw] of [[A.credit, 'user_credit', u.credit], [A.payable, 'creator_payable', u.payable]]) {
                 const target = Math.round(Number(raw) || 0);
                 if (target !== Number(raw)) report.anomalies.push({ kind: 'fractional_balance', live_user_id: u.id, account: name, value: raw, imported_as: target });
-                const current = balance(db, acct(own));
+                const current = imported(acct(own));
                 const d = target - current;
                 if (d !== 0) {
                     importTxn({
