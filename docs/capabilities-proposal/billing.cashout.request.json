@@ -1,0 +1,24 @@
+{
+  "id": "billing.cashout.request",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Request a cashout of creator payable into escrow (minimum and escrow period enforced by Billing), or recycle creator payable into the subject's own spendable credit. Bought credit is never withdrawable.",
+  "permissions": [
+    "billing:cashout"
+  ],
+  "resourceConstraints": [
+    "owner"
+  ],
+  "quotaClass": "ledger-write",
+  "events": [
+    "billing.cashout.requested",
+    "billing.transaction.settled"
+  ],
+  "implementedBy": [
+    "POST /api/v1/cashouts",
+    "POST /api/v1/recycle",
+    "GET /api/v1/cashouts/:id"
+  ]
+}

@@ -1,0 +1,19 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.1   # production runs Node 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+      # openvibe-contracts-check --service billing is added once the billing manifest and the
+      # billing.* capabilities (docs/capabilities-proposal/) ship in an openvibe-contracts release;
+      # v0.5.1 still carries the placeholder manifest (range ^0.1.0, no capabilities).

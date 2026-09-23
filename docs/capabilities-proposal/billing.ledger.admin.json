@@ -1,0 +1,28 @@
+{
+  "id": "billing.ledger.admin",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Operate the ledger: economy freeze switch (writes refused, reads served, webhooks queued), reconciliation runs, balanced manual adjustments with a reason, settling a verified provider receipt, provider-event reprocessing, the renewal sweep and import holds.",
+  "permissions": [
+    "billing:admin"
+  ],
+  "resourceConstraints": [
+    "none"
+  ],
+  "quotaClass": "ledger-admin",
+  "events": [
+    "billing.transaction.settled"
+  ],
+  "implementedBy": [
+    "GET|POST /api/v1/admin/freeze",
+    "GET /api/v1/admin/reconcile",
+    "POST /api/v1/admin/adjustments",
+    "POST /api/v1/purchases/settle",
+    "GET /api/v1/admin/provider-events",
+    "POST /api/v1/admin/provider-events/:id/reprocess",
+    "POST /api/v1/admin/sweep",
+    "GET /api/v1/admin/import-holds"
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "id": "billing.entitlement.check",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Is a subject entitled to a streamer's subscription right now, and until when. Answered from Billing alone (works with Live offline).",
+  "permissions": [
+    "billing:read"
+  ],
+  "resourceConstraints": [
+    "none"
+  ],
+  "quotaClass": "ledger-read",
+  "events": [],
+  "implementedBy": [
+    "GET /api/v1/entitlements/:subject",
+    "GET /api/v1/subscriptions",
+    "GET /api/v1/subscriptions/:id"
+  ]
+}

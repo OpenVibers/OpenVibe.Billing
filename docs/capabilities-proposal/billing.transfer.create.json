@@ -1,0 +1,23 @@
+{
+  "id": "billing.transfer.create",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Give CREDIT to someone (tip, donation, paid interaction): user_credit of the giver to creator_payable of the recipient. Self-dealing is refused by subject. Also refunds a credit-funded transfer back to its giver (e.g. a media request that never played). Idempotent by Idempotency-Key.",
+  "permissions": [
+    "billing:transfer"
+  ],
+  "resourceConstraints": [
+    "owner"
+  ],
+  "quotaClass": "ledger-write",
+  "events": [
+    "billing.transaction.settled",
+    "billing.transaction.reversed"
+  ],
+  "implementedBy": [
+    "POST /api/v1/transfers",
+    "POST /api/v1/transfers/:id/refund"
+  ]
+}

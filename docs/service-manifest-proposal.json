@@ -1,0 +1,40 @@
+{
+  "version": "0.1.0",
+  "contractRanges": {
+    "openvibe-contracts": ">=0.5.1 <1.0.0"
+  },
+  "id": "billing",
+  "name": "OpenVibe.Billing",
+  "status": "alpha",
+  "repository": "OpenVibers/OpenVibe.Billing",
+  "domains": [
+    "billing.openvibe.network"
+  ],
+  "publicOrigin": "https://billing.openvibe.network",
+  "health": "/api/health",
+  "ready": "/api/ready",
+  "capabilities": [
+    "billing.intent.create",
+    "billing.transfer.create",
+    "billing.balance.read",
+    "billing.cashout.request",
+    "billing.cashout.manage",
+    "billing.subscription.manage",
+    "billing.entitlement.check",
+    "billing.ledger.admin"
+  ],
+  "eventsProduced": [
+    "billing.transaction.settled",
+    "billing.transaction.reversed",
+    "billing.entitlement.changed",
+    "billing.subscription.canceled",
+    "billing.cashout.requested",
+    "billing.cashout.paid",
+    "billing.cashout.denied"
+  ],
+  "eventsConsumed": [],
+  "namespacesOwned": [
+    "billing.*"
+  ],
+  "notes": "The isolated money ledger (ADR-012): balanced append-only journal, provider receipts, subscriptions/entitlements, refunds and payouts. Proposed manifest; replaces the placeholder in manifests/services/billing.json."
+}

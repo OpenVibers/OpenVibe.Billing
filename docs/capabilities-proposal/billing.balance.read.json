@@ -1,0 +1,21 @@
+{
+  "id": "billing.balance.read",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Read a subject's balances (spendable credit, creator payable, pending payouts) and transaction history.",
+  "permissions": [
+    "billing:read"
+  ],
+  "resourceConstraints": [
+    "owner"
+  ],
+  "quotaClass": "ledger-read",
+  "events": [],
+  "implementedBy": [
+    "GET /api/v1/balances/:subject",
+    "GET /api/v1/transactions",
+    "GET /api/v1/transactions/:id"
+  ]
+}

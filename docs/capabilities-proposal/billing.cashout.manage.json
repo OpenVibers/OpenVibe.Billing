@@ -1,0 +1,25 @@
+{
+  "id": "billing.cashout.manage",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Operator payouts: list cashouts, approve one after its escrow period with the payout reference from the provider (required), or deny it (reversal back to creator payable). Separately controlled from every other capability (ADR-012 rule 10).",
+  "permissions": [
+    "billing:payouts"
+  ],
+  "resourceConstraints": [
+    "none"
+  ],
+  "quotaClass": "ledger-admin",
+  "events": [
+    "billing.cashout.paid",
+    "billing.cashout.denied",
+    "billing.transaction.reversed"
+  ],
+  "implementedBy": [
+    "GET /api/v1/cashouts",
+    "POST /api/v1/cashouts/:id/approve",
+    "POST /api/v1/cashouts/:id/deny"
+  ]
+}

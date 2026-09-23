@@ -1,0 +1,48 @@
+[Unit]
+Description=OpenVibe.Billing — the isolated money ledger (journal, provider receipts, subscriptions, payouts)
+# Network signs the service tokens Billing verifies (its key is fetched at boot and retried);
+# Events receives the outbox when EVENTS_URL is set. Billing starts without either.
+After=network.target
+Wants=openvibe-network.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/openvibe.billing
+EnvironmentFile=/etc/openvibe/billing.env
+Environment=NODE_ENV=production
+Environment=PORT=4600
+Environment=HOST=127.0.0.1
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node /opt/openvibe.billing/server/index.js
+Restart=always
+RestartSec=5
+# The ledger database lives in /var/lib/openvibe-billing (ADR-007: one database per service);
+# the code tree stays read-only.
+StateDirectory=openvibe-billing
+StateDirectoryMode=0700
+Environment=BILLING_DB_PATH=/var/lib/openvibe-billing/billing.db
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+{
+  "id": "billing.subscription.manage",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Start or renew a channel subscription paid from credit (the streamer share is credited on every period), and cancel at period end (Stripe subscriptions are cancelled at Stripe). Receipt-paid subscriptions through the API additionally need billing.ledger.admin.",
+  "permissions": [
+    "billing:subscriptions"
+  ],
+  "resourceConstraints": [
+    "owner"
+  ],
+  "quotaClass": "ledger-write",
+  "events": [
+    "billing.transaction.settled",
+    "billing.entitlement.changed",
+    "billing.subscription.canceled"
+  ],
+  "implementedBy": [
+    "POST /api/v1/subscriptions",
+    "POST /api/v1/subscriptions/:id/cancel",
+    "GET /api/v1/subscriptions",
+    "GET /api/v1/subscriptions/:id"
+  ]
+}

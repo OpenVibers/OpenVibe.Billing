@@ -1,7 +1,11 @@
 {
   "repository": "OpenVibers/OpenVibe.Billing",
-  "stage": "placeholder",
-  "code": false,
+  "stage": "alpha",
+  "code": true,
+  "wave": "W8",
   "plan": "OpenVibe End-to-End Realignment & Implementation Plan, revision 3 (20 Sep 2026)",
-  "updated": "2026-09-21"
+  "adr": "ADR-012",
+  "authoritative": false,
+  "notes": "Runtime, journal, adapters, import and reconciliation are built and tested; Live stays authoritative until the cutover runbook in README.md is executed.",
+  "updated": "2026-09-22"
 }
