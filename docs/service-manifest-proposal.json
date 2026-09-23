@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0",
+  "version": "0.3.0",
   "contractRanges": {
     "openvibe-contracts": ">=0.5.1 <1.0.0"
   },
@@ -30,11 +30,12 @@
     "billing.subscription.canceled",
     "billing.cashout.requested",
     "billing.cashout.paid",
-    "billing.cashout.denied"
+    "billing.cashout.denied",
+    "billing.staff.action"
   ],
   "eventsConsumed": [],
   "namespacesOwned": [
     "billing.*"
   ],
-  "notes": "The isolated money ledger (ADR-012): balanced append-only journal, provider receipts, subscriptions/entitlements, refunds and payouts. Proposed manifest; replaces the placeholder in manifests/services/billing.json."
+  "notes": "The isolated money ledger (ADR-012): balanced append-only journal, provider receipts, subscriptions/entitlements, refunds and payouts, and a staff console (Network SSO, staff only) for payouts, review, reconciliation and the freeze. Proposed manifest: adds billing.staff.action (internal) to the released 0.2.0."
 }

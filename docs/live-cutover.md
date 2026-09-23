@@ -17,7 +17,7 @@ default**: applied and deployed with `BILLING_AUTHORITY` unset, Live behaves exa
 | Donation / tip | Live columns + `transactions` | `POST /api/v1/transfers` (kind `donation`, target = the Live stream) |
 | Vibes-paid media request / its refund | donation on Live columns / manual unwind | `POST /api/v1/transfers` (kind `paid_interaction`) / `POST /api/v1/transfers/:id/refund` |
 | Cashout request / recycle | Live columns | `POST /api/v1/cashouts` / `POST /api/v1/recycle` |
-| Cashout approve / deny / pending list (owner) | Live | **409** — decided in Billing (`billing.cashout.manage`, payout reference required; ADR-012 rule 10) |
+| Cashout approve / deny / pending list (owner) | Live | **409** — decided in Billing's **staff console** (`https://billing.openvibe.network/cashouts`; payout reference required, escrow enforced; ADR-012 rule 10) |
 | Subscribe with Vibes | Live columns + `subscriptions` | entitlement check, then `POST /api/v1/subscriptions` (source `credit`) |
 | Subscribe via PowerChat / Stripe | Live order + link | `POST /api/v1/intents` (kind subscription, route `site`/`direct`) |
 | Cancel, "my subscriptions", channel "subscribed?" + count | Live `subscriptions` | Billing subscriptions/entitlements (cancel keeps the paid period) |
@@ -78,9 +78,24 @@ default**: applied and deployed with `BILLING_AUTHORITY` unset, Live behaves exa
    | live | identity.subject.resolve | openvibe.network (already used by Live's paste client) |
 
    Live is deliberately **not** granted `billing.cashout.manage` or `billing.ledger.admin`.
-3. **Live** has the patch applied and deployed with `BILLING_AUTHORITY` unset (no behaviour change;
+   Those are held only by people, through Billing's staff console (below).
+3. **Staff console** (it replaces Live's cashout admin — without it nobody can approve a payout after
+   the switch):
+   - **Network:** OAuth client `billing` (today a service client with no redirect URI) gets the redirect
+     URI `https://billing.openvibe.network/auth/callback` — add
+     `{ client_id: 'billing', name: 'OpenVibe.Billing', redirect_uris: ['https://billing.openvibe.network/auth/callback'] }`
+     to the seeded `contractClients` in OpenVibe.Network `server/db/database.js` (it only adds the URI to the
+     existing client) and deploy the Network. The Network already supports PKCE S256.
+   - **`/etc/openvibe/billing.env`:** `BILLING_STAFF_SUBJECTS` = the `usr_…` subjects of the people who
+     decide payouts (each must also have role `admin` on the Network); `BILLING_SESSION_SECRET` = 32+
+     random characters (`openssl rand -hex 32`). Restart Billing.
+   - **nginx:** install the updated [deploy/nginx/billing.openvibe.network.conf](../deploy/nginx/billing.openvibe.network.conf)
+     (console proxied, `/api/v1` denied on the public host, `/webhooks/*` public) and reload.
+   - **Check:** sign in at `https://billing.openvibe.network/`, open Cashouts, run a reconciliation from the
+     dashboard; the Audit log shows the sign-in and the run. Someone not listed gets 403.
+4. **Live** has the patch applied and deployed with `BILLING_AUTHORITY` unset (no behaviour change;
    `GET /api/admin/money` answers `authority: "live"`).
-4. **Identity:** Live's daily legacy-map sync (`identity-legacy-sync`) has run since the last
+5. **Identity:** Live's daily legacy-map sync (`identity-legacy-sync`) has run since the last
    sign-ups (restart Live or wait a day), and Live's log has no `[Identity] live user N is mapped to …`
    conflict for a user who holds money. A shadow import against a fresh snapshot shows **no import
    holds** for users with a non-zero balance (a held user's Vibes sit on `hold:live:<id>` and would read
@@ -143,7 +158,9 @@ Live owner calls are made from the browser console on openvibe.live, signed in a
    credited twice. `billing 'node scripts/reconcile.js'` → OK; read its `rejected events` line.
 8. **Verify the reads** (Live still frozen): as the owner, `api('/funds/balance')` equals your Billing
    balance and your frozen Live column; spot-check a streamer's `cashout_balance` the same way.
-   `api('/admin/money')` → `billing.actions.attention: []`.
+   `api('/admin/money')` → `billing.actions.attention: []`. In the staff console, Cashouts lists the
+   imported open cashouts (pending, with their escrow dates) and Receipts lists any held delivery Billing
+   rejected as already credited by Live.
 9. **Unfreeze Live**: `api('/admin/money/freeze', { method: 'POST', body: { on: false } })`.
 10. **Verify with a small real PowerChat purchase**: Buy Vibes on openvibe.live with PowerChat (100 Vibes).
     After the tip: one new settled `powerchat` provider event in Billing, the balance rises by 100 once,
@@ -197,9 +214,11 @@ Said plainly, for whoever runs this and for Wave 9 (Tips) / Wave 10 (VIP):
    notification to the buyer, no sub alert forwarded to the streamer's PowerChat overlay for
    PowerChat-paid subscriptions (Vibes-paid ones still get it), no celebration for legacy site-routed
    `pcdon:` tips.
-3. **Cashout decisions leave Live's admin:** approve, deny and the pending list answer 409; approving
-   needs a principal with `billing.cashout.manage` calling Billing's API with the PayPal payout
-   reference. Billing has no UI for it.
+3. **Cashout decisions leave Live's admin:** approve, deny and the pending list answer 409 on Live.
+   They move to Billing's staff console (`https://billing.openvibe.network/cashouts`, Network admins listed
+   in `BILLING_STAFF_SUBJECTS`): approving needs the provider payout reference and is refused before the
+   escrow ends; denying needs a reason; each decision is in the staff audit log. Live's 409 message still
+   points at "its operator API" — updating that wording to name the console is a Live-side change.
 4. **Displays that read Live's `transactions` table freeze at the cutover:** the stream donation
    leaderboard, stream recap tip totals, VOD tip counts and the home "Vibes tipped"/"supporters" stats
    stop counting new tips (admin money totals are blanked rather than shown stale).

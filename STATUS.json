@@ -6,6 +6,6 @@
   "plan": "OpenVibe End-to-End Realignment & Implementation Plan, revision 3 (20 Sep 2026)",
   "adr": "ADR-012",
   "authoritative": false,
-  "notes": "Runtime, journal, adapters, import and reconciliation are built and tested. The Live client is a patch (docs/live-patch.diff, switch BILLING_AUTHORITY off by default) with its cutover sequence in docs/live-cutover.md; neither is applied or executed, so Live stays authoritative.",
+  "notes": "Runtime, journal, adapters, import, reconciliation and the staff console (Network SSO + PKCE, admins listed in BILLING_STAFF_SUBJECTS; cashout approve/deny, review queue, reconciliation, freeze, audit log) are built and tested. The console needs the Network to add https://billing.openvibe.network/auth/callback to client `billing` before anyone can sign in. The Live client is a patch (docs/live-patch.diff, switch BILLING_AUTHORITY off by default) with its cutover sequence in docs/live-cutover.md; the cutover has not been executed, so Live stays authoritative.",
   "updated": "2026-09-22"
 }

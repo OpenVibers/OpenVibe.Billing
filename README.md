@@ -4,7 +4,8 @@
 
 **Status:** alpha — runtime built and tested (Wave 8); OpenVibe.Live stays authoritative until the
 cutover below is run.  
-**Domain:** `billing.openvibe.network` (service API; only `/webhooks/*` and `/api/health` are public)  
+**Domain:** `billing.openvibe.network` — the staff console (Network SSO, staff only), `/webhooks/*` and
+`/api/health`; the service API `/api/v1` is reachable only on loopback (`127.0.0.1:4600`)  
 **Decision:** [ADR-012](https://github.com/OpenVibers/OpenVibe.Contracts/blob/main/docs/adr/ADR-012-economic-classification.md) —
 economic classification. The survey behind it is [docs/economic-inventory.md](docs/economic-inventory.md).  
 **Plan:** OpenVibe End-to-End Realignment & Implementation Plan, revision 3 (20 Sep 2026), §11.1, §11.4, §11.5.  
@@ -30,7 +31,7 @@ webhooks land here and nowhere else.
 fnm exec --using=22.22.1 npm install
 cp .env.example .env          # set OV_OAUTH_CLIENT_SECRET, POWERCHAT_WEBHOOK_SECRET, …
 npm run dev                   # http://localhost:4600
-npm test                      # 9 test files: stub Network/Events/providers, temp DBs, random ports
+npm test                      # 10 test files: stub Network/Events/providers, temp DBs, random ports
 npm run reconcile             # reconciliation report (exit 1 on failure)
 npm run freeze -- on "reason" # economy freeze from the host (status | on "<reason>" | off)
 node scripts/import-live.js --live-db <snapshot> [--dry-run] [--json]
@@ -69,7 +70,8 @@ Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
 
 ## API
 
-All `/api/v1` calls need a service token from OpenVibe.Network (audience `openvibe.billing`). Every
+All `/api/v1` calls need a service token from OpenVibe.Network (audience `openvibe.billing`) and are
+made on loopback (`http://127.0.0.1:4600`); nginx refuses `/api/v1` on the public host. Every
 POST needs an `Idempotency-Key` (8–200 of `A-Za-z0-9._:-`); a replay returns the original response
 (`Idempotent-Replayed: true`), the same key with another body is `422 idempotency.key_reused`, refusals
 are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "type": "user", "id": "usr_…" }`
@@ -107,6 +109,58 @@ manifest in [docs/service-manifest-proposal.json](docs/service-manifest-proposal
 ship in an openvibe-contracts release, grants are matched locally (exact id or a `.*` family such as
 `billing.*`) with contracts' own `capabilities.grants()`.
 
+## Staff console
+
+Server-rendered pages at the root of `https://billing.openvibe.network` for the people who decide
+payouts — the replacement for Live's cashout admin, which answers 409 once Live runs with
+`BILLING_AUTHORITY=billing` ([docs/live-cutover.md](docs/live-cutover.md)). No JavaScript, no external
+resources, `noindex`, `Cache-Control: no-store`, a strict CSP (`default-src 'none'`, `form-action 'self'`,
+`frame-ancestors 'none'`). Code: [server/console/](server/console/); tests: `test/console.test.js`.
+
+**Sign-in:** OpenVibe.Network SSO, authorization code with PKCE (S256), as OAuth client `billing`
+(redirect `https://billing.openvibe.network/auth/callback`, which the Network must list for that
+client). The code is exchanged server to server on `OV_NETWORK_INTERNAL_URL`; the access token is
+verified offline with the Network key Billing already loads (issuer, audience `openvibe.network`,
+expiry). Billing keeps none of the Network's tokens — the refresh token it is handed is revoked at once.
+
+**Who:** a person whose Network token says `role: "admin"` **and** whose subject (`subject_id`, a
+`usr_…`) is listed in `BILLING_STAFF_SUBJECTS`. Everyone else gets 403 and no session; the refusal is
+recorded in the audit log. The list is re-checked on every request: removing someone ends their session
+on their next click.
+
+**Session:** cookie `__Host-ovb_staff` — random 256-bit id (the database keeps only its SHA-256),
+host-only, `Path=/`, `HttpOnly`, `Secure`, `SameSite=Strict`, absolute lifetime `BILLING_SESSION_TTL_MIN`
+(60 min). The OAuth state + PKCE verifier travel in a 10-minute `ovb_flow` cookie (`Path=/auth`,
+`SameSite=Lax` for the return from openvibe.network) signed with `BILLING_SESSION_SECRET`. Every form
+carries the session's CSRF token (constant-time compare) and cross-site `Origin` / `Sec-Fetch-Site`
+POSTs are refused. Sign-out is a POST.
+
+**What staff may do** is expressed in the API's own capability ids: a staff session is the principal
+`{ sub: <usr_…>, cap: [billing.cashout.manage, billing.ledger.admin] }` and every page names the one
+capability it needs. Every action calls the same functions the API does — `ops/cashouts.approve|deny`,
+`ops/admin.setFreeze` (+ processing the held webhooks on unfreeze), `reconcile()`,
+`providers.reprocess()` — behind the same freeze guard; there is no second implementation.
+
+| Page | Needs | Does |
+|---|---|---|
+| `/` | staff | freeze state, last reconciliation, outstanding credit / payable / pending payouts (test transactions excluded), queue counts |
+| `/cashouts?tab=escrow\|ready\|paid\|denied` | `billing.cashout.manage` | the queue with escrow dates (Billing has no separate "approved" state: approving records a payout already made, so it is **paid**) |
+| `/cashouts/:id` | `billing.cashout.manage` | detail; **approve** needs the provider's payout reference, a payout provider and a ticked confirmation, and is refused before the escrow ends; **deny** needs a reason and returns the amount to the creator's payable. A resubmitted form replays (per-form action key → the ops idempotency key), never pays twice |
+| `/receipts` | `billing.ledger.admin` | provider receipts flagged for review (unattributed site tips, underpaid deliveries, held site-routed tips), rejected ones (incl. deliveries for orders Live already credited — `billing.intent_settled_in_live`), stored-but-unprocessed ones, reversals flagged `review: required`; reprocess an unprocessed/rejected one. Shown by id and outcome only — never the provider payload |
+| `/import-holds` | `billing.ledger.admin` | unmapped Live users from the importer |
+| `/reconciliation`, `/reconciliation/:id` | `billing.ledger.admin` | run + history; a run shows checks, offender counts, warning counts and totals |
+| `/freeze` | `billing.ledger.admin` | freeze / unfreeze with a mandatory reason |
+| `/audit` | `billing.ledger.admin` | the staff audit log |
+
+**Audit:** every staff action — sign-in, sign-out, approve, deny, freeze, unfreeze, reconciliation run,
+reprocess — and every refused attempt (non-staff sign-in, CSRF failure, a refused approval) is one row
+in the append-only `staff_audit` table (actor subject and username, action, target, reason, outcome,
+a small detail such as the payout reference or refusal code, request id, and an HMAC of the client IP
+keyed by `BILLING_SESSION_SECRET`). Done actions are also written to the outbox as
+`billing.staff.action` (visibility `internal`, actor = the staff subject), in the same SQLite
+transaction as their effect. Adjustments are not in the console; they stay on the API
+(`POST /api/v1/admin/adjustments`).
+
 ## Providers
 
 | Adapter | Enabled when | Settles | Reverses |
@@ -124,16 +178,19 @@ Reversing a subscription payment revokes the periods it granted.
 
 ## Operations
 
-- **Reconciliation** (`npm run reconcile`, or `GET /api/v1/admin/reconcile`) checks: journal zero-sum
+- **Reconciliation** (`npm run reconcile`, `GET /api/v1/admin/reconcile`, or the console's
+  Reconciliation page) checks: journal zero-sum
   per currency, per-transaction balance, cached balances = entry sums, fx mirror, every settled
   provider event has exactly one transaction, paid cashouts have payout references, payouts_pending =
   requested cashouts. It also lists negative balances, unprocessed/rejected events, items for review
   and import holds; totals exclude test transactions. Runs are stored in `reconciliation_runs`.
-- **Freeze** before any risky change: `POST /api/v1/admin/freeze {"on": true, "reason": "…"}`, or on the
+- **Freeze** before any risky change: the console's Freeze page, `POST /api/v1/admin/freeze {"on": true, "reason": "…"}`, or on the
   host `node scripts/freeze.js on "<reason>"` (same switch; after `off` the running service processes the
   held webhooks on its next retry tick).
 - **Review queue**: chargebacks on donated credit and unattributed site tips appear under
-  `warnings`; resolve them with an adjustment (`relates_to` = the transaction).
+  `warnings` and on the console's Receipts page; resolve them with an adjustment (`relates_to` = the transaction).
+- **Payouts** are decided in the staff console (or with `billing.cashout.manage` on the API): pay at the
+  provider, then approve with its payout reference once the escrow has ended.
 - **Backups**: `sqlite3 /var/lib/openvibe-billing/billing.db ".backup billing-$(date +%F).db"`.
 
 ## Cutover runbook (Live → Billing)
@@ -161,7 +218,8 @@ Billing did itself.
 The domain keeps its placeholder page on
 [OpenVibers/OpenVibe.Sites](https://github.com/OpenVibers/OpenVibe.Sites) until everything in plan §12.12
 holds: owning runtime with health/readiness ✔; canonical identity and scoped service principals ✔;
-server-rendered public routes useful without JavaScript (not yet — Billing has no public pages);
+server-rendered public routes useful without JavaScript (not yet — the only pages are the staff-only
+console);
 real persistence and end-to-end workflows ✔; capability/event registration against
 OpenVibe.Contracts (proposed, not released); migration strategy ✔ with a security review, sitemap/robots
 still to do; acceptance tests ✔. A placeholder is never counted as an implemented service.
