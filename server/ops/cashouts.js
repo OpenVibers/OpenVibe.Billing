@@ -30,6 +30,17 @@ function present(c) {
     };
 }
 
+/**
+ * The cashout as an event carries it: the payout method's TYPE only. The address (e.g. a PayPal
+ * email) stays in Billing, where the staff console reads it; the event stream is retained and
+ * read by other services, so it never gets the creator's contact details.
+ */
+function eventView(c) {
+    const v = present(c);
+    if (v) v.payout_method = { type: (c.payout_method && c.payout_method.type) || null };
+    return v;
+}
+
 function payoutMethod(v) {
     if (!v || typeof v !== 'object') fail(422, 'billing.invalid_input', "payout_method is required, e.g. { type: 'paypal', address: 'name@example.com' }");
     const type = String(v.type || '').toLowerCase();
@@ -63,7 +74,7 @@ function request(ctx, input) {
         db.prepare(`INSERT INTO cashouts (id, subject, amount_bits, value_cents, status, payout_method, escrow_until, request_txn, created_at, updated_at)
             VALUES (?, ?, ?, ?, 'requested', ?, ?, ?, ?, ?)`).run(id, input.subject, amount, rates.valueCents(amount), JSON.stringify(method), escrowUntil, txn.id, iso(ms), iso(ms));
         const cashout = find(db, id);
-        enqueue(ctx, { event_type: 'billing.cashout.requested', subject: { type: 'cashout', id }, payload: { cashout: present(cashout), transaction_id: txn.id } });
+        enqueue(ctx, { event_type: 'billing.cashout.requested', subject: { type: 'cashout', id }, payload: { cashout: eventView(cashout), transaction_id: txn.id } });
         return { cashout, replay: false };
     })();
 }
@@ -96,7 +107,7 @@ function approve(ctx, input) {
         db.prepare(`UPDATE cashouts SET status = 'paid', settle_txn = ?, payout_provider = ?, payout_reference = ?, decided_by = ?, updated_at = ? WHERE id = ?`)
             .run(txn.id, provider, ref, JSON.stringify(input.actor || {}), iso(ctx.now()), c.id);
         const cashout = find(db, c.id);
-        enqueue(ctx, { event_type: 'billing.cashout.paid', subject: { type: 'cashout', id: c.id }, payload: { cashout: present(cashout), transaction_id: txn.id } });
+        enqueue(ctx, { event_type: 'billing.cashout.paid', subject: { type: 'cashout', id: c.id }, payload: { cashout: eventView(cashout), transaction_id: txn.id } });
         return { cashout, replay: false };
     })();
 }
@@ -121,7 +132,7 @@ function deny(ctx, input) {
         db.prepare(`UPDATE cashouts SET status = 'denied', settle_txn = ?, reason = ?, decided_by = ?, updated_at = ? WHERE id = ?`)
             .run(txn.id, reason, JSON.stringify(input.actor || {}), iso(ctx.now()), c.id);
         const cashout = find(db, c.id);
-        enqueue(ctx, { event_type: 'billing.cashout.denied', subject: { type: 'cashout', id: c.id }, payload: { cashout: present(cashout), transaction_id: txn.id } });
+        enqueue(ctx, { event_type: 'billing.cashout.denied', subject: { type: 'cashout', id: c.id }, payload: { cashout: eventView(cashout), transaction_id: txn.id } });
         enqueue(ctx, { event_type: 'billing.transaction.reversed', subject: { type: 'transaction', id: txn.id }, payload: { ...summary(txn), reverses_txn: c.request_txn } });
         return { cashout, replay: false };
     })();
