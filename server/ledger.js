@@ -15,7 +15,9 @@
  *   - entries are never updated or deleted (db triggers); corrections are reversing transactions;
  *   - account_balances changes only here, in the same SQLite transaction as the entries;
  *   - a transaction's idempotency_key is unique: posting the same key again returns the
- *     original transaction and moves nothing.
+ *     original transaction and moves nothing;
+ *   - every amount and every resulting balance is a safe integer (|n| <= 2^53 - 1): past that JS
+ *     arithmetic silently rounds and SQLite would store a REAL, so such a posting is refused whole.
  *
  * Callers run post() inside db.transaction() together with their funds checks, so a check and
  * the movement it guards are one atomic unit.
@@ -90,6 +92,7 @@ function post(ctx, spec) {
         const sums = new Map();
         for (const e of spec.entries || []) {
             if (!Number.isInteger(e.amount)) throw new BillingError(500, 'ledger.bad_amount', `non-integer amount ${e.amount}`);
+            if (!Number.isSafeInteger(e.amount)) throw new BillingError(422, 'billing.amount_overflow', `amount ${e.amount} is beyond the exact integer range`);
             if (e.amount === 0) continue;
             const key = `${e.kind}|${e.owner == null ? '' : e.owner}|${e.currency}`;
             const m = merged.get(key) || { kind: e.kind, owner: e.owner == null ? null : e.owner, currency: e.currency, amount: 0 };
@@ -98,6 +101,7 @@ function post(ctx, spec) {
             sums.set(e.currency, (sums.get(e.currency) || 0) + e.amount);
         }
         for (const [currency, sum] of sums) {
+            if (!Number.isSafeInteger(sum)) throw new BillingError(422, 'billing.amount_overflow', `entries in ${currency} overflow the exact integer range`);
             if (sum !== 0) throw new BillingError(500, 'ledger.unbalanced', `entries sum to ${sum} ${currency}, not zero`, { entries: spec.entries });
         }
 
@@ -112,6 +116,13 @@ function post(ctx, spec) {
         );
         const insEntry = db.prepare('INSERT INTO ledger_entries (txn_id, account_id, amount) VALUES (?, ?, ?)');
         const bump = db.prepare('UPDATE account_balances SET balance = balance + ?, updated_at = ? WHERE account_id = ?');
+        for (const m of merged.values()) {
+            if (!Number.isSafeInteger(m.amount)) throw new BillingError(422, 'billing.amount_overflow', `the ${m.kind} entry overflows the exact integer range`);
+            if (m.amount === 0) continue;
+            if (!Number.isSafeInteger(balance(db, m) + m.amount)) {
+                throw new BillingError(422, 'billing.amount_overflow', `${m.kind}${m.owner ? `:${m.owner}` : ''} would leave the exact integer range`);
+            }
+        }
         for (const m of merged.values()) {
             if (m.amount === 0) continue;
             const acct = accountId(db, m, nowIso);

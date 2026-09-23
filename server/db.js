@@ -103,6 +103,41 @@ BEGIN SELECT RAISE(ABORT, 'provider receipts are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS provider_events_no_delete BEFORE DELETE ON provider_events
 BEGIN SELECT RAISE(ABORT, 'provider receipts are immutable'); END;
 
+-- EXTERNAL receipts (ADR-012): tips paid on a streamer's OWN provider account. No journal entry,
+-- no liability — one row per provider payment (receipt_ref), whatever delivery carried it, so the
+-- announcement (billing.receipt.external) happens at most once. status says whether it was
+-- announced and, if not, why (Live still the authority, an account no creator has connected).
+CREATE TABLE IF NOT EXISTS external_receipts (
+    receipt_ref TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    provider_event INTEGER NOT NULL REFERENCES provider_events (id),
+    receiving_account TEXT,
+    streamer_subject TEXT,
+    amount_cents INTEGER NOT NULL,
+    test INTEGER NOT NULL DEFAULT 0 CHECK (test IN (0, 1)),
+    status TEXT NOT NULL CHECK (status IN ('announced', 'not_announced')),
+    reason TEXT,
+    event_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS external_receipts_streamer ON external_receipts (streamer_subject);
+
+-- Which creator a provider account belongs to (a PowerChat username / account id → Network subject):
+-- the importer copies Live's powerchat_connections; an operator can add or correct one.
+CREATE TABLE IF NOT EXISTS provider_accounts (
+    provider TEXT NOT NULL,
+    username TEXT NOT NULL,
+    account_id TEXT,
+    subject TEXT NOT NULL,
+    source TEXT NOT NULL,
+    live_user_id INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (provider, username)
+);
+CREATE INDEX IF NOT EXISTS provider_accounts_account ON provider_accounts (provider, account_id);
+
 CREATE TABLE IF NOT EXISTS payment_intents (
     id TEXT PRIMARY KEY,
     provider TEXT NOT NULL,

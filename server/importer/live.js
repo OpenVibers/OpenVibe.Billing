@@ -22,6 +22,12 @@
  *   Orders Live credited are imported as intents settled-in-Live (no settled_txn); a later run follows
  *   an order Live credited or failed since, and settlement refuses a delivery for such an intent.
  *   5. subscriptions  → Billing subscriptions + an entitlement for the current paid period.
+ *   6. accounts     powerchat_connections → provider_accounts (PowerChat username / account id →
+ *                   the creator's subject), so an EXTERNAL tip on a streamer's own PowerChat is
+ *                   attributed to them (ops/external.js). A mapping an operator set (source admin) is
+ *                   never overwritten; a connection whose Live user has no subject is reported, not held
+ *                   (no money sits on it). importProviderAccounts() runs this step alone
+ *                   (scripts/import-live.js --accounts-only), e.g. daily after the cutover.
  *
  * Idempotent: every write is keyed (import:live:txn:<id>, legacy ids, target-state keys), so a
  * re-run over the same snapshot changes nothing, and a later snapshot (the final import at
@@ -30,6 +36,7 @@
  */
 const { post, balance, iso, prefixedId } = require('../ledger');
 const { A, entry } = require('../ops/common');
+const external = require('../ops/external');
 
 const ROUTE_MARKER = /^(direct|site)(:|$)/;
 
@@ -44,6 +51,58 @@ function tableExists(db, name) { return !!db.prepare("SELECT 1 FROM sqlite_maste
 function columns(db, table) { return tableExists(db, table) ? db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name) : []; }
 
 class DryRun extends Error {}
+
+/** Live's PowerChat connections with the Network subject of their owner (resolved here when `map` lacks it). */
+async function readProviderAccounts(live, resolveLiveUsers, map = new Map()) {
+    if (!tableExists(live, 'powerchat_connections')) return [];
+    const hasId = columns(live, 'powerchat_connections').includes('powerchat_user_id');
+    const rows = live.prepare(`SELECT user_id, powerchat_username${hasId ? ', powerchat_user_id' : ''} FROM powerchat_connections
+        WHERE powerchat_username IS NOT NULL AND TRIM(powerchat_username) <> '' ORDER BY user_id`).all();
+    const missing = [...new Set(rows.map((r) => String(r.user_id)).filter((id) => !map.has(id)))];
+    const more = missing.length ? await resolveLiveUsers(missing) : new Map();
+    return rows.map((r) => ({
+        live_user_id: r.user_id, username: String(r.powerchat_username).trim().toLowerCase(),
+        account_id: hasId && r.powerchat_user_id != null ? String(r.powerchat_user_id) : null,
+        subject: map.get(String(r.user_id)) || more.get(String(r.user_id)) || null,
+    }));
+}
+
+/** Inside the import transaction: upsert the mappings; fills report.provider_accounts. */
+function applyProviderAccounts(ctx, rows, report) {
+    const out = { mapped: 0, unchanged: 0, unmapped: [], kept_admin: [] };
+    for (const r of rows) {
+        if (!r.subject) { out.unmapped.push({ live_user_id: r.live_user_id, username: r.username, reason: 'no Network subject' }); continue; }
+        if (!external.USERNAME_RE.test(r.username)) { out.unmapped.push({ live_user_id: r.live_user_id, username: r.username.slice(0, 80), reason: 'not a PowerChat username' }); continue; }
+        const cur = ctx.db.prepare("SELECT * FROM provider_accounts WHERE provider = 'powerchat' AND username = ?").get(r.username);
+        if (cur && cur.source === 'admin') { if (cur.subject !== r.subject) out.kept_admin.push({ username: r.username, admin_subject: cur.subject, live_subject: r.subject }); continue; }
+        if (cur && cur.subject === r.subject && (cur.account_id || null) === (r.account_id || cur.account_id || null)) { out.unchanged++; continue; }
+        external.mapAccount(ctx, { provider: 'powerchat', username: r.username, accountId: r.account_id, subject: r.subject, source: 'live-import', liveUserId: r.live_user_id });
+        out.mapped++;
+    }
+    report.provider_accounts = out;
+    return out;
+}
+
+/** Step 6 alone: refresh provider_accounts from a Live snapshot (no money is touched). */
+async function importProviderAccounts(ctx, { live, resolveLiveUsers, dryRun = false, log = console }) {
+    const { db } = ctx;
+    const started = ctx.now();
+    const runId = prefixedId('imp', started);
+    const report = { run_id: runId, dry_run: !!dryRun, started_at: iso(started), source: 'openvibe-live snapshot (provider accounts only)' };
+    const rows = await readProviderAccounts(live, resolveLiveUsers);
+    try {
+        db.transaction(() => {
+            applyProviderAccounts(ctx, rows, report);
+            if (dryRun) throw new DryRun();
+        })();
+    } catch (e) { if (!(e instanceof DryRun)) throw e; }
+    report.finished_at = iso(ctx.now());
+    db.prepare('INSERT INTO import_runs (id, source, dry_run, started_at, finished_at, report) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(runId, 'live-accounts', dryRun ? 1 : 0, report.started_at, report.finished_at, JSON.stringify(report));
+    const a = report.provider_accounts;
+    log.log && log.log(`[Billing] provider accounts ${runId}${dryRun ? ' (dry run, rolled back)' : ''}: ${a.mapped} mapped, ${a.unchanged} unchanged, ${a.unmapped.length} unmapped, ${a.kept_admin.length} kept (operator)`);
+    return report;
+}
 
 async function importLive(ctx, { live, resolveLiveUsers, dryRun = false, log = console }) {
     const { db, rates } = ctx;
@@ -88,6 +147,7 @@ async function importLive(ctx, { live, resolveLiveUsers, dryRun = false, log = c
     const owner = (liveId) => (liveId == null ? null : subjectOf(liveId) || `hold:live:${liveId}`);
     const username = new Map(users.map((u) => [String(u.id), u.username]));
     report.counts.identities = { resolved: [...ids].filter((i) => subjectOf(i)).length, unmapped: [...ids].filter((i) => !subjectOf(i)).length };
+    const accountRows = await readProviderAccounts(live, resolveLiveUsers, map);
 
     const before = db.prepare('SELECT COUNT(*) AS n FROM transactions').get().n;
     const ms = ctx.now();
@@ -307,6 +367,9 @@ async function importLive(ctx, { live, resolveLiveUsers, dryRun = false, log = c
             }
         }
 
+        // ── 6. provider accounts ─────────────────────────────
+        applyProviderAccounts(ctx, accountRows, report);
+
         report.new_transactions = db.prepare('SELECT COUNT(*) AS n FROM transactions').get().n - before;
         if (dryRun) throw new DryRun();
     };
@@ -322,4 +385,4 @@ async function importLive(ctx, { live, resolveLiveUsers, dryRun = false, log = c
     return report;
 }
 
-module.exports = { importLive, liveTs };
+module.exports = { importLive, importProviderAccounts, liveTs };

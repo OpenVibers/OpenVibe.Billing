@@ -18,7 +18,7 @@
  */
 const { post, getTxn, requireFunds, iso, prefixedId } = require('../ledger');
 const { enqueue } = require('../outbox');
-const { A, entry, receiptEntries, fail, positiveInt } = require('./common');
+const { A, MAX_RECEIPT_CENTS, entry, receiptEntries, fail, positiveInt } = require('./common');
 const { summary } = require('./purchases');
 const intents = require('./intents');
 
@@ -103,7 +103,7 @@ function pay(ctx, input) {
         } else if (input.source === 'receipt' && r) {
             provider = r.provider;
             route = r.route || null;
-            const paid = positiveInt(r.paidCents, 'amount_cents', 100_000_000);
+            const paid = positiveInt(r.paidCents, 'amount_cents', MAX_RECEIPT_CENTS);
             const fee = Math.max(0, Math.round(Number(r.feeCents) || 0));
             if (route === 'direct') {
                 // EXTERNAL: the streamer holds the money already; nothing touches the journal.

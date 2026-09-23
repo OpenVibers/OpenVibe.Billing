@@ -311,7 +311,7 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
     });
     r.post('/reconciliation', needs(CAP.admin), (req, res) => {
         const report = db.transaction(() => {
-            const rep = reconcile(ctx);
+            const rep = reconcile(ctx, { trigger: 'console' });
             record(req, { action: 'reconciliation.run', target: { type: 'reconciliation_run', id: rep.id }, detail: { ok: rep.ok, failed: rep.checks.filter((c) => !c.ok).map((c) => c.id) } });
             return rep;
         })();

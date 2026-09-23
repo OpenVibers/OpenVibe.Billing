@@ -24,7 +24,7 @@ webhooks land here and nowhere else.
 | CREDIT (Vibes bought, spendable, never withdrawable by the buyer) | `user_credit:<subject>` (vibes-bits) |
 | MONEY (creator payable, payouts, receipts, platform revenue) | `creator_payable:<subject>`, `payouts_pending:<subject>`, `provider_clearing:<provider>`, `platform_revenue`, `refunds`, `chargeback_loss` |
 | ENTITLEMENT (channel subscriptions) | `subscriptions` + `entitlements` (one row per paid period) |
-| EXTERNAL (tips on a streamer's own PowerChat) | stored receipt, no journal entry; a direct-route subscription grants its entitlement only |
+| EXTERNAL (tips on a streamer's own PowerChat) | stored receipt (`external_receipts`), no journal entry; announced as `billing.receipt.external` once Billing is the authority; a direct-route subscription grants its entitlement only |
 | LOYALTY, COSMETIC, GAME-STATE, LEGACY | not here (rule 5–8) |
 
 ## Run it
@@ -33,10 +33,11 @@ webhooks land here and nowhere else.
 fnm exec --using=22.22.1 npm install
 cp .env.example .env          # set OV_OAUTH_CLIENT_SECRET, POWERCHAT_WEBHOOK_SECRET, …
 npm run dev                   # http://localhost:4600
-npm test                      # 10 test files: stub Network/Events/providers, temp DBs, random ports
+npm test                      # 13 test files: stub Network/Events/providers, temp DBs, random ports
 npm run reconcile             # reconciliation report (exit 1 on failure)
 npm run freeze -- on "reason" # economy freeze from the host (status | on "<reason>" | off)
 node scripts/import-live.js --live-db <snapshot> [--dry-run] [--json]
+node scripts/import-live.js --live-db <snapshot> --accounts-only   # only PowerChat account → creator mappings
 ```
 
 Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
@@ -66,9 +67,22 @@ Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
   `503 billing.frozen`, reads work, webhooks are stored (202) and processed in arrival order after
   unfreeze. Jobs pause.
 - **Outbox**: `billing.transaction.settled|reversed`, `billing.entitlement.changed`,
-  `billing.subscription.canceled`, `billing.cashout.requested|paid|denied`, written in the same
-  transaction as the effect (events.event-envelope@1, source `billing`, actor `service:billing`).
-  Relayed to OpenVibe.Events only when `EVENTS_URL` is set.
+  `billing.subscription.canceled`, `billing.cashout.requested|paid|denied`, `billing.staff.action`,
+  `billing.receipt.external`, written in the same transaction as the effect (events.event-envelope@1,
+  source `billing`, actor `service:billing`). Relayed to OpenVibe.Events only when `EVENTS_URL` is set.
+- **Authority** (`BILLING_AUTHORITY`, `live` by default = shadow; `billing` after the cutover): decides
+  whether EXTERNAL tips are announced (see below). Anything else stops Billing at boot.
+- **EXTERNAL receipts** ([server/ops/external.js](server/ops/external.js)): a PowerChat tip paid to the
+  streamer's own account is stored once per payment in `external_receipts` (never in the journal) and,
+  under `billing`, announced once as `billing.receipt.external` — subject `provider_receipt
+  powerchat:<payment id>`, payload `streamer` (SubjectRef), `amount_cents`, `currency`, `value_bits`,
+  `donor_name` (null when `anonymous`), `anonymous`, `message`, `provider`, `provider_event_id` (the
+  payment's id), `delivery_id`, `receiving_account`, `app_ref`/`app_purpose` (goal pick), `occurred_at`,
+  `test`. OpenVibe.Tips turns it into the chat line, alert and goal progress Live's webhook used to
+  produce. The streamer is whoever the receiving account is mapped to in `provider_accounts` (the importer
+  copies Live's `powerchat_connections`; an operator can add one); an unmapped account's tip is held for
+  review and announced when reprocessed after mapping. Under `live` it is recorded, not announced —
+  Live's own webhook announces it, so a tip is never celebrated twice.
 
 ## API
 
@@ -101,10 +115,13 @@ are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "typ
 | `GET /api/v1/transactions?subject=&cursor=&limit=`, `GET …/:id` | `billing.balance.read` | history (cursor paging), one transaction with `reversed_by` |
 | `GET\|POST /api/v1/admin/freeze` | `billing.ledger.admin` | read / set `{on, reason?}`; unfreeze drains queued webhooks |
 | `GET /api/v1/admin/reconcile` | `billing.ledger.admin` | run + store a reconciliation |
+| `GET /api/v1/admin/reconciliations[?limit&failed=1]`, `GET …/:id` (`latest`) | `billing.ledger.admin` | stored runs (scheduled and on demand) with their trigger; one full report |
+| `GET\|POST /api/v1/admin/provider-accounts` | `billing.ledger.admin` | list / map `{provider, username, account_id?, subject}` a provider account to its creator (allowed while frozen) |
 | `POST /api/v1/admin/adjustments` | `billing.ledger.admin` | `{from: account, to: account, amount, reason, relates_to?}` (same currency) |
 | `GET /api/v1/admin/provider-events[?pending=1]`, `POST …/:id/reprocess` | `billing.ledger.admin` | receipts; retry an unprocessed/rejected one |
 | `POST /api/v1/admin/sweep`, `GET /api/v1/admin/import-holds` | `billing.ledger.admin` | renewal sweep now; unmapped import users |
 | `POST /webhooks/<provider>` | provider signature | `powerchat`, `stripe`, `paypal`, `ccbill` (GET too), `nowpayments` |
+| `GET /metrics` | direct loopback caller | Prometheus text (openvibe-shared/metrics): HTTP golden signals, process, `release_info`, and `billing_*` gauges — freeze, authority, receipts by state, oldest pending receipt, EXTERNAL receipts, outbox backlog, cashouts, the latest reconciliation. 404 to anything a proxy relayed; nginx answers 404 on the public host |
 
 The capabilities and the service manifest are released in openvibe-contracts (v0.8.0;
 `billing.staff.action` since v0.17.0); the drafts they came from stay in
@@ -168,7 +185,7 @@ transaction as their effect. Adjustments are not in the console; they stay on th
 
 | Adapter | Enabled when | Settles | Reverses |
 |---|---|---|---|
-| PowerChat | `POWERCHAT_WEBHOOK_SECRET` | `donation.completed` with `pcorder:` (purchase), `pcsub:` (site → share; direct → EXTERNAL entitlement), `pcdon:` (site-routed tip → payable) | `donation.refunded`, `donation.disputed`/`donation.chargeback` (event names to confirm with PowerChat) |
+| PowerChat | `POWERCHAT_WEBHOOK_SECRET` | `donation.completed` with `pcorder:` (purchase), `pcsub:` (site → share; direct → EXTERNAL entitlement), `pcdon:` (site-routed tip → payable); any other tip on a streamer's own account → EXTERNAL receipt (`billing.receipt.external` under `billing`) | `donation.refunded`, `donation.disputed`/`donation.chargeback` (event names to confirm with PowerChat) |
 | Stripe | `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` | `checkout.session.completed` (payment), every `invoice.paid` | `charge.refunded` (cumulative), `charge.dispute.funds_withdrawn` |
 | PayPal | client id + secret + `PAYPAL_WEBHOOK_ID` | `PAYMENT.CAPTURE.COMPLETED`, capture after return | `PAYMENT.CAPTURE.REFUNDED`, `…REVERSED` |
 | CCBill | `CCBILL_WEBHOOK_SECRET` | `NewSaleSuccess` (reported price required) | `Refund`, `Void`, `Chargeback` |
@@ -181,12 +198,22 @@ Reversing a subscription payment revokes the periods it granted.
 
 ## Operations
 
-- **Reconciliation** (`npm run reconcile`, `GET /api/v1/admin/reconcile`, or the console's
-  Reconciliation page) checks: journal zero-sum
-  per currency, per-transaction balance, cached balances = entry sums, fx mirror, every settled
+- **Reconciliation** runs **every hour on its own** (`BILLING_RECONCILE_INTERVAL_MS`, a first run a
+  minute after boot, also while frozen — it only reads) and on demand (`npm run reconcile`,
+  `GET /api/v1/admin/reconcile`, the console's Reconciliation page, after every import). It checks: journal
+  zero-sum per currency, per-transaction balance, cached balances = entry sums, fx mirror, every settled
   provider event has exactly one transaction, paid cashouts have payout references, payouts_pending =
-  requested cashouts. It also lists negative balances, unprocessed/rejected events, items for review
-  and import holds; totals exclude test transactions. Runs are stored in `reconciliation_runs`.
+  requested cashouts — and the ledger against the provider receipts: every transaction settled from a
+  receipt names its provider and moved exactly the receipt's cents through that provider's clearing
+  account (`receipts.ledger`), EXTERNAL receipts are never in the journal and each announced one has one
+  outbox event (`receipts.external`), and no receipt waits unprocessed longer than
+  `BILLING_RECONCILE_STALE_RECEIPT_MIN` (60) while the economy is open (`receipts.stale`). It also lists
+  negative balances, unprocessed/rejected events, items for review and import holds; totals exclude test
+  transactions. Every run is stored in `reconciliation_runs` with its trigger (`scheduled`, `api`,
+  `console`, `script`, `import`); passing scheduled runs older than `BILLING_RECONCILE_KEEP_DAYS` (30) are
+  pruned, failed ones are kept. Results: the console, `GET /api/v1/admin/reconciliations`, and `/metrics`
+  (`billing_reconciliation_ok`, `…_failed_checks`, `…_last_run_timestamp_seconds`); a failed scheduled run
+  is also logged.
 - **Freeze** before any risky change: the console's Freeze page, `POST /api/v1/admin/freeze {"on": true, "reason": "…"}`, or on the
   host `node scripts/freeze.js on "<reason>"` (same switch; after `off` the running service processes the
   held webhooks on its next retry tick).
@@ -194,7 +221,10 @@ Reversing a subscription payment revokes the periods it granted.
   `warnings` and on the console's Receipts page; resolve them with an adjustment (`relates_to` = the transaction).
 - **Payouts** are decided in the staff console (or with `billing.cashout.manage` on the API): pay at the
   provider, then approve with its payout reference once the escrow has ended.
+- **Metrics**: `curl -s http://127.0.0.1:4600/metrics` on the host.
 - **Backups**: `sqlite3 /var/lib/openvibe-billing/billing.db ".backup billing-$(date +%F).db"`.
+- **Mapping of Live's tables** to Billing's (including payouts, refunds and plans, which have no table
+  of their own on Live): [docs/live-mapping.md](docs/live-mapping.md).
 
 ## Cutover runbook (Live → Billing)
 
@@ -207,7 +237,8 @@ dashboard). In short:
 
 1. **Shadow import** as often as needed (`node scripts/import-live.js --live-db <snapshot> [--dry-run]`);
    map held users in the Network and explain every adjustment until reconciliation is clean.
-2. **Freeze Live money writes**, wait for in-flight PowerChat checkouts (an hour), back up and **freeze Billing**.
+2. **Freeze Live money writes**, wait for in-flight PowerChat checkouts (an hour), back up and **freeze Billing**,
+   set `BILLING_AUTHORITY=billing` in billing.env (EXTERNAL tips are then announced for Tips).
 3. **Re-point the PowerChat webhook** to `https://billing.openvibe.network/webhooks/powerchat` (Billing holds
    the deliveries while frozen), then take the **final snapshot and import**; reconcile.
 4. **Switch Live** (`BILLING_AUTHORITY=billing`, deploy with `--wait-idle`), **unfreeze Billing** (held
@@ -222,7 +253,7 @@ Billing did itself.
 
 `billing.openvibe.network` left OpenVibe.Sites on 2026-09-23: it serves the staff console only. Billing
 is not a public product and is not the money authority until the cutover above and everything in plan
-§12.12 holds: owning runtime with health/readiness ✔ (`/metrics` not yet); canonical identity and
+§12.12 holds: owning runtime with health/readiness and `/metrics` ✔; canonical identity and
 scoped service principals ✔ (principal `billing`); server-rendered public routes useful without
 JavaScript (not yet — the only pages are the staff-only console); real persistence and end-to-end
 workflows ✔ in tests, shadow only in production; capability/event registration against

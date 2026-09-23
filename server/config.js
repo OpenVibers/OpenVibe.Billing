@@ -45,6 +45,16 @@ function parseStaff(raw) {
     return { subjects: [...new Set(items.filter((s) => USER_SUBJECT_RE.test(s)))], invalid: items.filter((s) => !USER_SUBJECT_RE.test(s)) };
 }
 
+// Who keeps the money books (docs/live-cutover.md): 'live' while OpenVibe.Live is the ledger and
+// receives the PowerChat webhook (Billing runs in shadow), 'billing' once the webhook points here.
+// Anything else is refused at boot — a typo must not silently change what Billing announces.
+const AUTHORITIES = ['live', 'billing'];
+function parseAuthority(raw) {
+    const v = String(raw == null || raw === '' ? 'live' : raw).trim().toLowerCase();
+    if (!AUTHORITIES.includes(v)) throw new Error(`BILLING_AUTHORITY must be one of ${AUTHORITIES.join(', ')} (got "${raw}")`);
+    return v;
+}
+
 function loadConfig(env = process.env) {
     const nodeEnv = env.NODE_ENV || 'development';
     const isProduction = nodeEnv === 'production';
@@ -60,6 +70,10 @@ function loadConfig(env = process.env) {
         baseUrl,
         trustProxy: env.TRUST_PROXY != null ? Number(env.TRUST_PROXY) : 1,
         dbPath: env.BILLING_DB_PATH || './data/billing.db',
+        // 'live' (default, shadow): EXTERNAL PowerChat tips are recorded but not announced, because
+        // Live announces them from its own webhook. 'billing': they are announced as
+        // billing.receipt.external (OpenVibe.Tips turns that into the chat line, alert and goal).
+        authority: parseAuthority(env.BILLING_AUTHORITY),
 
         // Identity: service tokens are RS256 JWTs signed by OpenVibe.Network.
         network: {
@@ -132,6 +146,15 @@ function loadConfig(env = process.env) {
             enabled: env.BILLING_JOBS !== 'off',
             sweepIntervalMs: int(env.BILLING_SWEEP_INTERVAL_MS, 60 * 60 * 1000),
             webhookRetryMs: int(env.BILLING_WEBHOOK_RETRY_MS, 60 * 1000),
+            // Scheduled reconciliation (0 turns it off): stored like any other run; passing scheduled
+            // runs older than reconcileKeepDays are pruned, failed ones are kept.
+            reconcileIntervalMs: int(env.BILLING_RECONCILE_INTERVAL_MS, 60 * 60 * 1000),
+            reconcileKeepDays: int(env.BILLING_RECONCILE_KEEP_DAYS, 30),
+        },
+        reconcile: {
+            // A provider receipt still unprocessed this long after it arrived (economy not frozen)
+            // fails reconciliation: the provider was paid and the ledger does not show it yet.
+            staleReceiptMin: int(env.BILLING_RECONCILE_STALE_RECEIPT_MIN, 60),
         },
 
         // Staff console (server/console): Network SSO (authorization code + PKCE S256, OAuth
@@ -154,4 +177,4 @@ function loadConfig(env = process.env) {
     };
 }
 
-module.exports = { loadConfig, DEFAULT_PRICE_TIERS, USER_SUBJECT_RE };
+module.exports = { loadConfig, DEFAULT_PRICE_TIERS, USER_SUBJECT_RE, AUTHORITIES };

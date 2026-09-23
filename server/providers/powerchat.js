@@ -20,8 +20,10 @@
  *                               (legacy links carry Live user ids; they are resolved to subjects)
  *   (pcorder, site pcsub and pcdon count only when the tip was paid to POWERCHAT_SITE_USERNAME:
  *    the ref is buyer-editable in the fallback tip link; from any other account they are held)
- *   anything else               a tip on a streamer's own PowerChat → EXTERNAL, no Billing effect
- *                               (recorded as an interaction by OpenVibe.Tips).
+ *   anything else               a tip on a streamer's own PowerChat → EXTERNAL: no journal entry;
+ *                               stored in external_receipts and, once Billing is the authority,
+ *                               announced as billing.receipt.external (ops/external.js) for
+ *                               OpenVibe.Tips to celebrate (chat line, alert, goal).
  * Test deliveries (isTest, or source manual_test) move no money and are ignored unless
  * POWERCHAT_ALLOW_TEST_FULFILLMENT is on, in which case they settle flagged test. App-sourced
  * echoes of our own forwarded tips (source developer_app) are ignored.
@@ -112,6 +114,15 @@ function createPowerchat(cfg, { network } = {}) {
                 ? `${what} ${ref} was paid to PowerChat account "${host || 'unknown'}", not the site account — nothing credited, held for review`
                 : `${what} ${ref}: POWERCHAT_SITE_USERNAME is not set, so the receiving account cannot be verified — nothing credited, held for review`,
         });
+        // EXTERNAL: a tip on the streamer's own account. Recorded (never booked) and announced once
+        // Billing is the authority — see ops/external.js.
+        const external = () => ({
+            provider: 'powerchat', receiptRef, providerEventId: String(paymentId), deliveryId: row.provider_event_id,
+            account: { id: envelope.streamer && envelope.streamer.id != null ? envelope.streamer.id : null, username: host || null },
+            amountCents: cents, donorName: data.donorName || null, anonymous: !!(data.isAnonymous || data.anonymous),
+            message: data.message || null, appRef: ref || null, appPurpose: data.appPurpose ? String(data.appPurpose).slice(0, 120) : null,
+            occurredAt: data.occurredAt || data.createdAt || null, test: isTest,
+        });
         let m;
         if ((m = ref.match(/^pcorder:(.+)$/))) {
             if (!onSite) return offSite('purchase checkout');
@@ -139,7 +150,7 @@ function createPowerchat(cfg, { network } = {}) {
                 return { effect: 'none', reason: `underpaid delivery for ${ref}, which Live already credited before the cutover — review`, review: true };
             }
             if (cents + 1 < intent.amount_cents) {
-                if (route === 'direct') return { effect: 'none', reason: 'underpaid direct subscription: an EXTERNAL tip to the streamer' };
+                if (route === 'direct') return { effect: 'external', args: { ...external(), streamer: intent.streamer_subject } };
                 return { effect: 'tip', args: { provider: 'powerchat', receiptRef, paidCents: cents, from: intent.subject, to: intent.streamer_subject, test: isTest, idempotencyKey: key, actor, metadata: { ...meta, underpaid_subscription_intent: intent.id } } };
             }
             return {
@@ -164,7 +175,7 @@ function createPowerchat(cfg, { network } = {}) {
             // recorded here and listed by reconciliation instead of vanishing.
             return { effect: 'none', reason: 'unattributed tip to the site PowerChat account — review', review: true };
         }
-        return { effect: 'none', reason: 'EXTERNAL: a tip on the streamer\'s own PowerChat — no Billing liability' };
+        return { effect: 'external', args: external() };
     }
 
     return { name: 'powerchat', enabled, verify, parse, interpret };

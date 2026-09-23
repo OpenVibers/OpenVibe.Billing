@@ -192,7 +192,7 @@ function eventsTable(rows, { csrf, reprocess, frozen }) {
     return html`<div class="tablewrap"><table><thead><tr><th>#</th><th>Provider</th><th>Event</th><th>Type</th><th>Received</th><th>Result</th><th>Attempts</th>${reprocess ? html`<th></th>` : ''}</tr></thead><tbody>
 ${rows.map((e) => html`<tr><td>${e.id}</td><td>${e.provider}</td><td class="mono">${e.provider_event_id}</td><td>${e.type || '—'}</td><td>${when(e.received_at)}</td>
 <td>${e.result ? html`${e.result.effect}${e.result.code ? html` · <code>${e.result.code}</code>` : ''}${e.result.reason ? html`<br><span class="muted">${e.result.reason}</span>` : ''}` : html`<span class="muted">not processed</span>${e.last_error ? html`<br><span class="muted">${e.last_error}</span>` : ''}`}</td>
-<td>${e.attempts}</td>${reprocess ? html`<td>${!e.processed_at || (e.result && e.result.effect === 'rejected') ? html`<form class="inline" method="post" action="/receipts/${e.id}/reprocess"><input type="hidden" name="_csrf" value="${csrf}"><button type="submit" ${frozen ? html`disabled` : ''}>Reprocess</button></form>` : ''}</td>` : ''}</tr>`)}
+<td>${e.attempts}</td>${reprocess ? html`<td>${!e.processed_at || (e.result && (e.result.effect === 'rejected' || (e.result.effect === 'external' && e.result.review))) ? html`<form class="inline" method="post" action="/receipts/${e.id}/reprocess"><input type="hidden" name="_csrf" value="${csrf}"><button type="submit" ${frozen ? html`disabled` : ''}>Reprocess</button></form>` : ''}</td>` : ''}</tr>`)}
 </tbody></table></div>`;
 }
 
@@ -227,10 +227,11 @@ ${rows.map((h) => html`<tr><td>${h.live_user_id}</td><td><code>${h.owner}</code>
 function reconciliation({ staff, csrf, frozen, runs, notice }) {
     return layout({
         title: 'Reconciliation', section: 'reconciliation', staff, csrf, frozen, notice, body: html`<h1>Reconciliation</h1>
+<p class="muted">Also runs on its own (hourly by default, <code>BILLING_RECONCILE_INTERVAL_MS</code>). Passing scheduled runs are kept for <code>BILLING_RECONCILE_KEEP_DAYS</code> (30); failed and manual runs are kept.</p>
 <form method="post" action="/reconciliation"><input type="hidden" name="_csrf" value="${csrf}"><button class="primary" type="submit">Run reconciliation now</button></form>
 <h2>History</h2>
-${runs.length ? html`<div class="tablewrap"><table><thead><tr><th>Run</th><th>Finished</th><th>Result</th><th>Failed checks</th></tr></thead><tbody>
-${runs.map((r) => html`<tr><td><a class="mono" href="/reconciliation/${r.id}">${r.id}</a></td><td>${when(r.finished_at)}</td><td>${okBad(r.ok)}</td><td>${r.failed.join(', ') || '—'}</td></tr>`)}
+${runs.length ? html`<div class="tablewrap"><table><thead><tr><th>Run</th><th>Finished</th><th>Trigger</th><th>Result</th><th>Failed checks</th></tr></thead><tbody>
+${runs.map((r) => html`<tr><td><a class="mono" href="/reconciliation/${r.id}">${r.id}</a></td><td>${when(r.finished_at)}</td><td>${r.trigger || '—'}</td><td>${okBad(r.ok)}</td><td>${r.failed.join(', ') || '—'}</td></tr>`)}
 </tbody></table></div>` : html`<div class="card muted">No runs yet.</div>`}`,
     });
 }

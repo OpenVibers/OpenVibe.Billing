@@ -30,7 +30,7 @@ function summarizeReport(report) {
         return count(d.offenders) + count(d.mismatches);
     };
     return {
-        id: report.id, ok: !!report.ok, started_at: report.started_at, finished_at: report.finished_at,
+        id: report.id, ok: !!report.ok, started_at: report.started_at, finished_at: report.finished_at, trigger: report.trigger || null,
         checks: (report.checks || []).map((c) => ({ id: c.id, ok: !!c.ok, offenders: offenders(c) })),
         warnings: Object.fromEntries(Object.entries(report.warnings || {}).map(([k, v]) => [k, count(v)])),
         totals: report.totals || {},
@@ -49,7 +49,7 @@ function reconciliationRuns(db, limit = 50) {
     return db.prepare('SELECT id, finished_at, ok, report FROM reconciliation_runs ORDER BY finished_at DESC, id DESC LIMIT ?').all(limit)
         .map((r) => {
             const s = summarizeReport(JSON.parse(r.report));
-            return { id: r.id, finished_at: r.finished_at, ok: !!r.ok, failed: s.checks.filter((c) => !c.ok).map((c) => c.id) };
+            return { id: r.id, finished_at: r.finished_at, ok: !!r.ok, trigger: s.trigger, failed: s.checks.filter((c) => !c.ok).map((c) => c.id) };
         });
 }
 

@@ -13,7 +13,7 @@
 const { validate } = require('openvibe-contracts');
 const { post, getTxn, requireFunds } = require('../ledger');
 const { enqueue } = require('../outbox');
-const { A, entry, receiptEntries, fail, positiveInt, text } = require('./common');
+const { A, MAX_RECEIPT_CENTS, entry, receiptEntries, fail, positiveInt, text } = require('./common');
 const { summary } = require('./purchases');
 
 const KINDS = ['tip', 'donation', 'paid_interaction'];
@@ -85,7 +85,7 @@ function fromReceipt(ctx, input) {
     return db.transaction(() => {
         const dup = db.prepare('SELECT id FROM transactions WHERE receipt_ref = ?').get(input.receiptRef);
         if (dup) return { txn: getTxn(db, dup.id), replay: true, duplicateReceipt: true };
-        const paidCents = positiveInt(input.paidCents, 'amount_cents');
+        const paidCents = positiveInt(input.paidCents, 'amount_cents', MAX_RECEIPT_CENTS);
         if (input.from && input.from === input.to) fail(422, 'billing.self_dealing', 'a creator cannot route a tip to themselves');
         const bits = rates.bitsForValueCents(paidCents);
         const { txn } = post(ctx, {

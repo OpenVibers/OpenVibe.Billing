@@ -13,9 +13,16 @@
  * arrival order after the freeze lifts (and on a timer for events that failed transiently).
  *
  * Result effects: settled (exactly one transaction points at the event) | duplicate_receipt (the
- * payment was already settled by another event) | updated (state change, no money) | none (no
- * money effect: test, echo, EXTERNAL, not handled; `review` marks ones an operator should see) |
+ * payment was already settled — or, EXTERNAL, already announced — by another event) | updated
+ * (state change, no money) | external (a tip on the streamer's own account: recorded in
+ * external_receipts, no journal entry; `announced` says whether billing.receipt.external went out) |
+ * none (no money effect: test, echo, not handled; `review` marks ones an operator should see) |
  * rejected (a 4xx business refusal, e.g. a refund for an unknown payment).
+ *
+ * Races: the stored row is the lock. Applying a plan re-reads processed_at inside an IMMEDIATE
+ * transaction (the write lock is taken first, so a second process or connection waits rather than
+ * failing to upgrade), and a payment's receipt_ref is UNIQUE in the journal, so concurrent deliveries
+ * of one payment — same delivery id or not, same process or not — settle it once.
  */
 const crypto = require('crypto');
 const { iso, BillingError } = require('../ledger');
@@ -24,6 +31,7 @@ const purchases = require('../ops/purchases');
 const transfers = require('../ops/transfers');
 const subscriptions = require('../ops/subscriptions');
 const reversals = require('../ops/reversals');
+const external = require('../ops/external');
 const { createPowerchat } = require('./powerchat');
 const { createStripe } = require('./stripe');
 const { createPaypal } = require('./paypal');
@@ -62,6 +70,7 @@ function applyPlan(ctx, plan, row) {
         case 'purchase': return settled(purchases.settle(ctx, withEvent(plan.args)));
         case 'subscription': return settled(subscriptions.pay(ctx, withEvent(plan.args)));
         case 'tip': return settled(transfers.fromReceipt(ctx, withEvent(plan.args)));
+        case 'external': return external.record(ctx, withEvent(plan.args));
         case 'reverse': {
             const r = reversals.reverseReceipt(ctx, withEvent(plan.args));
             if (r.noop) return { effect: 'none', reason: r.noop };
@@ -93,7 +102,7 @@ async function process(ctx, adapters, rowOrId) {
             }
             db.prepare('UPDATE provider_events SET processed_at = ?, result = ?, attempts = attempts + 1, last_error = NULL WHERE id = ?')
                 .run(iso(ctx.now()), JSON.stringify(result), row.id);
-        })();
+        }).immediate();
     } catch (e) {
         db.prepare('UPDATE provider_events SET attempts = attempts + 1, last_error = ? WHERE id = ?').run(String(e.message).slice(0, 500), row.id);
         (ctx.log || console).warn(`[Billing] ${row.provider} event ${row.provider_event_id} not processed: ${e.message}`);
@@ -119,7 +128,10 @@ async function processPending(ctx, adapters, { limit = 500 } = {}) {
 async function reprocess(ctx, adapters, id) {
     const row = parseRow(ctx.db.prepare('SELECT * FROM provider_events WHERE id = ?').get(id));
     if (!row) throw new BillingError(404, 'billing.event_not_found', `no provider event ${id}`);
-    if (row.processed_at && row.result && row.result.effect !== 'rejected' && row.result.effect !== 'none') {
+    // An EXTERNAL receipt that was not announced (e.g. its account was mapped since) may be retried;
+    // one that was announced never is (external_receipts would answer duplicate_receipt anyway).
+    const retryable = (r) => r.effect === 'rejected' || r.effect === 'none' || (r.effect === 'external' && !r.announced);
+    if (row.processed_at && row.result && !retryable(row.result)) {
         throw new BillingError(409, 'billing.event_settled', `event ${id} already had effect ${row.result.effect}`);
     }
     if (row.processed_at) ctx.db.prepare('UPDATE provider_events SET processed_at = NULL WHERE id = ?').run(id);

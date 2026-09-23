@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0",
+  "version": "0.4.0",
   "contractRanges": {
     "openvibe-contracts": ">=0.5.1 <1.0.0"
   },
@@ -31,11 +31,12 @@
     "billing.cashout.requested",
     "billing.cashout.paid",
     "billing.cashout.denied",
-    "billing.staff.action"
+    "billing.staff.action",
+    "billing.receipt.external"
   ],
   "eventsConsumed": [],
   "namespacesOwned": [
     "billing.*"
   ],
-  "notes": "The isolated money ledger (ADR-012): balanced append-only journal, provider receipts, subscriptions/entitlements, refunds and payouts, and a staff console (Network SSO, staff only) for payouts, review, reconciliation and the freeze. Proposed manifest: adds billing.staff.action (internal) to the released 0.2.0."
+  "notes": "The isolated money ledger (ADR-012): balanced append-only journal, provider receipts, subscriptions/entitlements, refunds and payouts, and a staff console (Network SSO, staff only) for payouts, review, reconciliation and the freeze. Proposed manifest: adds billing.staff.action (internal; released in contracts v0.17.0) and billing.receipt.external (internal: an EXTERNAL tip on a streamer's own PowerChat — subject provider_receipt <provider>:<payment id>; payload streamer SubjectRef, amount_cents, currency usd-cents, value_bits, donor_name (null when anonymous), anonymous, message, provider, provider_event_id, delivery_id, receipt_ref, receiving_account, app_ref, app_purpose, occurred_at, test, rates — sent only while BILLING_AUTHORITY=billing, consumed by OpenVibe.Tips) to the released 0.2.0."
 }

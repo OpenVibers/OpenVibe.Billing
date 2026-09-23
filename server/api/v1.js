@@ -22,6 +22,7 @@ const intents = require('../ops/intents');
 const admin = require('../ops/admin');
 const providers = require('../providers');
 const { reconcile } = require('../reconcile');
+const external = require('../ops/external');
 
 const CAP = {
     intent: 'billing.intent.create',
@@ -248,8 +249,39 @@ function v1Router({ ctx, auth, adapters }) {
         res.json({ ...state, processed_after_unfreeze: drained });
     }));
     r.get('/admin/reconcile', ...read(CAP.admin, (req, res) => {
-        const report = reconcile(ctx);
+        const report = reconcile(ctx, { trigger: 'api' });
         res.status(200).json(report);
+    }));
+    // Stored runs (scheduled and on demand), newest first; ?failed=1 for failed runs only.
+    r.get('/admin/reconciliations', ...read(CAP.admin, (req, res) => {
+        const limit = Math.min(200, positiveInt(req.query.limit || 20, 'limit'));
+        const failed = req.query.failed === '1' || req.query.failed === 'true';
+        const rows = db.prepare(`SELECT id, started_at, finished_at, ok, report FROM reconciliation_runs ${failed ? 'WHERE ok = 0' : ''} ORDER BY finished_at DESC, id DESC LIMIT ?`).all(limit);
+        res.json({
+            runs: rows.map((r) => {
+                const rep = JSON.parse(r.report);
+                return { id: r.id, ok: !!r.ok, trigger: rep.trigger || null, started_at: r.started_at, finished_at: r.finished_at, failed_checks: rep.checks.filter((c) => !c.ok).map((c) => c.id) };
+            }),
+        });
+    }));
+    r.get('/admin/reconciliations/:id', ...read(CAP.admin, (req, res) => {
+        const row = req.params.id === 'latest'
+            ? db.prepare('SELECT report FROM reconciliation_runs ORDER BY finished_at DESC, id DESC LIMIT 1').get()
+            : db.prepare('SELECT report FROM reconciliation_runs WHERE id = ?').get(req.params.id);
+        if (!row) fail(404, 'billing.reconciliation_not_found', `no reconciliation run ${req.params.id}`);
+        res.json(JSON.parse(row.report));
+    }));
+    // Provider account → creator (who an EXTERNAL tip on that account belongs to).
+    r.get('/admin/provider-accounts', ...read(CAP.admin, (req, res) => {
+        res.json({ accounts: db.prepare('SELECT * FROM provider_accounts ORDER BY provider, username').all() });
+    }));
+    // Not a money movement: allowed while frozen (the cutover maps accounts with Billing frozen).
+    r.post('/admin/provider-accounts', auth.needs(CAP.admin), idem, wrap((req, res) => {
+        const b = req.body || {};
+        const provider = String(b.provider || '').toLowerCase();
+        if (!adapters[provider]) fail(422, 'billing.invalid_input', `provider must be one of ${Object.keys(adapters).join(', ')}`);
+        const row = external.mapAccount(ctx, { provider, username: b.username, accountId: b.account_id, subject: b.subject, source: 'admin' });
+        res.status(201).json({ account: row });
     }));
     r.post('/admin/adjustments', ...write(CAP.admin, (req, res) => {
         const b = req.body || {};

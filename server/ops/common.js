@@ -9,6 +9,9 @@ const { BillingError } = require('../ledger');
 
 const BITS = 'vibes-bits';
 const CENTS = 'usd-cents';
+// The largest single provider receipt Billing accepts ($1,000,000). Anything above is refused
+// (a provider event is then rejected and listed for review), never booked.
+const MAX_RECEIPT_CENTS = 100_000_000;
 
 /** Account addresses. owner is a subject id, a provider slug, 'hold:live:<id>' or null (platform). */
 const A = {
@@ -55,9 +58,10 @@ function userSubject(v, field = 'subject') {
     return ref.id;
 }
 
+/** A positive safe integer (never a float, never past 2^53 where JS arithmetic stops being exact). */
 function positiveInt(v, field, max) {
     const n = Number(v);
-    if (!Number.isInteger(n) || n <= 0) fail(422, 'billing.invalid_amount', `${field} must be a positive integer`);
+    if (!Number.isSafeInteger(n) || n <= 0) fail(422, 'billing.invalid_amount', `${field} must be a positive integer`);
     if (max && n > max) fail(422, 'billing.invalid_amount', `${field} exceeds the maximum of ${max}`);
     return n;
 }
@@ -79,4 +83,4 @@ function assertNotFrozen(ctx) {
 /** Movement summary for a subject from a transaction's entries (used in API responses). */
 function subjectRef(id) { return id ? { type: 'user', id } : null; }
 
-module.exports = { A, BITS, CENTS, entry, receiptEntries, fail, userSubject, positiveInt, text, isFrozen, assertNotFrozen, subjectRef };
+module.exports = { A, BITS, CENTS, MAX_RECEIPT_CENTS, entry, receiptEntries, fail, userSubject, positiveInt, text, isFrozen, assertNotFrozen, subjectRef };

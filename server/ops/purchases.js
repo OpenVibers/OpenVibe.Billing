@@ -13,7 +13,7 @@
  */
 const { post, getTxn, BillingError, present } = require('../ledger');
 const { enqueue } = require('../outbox');
-const { A, receiptEntries, fail, positiveInt } = require('./common');
+const { A, MAX_RECEIPT_CENTS, receiptEntries, fail, positiveInt } = require('./common');
 const intents = require('./intents');
 
 function settle(ctx, input) {
@@ -24,7 +24,7 @@ function settle(ctx, input) {
         const dup = db.prepare('SELECT id FROM transactions WHERE receipt_ref = ?').get(receiptRef);
         if (dup) return { txn: getTxn(db, dup.id), replay: true, duplicateReceipt: true };
 
-        const paidCents = positiveInt(input.paidCents, 'amount_cents', 100_000_000);
+        const paidCents = positiveInt(input.paidCents, 'amount_cents', MAX_RECEIPT_CENTS);
         let intent = null;
         if (input.intentId) {
             intent = intents.find(db, input.intentId);

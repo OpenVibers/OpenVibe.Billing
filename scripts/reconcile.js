@@ -11,7 +11,7 @@ const { reconcile } = require('../server/reconcile');
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
-const report = reconcile({ db, config, rates: createRates(config.rates), now: () => Date.now() });
+const report = reconcile({ db, config, rates: createRates(config.rates), now: () => Date.now() }, { trigger: 'script' });
 if (process.argv.includes('--json')) console.log(JSON.stringify(report, null, 2));
 else {
     console.log(`reconciliation ${report.id}: ${report.ok ? 'OK' : 'FAILED'}`);
@@ -19,6 +19,7 @@ else {
     const w = report.warnings;
     console.log(`  warnings: ${w.negative_balances.length} negative balances, ${w.unprocessed_events.length} unprocessed events, ${w.rejected_events.length} rejected events, ` +
         `${w.events_for_review.length + w.transactions_for_review.length} for review, ${w.import_holds.length} import holds`);
+    console.log(`  EXTERNAL receipts (test excluded): ${report.totals.external_receipts}, announced ${report.totals.external_announced}`);
     console.log(`  totals (test excluded): ${JSON.stringify(report.totals)}`);
 }
 db.close();

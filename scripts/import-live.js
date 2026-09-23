@@ -4,6 +4,10 @@
  * Import OpenVibe.Live's money state into Billing (ADR-012 migration).
  *
  *   node scripts/import-live.js --live-db /path/to/live-snapshot.db [--dry-run] [--json]
+ *   node scripts/import-live.js --live-db /path/to/live-snapshot.db --accounts-only [--dry-run] [--json]
+ *
+ * --accounts-only refreshes only provider_accounts from Live's powerchat_connections (who an
+ * EXTERNAL PowerChat tip belongs to); no money, no reconciliation. Safe to run daily after cutover.
  *
  * --live-db must be a COPY of live.db (e.g. `sqlite3 live.db ".backup live-snapshot.db"`); it is
  * opened read-only. Live user ids are resolved to Network subjects through resolve-batch with this
@@ -17,7 +21,7 @@ const { loadConfig } = require('../server/config');
 const { openDb } = require('../server/db');
 const { createRates } = require('../server/rates');
 const { createIdentity } = require('../server/network');
-const { importLive } = require('../server/importer/live');
+const { importLive, importProviderAccounts } = require('../server/importer/live');
 const { reconcile } = require('../server/reconcile');
 
 const args = process.argv.slice(2);
@@ -33,8 +37,20 @@ async function main() {
     const db = openDb(config.dbPath);
     const ctx = { db, config, rates: createRates(config.rates), now: () => Date.now(), log: console };
     const identity = createIdentity(config);
+    if (flag('accounts-only')) {
+        const r = await importProviderAccounts(ctx, { live, resolveLiveUsers: identity.resolveLiveUsers, dryRun: flag('dry-run') });
+        const a = r.provider_accounts;
+        if (flag('json')) console.log(JSON.stringify(r, null, 2));
+        else {
+            console.log(`provider accounts ${r.run_id}${r.dry_run ? ' (DRY RUN — nothing kept)' : ''}: ${a.mapped} mapped, ${a.unchanged} unchanged, ${a.kept_admin.length} kept (set by an operator)`);
+            for (const u of a.unmapped) console.log(`    unmapped: live user ${u.live_user_id} (${u.username}): ${u.reason}`);
+        }
+        live.close();
+        db.close();
+        return;
+    }
     const report = await importLive(ctx, { live, resolveLiveUsers: identity.resolveLiveUsers, dryRun: flag('dry-run') });
-    const rec = flag('dry-run') ? null : reconcile(ctx);
+    const rec = flag('dry-run') ? null : reconcile(ctx, { trigger: 'import' });
     if (flag('json')) console.log(JSON.stringify({ import: report, reconciliation: rec }, null, 2));
     else {
         console.log(`import ${report.run_id}${report.dry_run ? ' (DRY RUN — nothing kept)' : ''}`);
@@ -46,6 +62,8 @@ async function main() {
         for (const h of report.holds) console.log(`    live user ${h.live_user_id} (${h.username || '?'}): credit ${h.credit_bits}, payable ${h.payable_bits}`);
         console.log(`  duplicate provider refs: ${report.duplicate_provider_refs.length}; route markers parsed: ${report.route_markers}`);
         console.log(`  unreplayable history rows: ${report.unreplayable.length}; anomalies: ${report.anomalies.length}`);
+        const pa = report.provider_accounts;
+        if (pa) console.log(`  PowerChat accounts: ${pa.mapped} mapped, ${pa.unchanged} unchanged, ${pa.unmapped.length} unmapped, ${pa.kept_admin.length} kept (operator)`);
         if (rec) console.log(`  reconciliation ${rec.id}: ${rec.ok ? 'OK' : 'FAILED'} (${rec.checks.filter((c) => !c.ok).map((c) => c.id).join(', ') || 'all checks pass'})`);
     }
     live.close();
