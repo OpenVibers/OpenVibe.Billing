@@ -55,6 +55,7 @@ fieldset{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margi
 legend{padding:0 6px;font-weight:600}
 dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{color:var(--muted)}dd{margin:0}
 .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;align-items:start}
+.shipped{max-width:1180px;margin:24px auto;padding:0 16px 24px;color:var(--muted);font-size:.85rem}
 `;
 const CSS_HASH = `sha256-${crypto.createHash('sha256').update(CSS).digest('base64')}`;
 const CSP = `default-src 'none'; style-src '${CSS_HASH}'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`;
@@ -81,6 +82,25 @@ const NAV = [
     ['/import-holds', 'Import holds', 'holds'], ['/reconciliation', 'Reconciliation', 'reconciliation'], ['/freeze', 'Freeze', 'freeze'], ['/audit', 'Audit log', 'audit'],
 ];
 
+// What shipped on OpenVibe.Billing: the network changelog's newest entry, rendered here as plain HTML
+// (this console loads no scripts, so the shared "shipped" widget cannot run). The console router
+// refreshes it from Network's loopback proxy; nothing is shown until an entry has been read.
+let _shipped = null;
+function setShipped(e) {
+    if (e && e.subject && e.deployed_at && !Number.isNaN(Date.parse(e.deployed_at))) _shipped = { subject: String(e.subject).slice(0, 200), deployed_at: e.deployed_at };
+}
+function agoText(iso, now = Date.now()) {
+    const s = Math.max(0, (now - Date.parse(iso)) / 1000);
+    if (s < 45) return 'just now';
+    if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m ago`;
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+}
+function shippedLine() {
+    if (!_shipped) return '';
+    return html`<footer class="shipped">Billing shipped <time datetime="${_shipped.deployed_at}">${agoText(_shipped.deployed_at)}</time>: ${_shipped.subject} · <a href="https://openvibe.network/updates?site=billing">Updates</a></footer>`;
+}
+
 function layout({ title, section, staff, csrf, frozen, notice, error, body }) {
     return `<!doctype html>${render(html`<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer"><title>${title} · Billing staff</title><style>${new Raw(CSS)}</style></head>
@@ -93,7 +113,7 @@ ${frozen ? html`<div class="banner frozen"><strong>The economy is frozen.</stron
 ${notice ? html`<div class="banner done">${notice}</div>` : ''}
 ${error ? html`<div class="banner error"><strong>Refused:</strong> ${error}</div>` : ''}
 ${body}
-</main></body></html>`)}`;
+</main>${shippedLine()}</body></html>`)}`;
 }
 
 // ── Pages ────────────────────────────────────────────────────
@@ -278,4 +298,4 @@ ${rows.length ? auditTable(rows) : html`<div class="card muted">Empty.</div>`}`,
     });
 }
 
-module.exports = { CSP, html, esc, pages: { signIn, message, dashboard, cashouts, cashout, receipts, holds, reconciliation, reconciliationRun, freeze, audit } };
+module.exports = { CSP, html, esc, setShipped, pages: { signIn, message, dashboard, cashouts, cashout, receipts, holds, reconciliation, reconciliationRun, freeze, audit } };

@@ -42,7 +42,7 @@ const { createSessions, sameString, random } = require('./session');
 const sso = require('./sso');
 const audit = require('./audit');
 const q = require('./queries');
-const { CSP, pages } = require('./views');
+const { CSP, pages, setShipped } = require('./views');
 
 /** Server-side mapping: what a staff session holds, in the API's own capability ids. */
 const STAFF_CAPABILITIES = Object.freeze([CAP.cashoutManage, CAP.admin]);
@@ -72,6 +72,21 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
     const log = ctx.log || console;
     const r = express.Router();
     const baseOrigin = (() => { try { return new URL(config.baseUrl).origin; } catch { return null; } })();
+
+    // The footer's "shipped" line: read the network changelog (Network's loopback proxy) at most once a
+    // minute, in the background of a request; the page never waits for it and a failure shows nothing.
+    let shippedReadAt = 0;
+    r.use((req, res, next) => {
+        const now = Date.now();
+        if (now - shippedReadAt > 60 * 1000 && config.network && config.network.internalUrl) {
+            shippedReadAt = now;
+            Promise.resolve(fetchImpl(`${config.network.internalUrl}/api/v1/changelog?service=billing&limit=1`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(2000) }))
+                .then((x) => (x && x.ok ? x.json() : null))
+                .then((d) => { if (d && Array.isArray(d.entries) && d.entries[0]) setShipped(d.entries[0]); })
+                .catch(() => { /* the line just stays as it was */ });
+        }
+        next();
+    });
 
     let secret = cc.sessionSecret;
     let unavailable = null;
