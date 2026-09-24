@@ -20,6 +20,10 @@ const { boot, fund, check, done } = require('./helpers/app');
         const r = await t.call('GET', '/api/v1/rates', { token: null });
         assert.strictEqual(r.json.packages.find((p) => p.bits === 1000).price_cents, 1300);
         assert.strictEqual((await t.call('GET', '/api/ready', { token: null })).status, 200);
+        const rel = await t.call('GET', '/release.json', { token: null });
+        assert.strictEqual(rel.status, 200, 'the release manifest (D43) is served');
+        assert.strictEqual(rel.json.service, 'billing');
+        assert.ok(rel.json.release && rel.json.components && rel.json.components.server);
     });
 
     await check('purchase settle credits the buyer and books the spread as revenue', async () => {

@@ -54,6 +54,8 @@ function createApp(opts = {}) {
     const metrics = createMetrics({ db, config, now: ctx.now });
     const release = createRelease({ service: 'billing', root: path.join(__dirname, '..') });
     instrument(app, { service: 'billing', release: release.release, registry: metrics.registry });
+    // GET /release.json (ADR-016, D43) and POST /release-metrics: what this deployment is, for tabs and deploy checks.
+    release.mount(app, { registry: metrics.registry });
     app.use(http.middleware());
     app.use((req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
 
