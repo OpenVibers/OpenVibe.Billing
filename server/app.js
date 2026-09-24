@@ -64,13 +64,17 @@ function createApp(opts = {}) {
         providers: Object.fromEntries(Object.values(adapters).map((a) => [a.name, a.enabled])),
         events_relay: !!config.events.url,
     }));
-    app.get('/api/ready', (req, res) => {
-        const problems = [];
-        try { db.prepare('SELECT 1 FROM settings WHERE id = 1').get(); } catch (e) { problems.push(`database: ${e.message}`); }
-        if (!keys.get()) problems.push('Network public key not loaded');
-        if (problems.length) return http.sendProblem(res, 503, 'service.not_ready', { detail: problems.join('; '), ctx: req.ov });
-        return res.json({ ready: true });
+    // Readiness in the openvibe-shared/ready shape (status, named checks, release): 503 when the ledger
+    // database or the Network key fails; the money freeze and the authority show without failing it.
+    const readiness = require('openvibe-shared/ready').createReadiness({
+        service: 'billing', release: release.release,
+        checks: [
+            { name: 'db', required: true, check: () => db.prepare('SELECT 1 AS ok FROM settings WHERE id = 1').get().ok === 1 || 'settings row missing' },
+            { name: 'network_jwks', required: true, check: () => Boolean(keys.get()) || 'Network public key not loaded' },
+            { name: 'money_writes', required: false, check: () => (isFrozen(db) ? 'frozen' : true) },
+        ],
     });
+    app.get('/api/ready', readiness.handler);
 
     app.use('/webhooks', webhooksRouter({ ctx, adapters }));
     app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters }));
