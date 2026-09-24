@@ -57,6 +57,8 @@ function createApp(opts = {}) {
     // GET /release.json (ADR-016, D43) and POST /release-metrics: what this deployment is, for tabs and deploy checks.
     release.mount(app, { registry: metrics.registry });
     app.use(http.middleware());
+    // One W3C trace across services (openvibe-shared/trace): calls made while serving a request carry its traceparent.
+    require('openvibe-shared/trace').install(app);
     app.use((req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
 
     app.get('/api/health', (req, res) => res.json({
