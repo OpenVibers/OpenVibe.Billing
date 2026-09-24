@@ -1,4 +1,5 @@
 'use strict';
+const { staff: staffMap } = require('openvibe-contracts');
 
 /**
  * OpenVibe.Network single sign-on for the staff console: OAuth 2 authorization code with PKCE
@@ -96,7 +97,10 @@ async function exchange(ctx, { code, verifier, publicKey, fetchImpl = globalThis
     return {
         subject: typeof claims.subject_id === 'string' ? claims.subject_id : null,
         username: typeof claims.username === 'string' ? claims.username.slice(0, 64) : null,
-        role: typeof claims.role === 'string' ? claims.role : null,
+        // The effective role ('owner' for role admin with is_owner) and whether the staff map lets
+        // this token act on money (staff.money.cashouts; ADR-022).
+        role: staffMap.effectiveRole(claims),
+        money: staffMap.can(claims, 'staff.money.cashouts'),
     };
 }
 

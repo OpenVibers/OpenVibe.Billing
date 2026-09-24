@@ -1,7 +1,7 @@
 'use strict';
 /**
- * The staff console: Network SSO with PKCE, staff-only access (Network role admin AND listed in
- * BILLING_STAFF_SUBJECTS), session cookie attributes, CSRF on every form, cashout approve/deny
+ * The staff console: Network SSO with PKCE, staff-only access (staff.money.cashouts in the contracts
+ * staff map, i.e. the owner, AND listed in BILLING_STAFF_SUBJECTS), session cookie attributes, CSRF on every form, cashout approve/deny
  * through ops/cashouts with the payout reference and escrow enforced, the freeze, reconciliation,
  * review queue — every action audited once in staff_audit and announced as billing.staff.action —
  * and no secrets or provider payloads on any page.
@@ -36,13 +36,13 @@ const DAY = 86_400_000;
         });
         return { status: res.status, headers: res.headers, text: await res.text(), cookies: setCookies(res) };
     }
-    async function signIn(subject, { role = 'admin', username = 'staffer', next = '/cashouts' } = {}) {
+    async function signIn(subject, { role = 'admin', is_owner = true, username = 'staffer', next = '/cashouts' } = {}) {
         const login = await get(`/auth/login?next=${encodeURIComponent(next)}`);
         assert.strictEqual(login.status, 302);
         const loc = new URL(login.headers.get('location'));
         const flow = login.cookies.find((c) => c.startsWith('ovb_flow='));
         const code = network.authorize({
-            subject_id: subject, role, username, challenge: loc.searchParams.get('code_challenge'),
+            subject_id: subject, role, is_owner, username, challenge: loc.searchParams.get('code_challenge'),
             redirect_uri: loc.searchParams.get('redirect_uri'), nowMs: Date.now() + t.clock.offset,
         });
         const cb = await get(`/auth/callback?code=${code}&state=${encodeURIComponent(loc.searchParams.get('state'))}`, flow.split(';')[0]);
@@ -112,9 +112,11 @@ const DAY = 86_400_000;
         const b = await signIn(listedNonAdmin, { role: 'user' });
         assert.strictEqual(b.cb.status, 403);
         assert.strictEqual(b.cookie, null);
+        const c = await signIn(listedNonAdmin, { role: 'admin', is_owner: false });
+        assert.strictEqual(c.cb.status, 403, 'a listed admin who is not the owner: money is the owner\'s (staff.money.cashouts)');
         assert.strictEqual(t.db.prepare('SELECT COUNT(*) AS n FROM staff_sessions').get().n, 0);
         const refused = auditRows('session.sign_in', 'refused');
-        assert.deepStrictEqual(refused.map((r) => r.actor_subject).sort(), [listedNonAdmin, unlistedAdmin].sort());
+        assert.deepStrictEqual(refused.map((r) => r.actor_subject).sort(), [listedNonAdmin, listedNonAdmin, unlistedAdmin].sort());
         assert.strictEqual(staffEvents('session.sign_in').length, 0, 'refusals are not published');
     });
 

@@ -30,7 +30,7 @@
  */
 const crypto = require('crypto');
 const express = require('express');
-const { capabilities } = require('openvibe-contracts');
+const { capabilities, staff: staffMap } = require('openvibe-contracts');
 const { BillingError, balance } = require('../ledger');
 const { A, assertNotFrozen, isFrozen, text } = require('../ops/common');
 const cashouts = require('../ops/cashouts');
@@ -129,10 +129,10 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
         req.staff = null;
         const row = sessions.read(req);
         if (!row) return next();
-        if (!cc.staffSubjects.includes(row.subject) || row.role !== cc.staffRole) {
+        if (!cc.staffSubjects.includes(row.subject) || !staffMap.can(row.role || 'user', cc.staffCapability)) {
             sessions.revoke(row);
             sessions.clear(res);
-            audit.record(ctx, { actor: { subject: row.subject, username: row.username }, action: 'session.use', outcome: 'refused', reason: 'no longer listed in BILLING_STAFF_SUBJECTS', requestId: requestId(req), ipHash: ipHash(req) });
+            audit.record(ctx, { actor: { subject: row.subject, username: row.username }, action: 'session.use', outcome: 'refused', reason: cc.staffSubjects.includes(row.subject) ? `the session's role does not hold ${cc.staffCapability}` : 'no longer listed in BILLING_STAFF_SUBJECTS', requestId: requestId(req), ipHash: ipHash(req) });
             return send(res, 403, pages.message({ title: 'Not authorized', text: 'Your account is no longer Billing staff. The session was ended.' }));
         }
         req.staff = { subject: row.subject, username: row.username, role: row.role, csrf: row.csrf, session: row, principal: { sub: row.subject, cap: STAFF_CAPABILITIES } };
@@ -194,10 +194,10 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
             return send(res, e.status && e.status < 500 ? 400 : 502, pages.signIn({ message: 'OpenVibe.Network did not confirm the sign-in. Please try again.' }));
         }
         const listed = !!who.subject && cc.staffSubjects.includes(who.subject);
-        if (!listed || who.role !== cc.staffRole) {
+        if (!listed || !who.money) {
             audit.record(ctx, {
                 actor: { subject: who.subject, username: who.username }, action: 'session.sign_in', outcome: 'refused',
-                reason: !who.subject ? 'token carries no subject' : who.role !== cc.staffRole ? `role ${who.role || 'none'} is not ${cc.staffRole}` : 'not listed in BILLING_STAFF_SUBJECTS',
+                reason: !who.subject ? 'token carries no subject' : !who.money ? `the token does not hold ${cc.staffCapability} (role ${who.role || 'none'})` : 'not listed in BILLING_STAFF_SUBJECTS',
                 requestId: requestId(req), ipHash: ipHash(req),
             });
             return send(res, 403, pages.message({ title: 'Not authorized', text: 'This console is only for OpenVibe.Network admins who are Billing staff. Your sign-in was recorded.' }));

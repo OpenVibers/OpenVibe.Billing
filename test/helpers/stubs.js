@@ -39,15 +39,15 @@ async function startNetwork() {
     // returns a user access token shaped like Network's issueTokenPair().
     const codes = new Map();
     const revoked = [];
-    function authorize({ subject_id, role = 'user', username = 'someone', challenge, redirect_uri, nowMs = Date.now() }) {
+    function authorize({ subject_id, role = 'user', is_owner = false, username = 'someone', challenge, redirect_uri, nowMs = Date.now() }) {
         const code = crypto.randomBytes(16).toString('hex');
-        codes.set(code, { subject_id, role, username, challenge, redirect_uri, nowMs });
+        codes.set(code, { subject_id, role, is_owner, username, challenge, redirect_uri, nowMs });
         return code;
     }
     function userToken(u) {
         const now = Math.floor(u.nowMs / 1000);
         return serviceAuth.signServiceToken({
-            sub: 42, id: 42, subject_id: u.subject_id, username: u.username, display_name: u.username, role: u.role,
+            sub: 42, id: 42, subject_id: u.subject_id, username: u.username, display_name: u.username, role: u.role, ...(u.is_owner ? { is_owner: true } : {}),
             iss: issuer, aud: ['openvibe.live', 'openvibe.tools', 'openvibe.games', 'openvibe.media', 'openvibe.network'], iat: now, exp: now + 86400,
         }, privatePem);
     }

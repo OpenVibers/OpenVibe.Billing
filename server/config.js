@@ -172,7 +172,8 @@ function loadConfig(env = process.env) {
             // Audience a Network user token must carry (Network user tokens are not minted for
             // openvibe.billing; the Network's own audience is always present).
             ssoAudience: env.BILLING_SSO_AUDIENCE || 'openvibe.network',
-            staffRole: 'admin',
+            // Staff also hold this capability of the contracts staff map (owner-only: money, ADR-012).
+            staffCapability: 'staff.money.cashouts',
         },
     };
 }
