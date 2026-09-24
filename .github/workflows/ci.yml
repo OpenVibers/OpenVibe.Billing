@@ -4,17 +4,11 @@ on:
     branches: [main]
   pull_request:
 jobs:
+  # install, node --check, npm test and openvibe-contracts-check: the shared test job (Track Q).
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.22.1   # production runs Node 22
-          cache: npm
-      - run: npm ci --no-audit --no-fund
-      - run: npm test
-      - run: npx openvibe-contracts-check --service billing
+    uses: OpenVibers/OpenVibe.Shared/.github/workflows/test.yml@f5e7e73b82b5f62360e2a16693ff638cae49082f
+    with:
+      contracts-service: billing
   # Secret scan (gitleaks) and dependency audit, shared by every OpenVibers repo (Track Q).
   security:
     uses: OpenVibers/OpenVibe.Shared/.github/workflows/security.yml@83c998b65424fb97e6f6de55ad9cc5981767e89c
