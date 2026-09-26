@@ -61,6 +61,9 @@ const NOTICES = {
 };
 
 function sanitizeNext(v) {
+    // Browsers drop tab and newline characters from a URL and read a backslash as "/": "/<TAB>/evil.com" would
+    // leave the site. A next with any control character or backslash goes home.
+    if (typeof v === 'string' && /[\u0000-\u001f\u007f\\]/.test(v)) return '/';
     const s = String(v || '');
     if (s.length > 300 || !/^\/(?![/\\])/.test(s) || s.startsWith('/auth/')) return '/';
     return s;
