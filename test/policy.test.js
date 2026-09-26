@@ -29,6 +29,7 @@ const { policyData } = require('../server/policy');
         for (const s of ['$1.50', '$1.10', '33.3%', '9.1%', '$4.99', '31 days', '70%', '$3.49', '500 Vibes ($5.00)', '14 days', 'Contact@OpenVibe.Network', 'openvibe.live keeps the ledger']) {
             assert.ok(html.includes(s), `the page says ${s}`);
         }
+        assert.ok(html.includes('href="https://openvibe.network/terms"'), 'the terms link is the Network terms page');
         r = await fetch(`${t.base}/policy.json`);
         assert.deepStrictEqual(await r.json(), JSON.parse(JSON.stringify(d)));
         r = await fetch(`${t.base}/robots.txt`);

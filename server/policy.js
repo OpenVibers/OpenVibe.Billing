@@ -11,7 +11,7 @@
  */
 const express = require('express');
 
-const TERMS_URL = 'https://openvibe.network/legal/terms';
+const TERMS_URL = 'https://openvibe.network/terms';
 const CONTACT = 'Contact@OpenVibe.Network';
 // The date the wording last changed. Rate changes show up on their own (the numbers are live).
 const WORDING_DATE = '2026-09-26';
