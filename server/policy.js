@@ -82,7 +82,7 @@ function renderPolicy(d, { baseUrl = 'https://billing.openvibe.network' } = {}) 
 main{max-width:760px;margin:0 auto;padding:32px 16px 64px}h1{font-size:1.9rem;line-height:1.2;margin:0 0 6px}h2{font-size:1.2rem;margin:34px 0 8px}
 p,li{color:var(--muted)}strong{color:var(--fg)}a{color:var(--accent)}.lead{font-size:1.05rem}.meta{font-size:.85rem}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:4px 16px;margin:12px 0}
-.scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:.95rem}th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+.scroll{overflow-x:auto}.scroll:focus-visible{outline:2px solid var(--accent,#2563eb);outline-offset:2px}table{width:100%;border-collapse:collapse;font-size:.95rem}th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 th{color:var(--fg);font-weight:600}tr:last-child td{border-bottom:0}td:not(:first-child),th:not(:first-child){text-align:right}
 dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:12px 0}dt{font-weight:600}dd{margin:0;color:var(--muted)}
 @media (max-width:520px){dl{grid-template-columns:1fr}dd{margin-bottom:8px}}
@@ -100,7 +100,7 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:12px 0
 
 <h2>Buying Vibes</h2>
 <p>Bigger purchases cost less per Vibe. A creator always receives the same value per Vibe; the difference between the price and that value is what OpenVibe keeps to run the platform and pay payment processing.</p>
-<div class="card scroll"><table><thead><tr><th scope="col">Vibes in one purchase</th><th scope="col">You pay per 100</th><th scope="col">Creator receives per 100</th><th scope="col">OpenVibe keeps</th></tr></thead><tbody>${tierRows}</tbody></table></div>
+<div class="card scroll" tabindex="0" role="region" aria-label="Vibes price tiers"><table><thead><tr><th scope="col">Vibes in one purchase</th><th scope="col">You pay per 100</th><th scope="col">Creator receives per 100</th><th scope="col">OpenVibe keeps</th></tr></thead><tbody>${tierRows}</tbody></table></div>
 <p>One purchase is ${num(p.min_vibes)} to ${num(p.max_vibes)} Vibes. The payment itself is handled by a payment processor under its own terms; OpenVibe never sees your card number.</p>
 
 <h2>Tips</h2>
