@@ -30,6 +30,9 @@ const { policyData } = require('../server/policy');
             assert.ok(html.includes(s), `the page says ${s}`);
         }
         assert.ok(html.includes('href="https://openvibe.network/terms"'), 'the terms link is the Network terms page');
+        // One canonical URL on the configured origin, and an icon in the page (no /favicon.ico request to 404).
+        assert.deepStrictEqual(html.match(/<link rel="canonical" href="[^"]*">/g), [`<link rel="canonical" href="${t.config.baseUrl}/policy">`]);
+        assert.match(html, /<link rel="icon" type="image\/svg\+xml" href="data:image\/svg\+xml,%3Csvg/);
         r = await fetch(`${t.base}/policy.json`);
         assert.deepStrictEqual(await r.json(), JSON.parse(JSON.stringify(d)));
         r = await fetch(`${t.base}/robots.txt`);

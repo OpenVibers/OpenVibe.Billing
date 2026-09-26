@@ -58,7 +58,12 @@ function policyData(rates, { authority = 'live' } = {}) {
     };
 }
 
-function renderPolicy(d) {
+// The network's app icon inline: without a <link rel=icon> the browser asks for /favicon.ico, which Billing's
+// API answers 404 (a console error on every visit, found by the browser check).
+const ICON_URI = 'data:image/svg+xml,' + encodeURIComponent(require('openvibe-shared/app-icon').favicon({ site: 'network' })).replace(/'/g, '%27');
+
+/** The /policy page; `baseUrl` (config.baseUrl) makes its canonical URL. */
+function renderPolicy(d, { baseUrl = 'https://billing.openvibe.network' } = {}) {
     const s = d.subscription, c = d.cashout, p = d.purchase;
     const tierRows = p.tiers.map((t) => `<tr><td>${num(t.from)}${t.to == null ? ' or more' : `–${num(t.to)}`}</td><td>${usd(t.price_per_100_cents)}</td><td>${usd(t.creator_value_per_100_cents)}</td><td>${pct(t.openvibe_keeps_pct)}</td></tr>`).join('');
     const ledger = d.authority === 'billing'
@@ -67,6 +72,8 @@ function renderPolicy(d) {
     return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Billing policy · OpenVibe</title>
 <meta name="description" content="What you pay, what creators receive, what OpenVibe keeps, and how cashouts, holds and refunds work.">
+<link rel="canonical" href="${esc(String(baseUrl).replace(/\/$/, ''))}/policy">
+<link rel="icon" type="image/svg+xml" href="${ICON_URI}">
 <link rel="alternate" type="application/json" href="/policy.json">
 <style>
 :root{color-scheme:light dark;--bg:#f6f7fb;--fg:#141824;--muted:#555d70;--card:#fff;--line:#dde1ea;--accent:#3d63dd}
@@ -128,7 +135,7 @@ function policyRouter({ config }) {
     const data = () => policyData(config.rates, { authority: config.authority });
     r.get('/policy', (req, res) => {
         res.setHeader('Cache-Control', 'public, max-age=300');
-        res.type('html').send(renderPolicy(data()));
+        res.type('html').send(renderPolicy(data(), { baseUrl: config.baseUrl }));
     });
     r.get('/policy.json', (req, res) => {
         res.setHeader('Cache-Control', 'public, max-age=300');
