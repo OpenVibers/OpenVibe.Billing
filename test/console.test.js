@@ -151,7 +151,7 @@ const DAY = 86_400_000;
         assert.strictEqual(anon.status, 401);
         assert.ok(anon.text.includes('/auth/login?next=%2Fcashouts'));
         assert.strictEqual((await get('/', null)).status, 200, 'the root shows the sign-in page');
-        assert.strictEqual((await get('/robots.txt')).text, 'User-agent: *\nDisallow: /\n');
+        assert.strictEqual((await get('/robots.txt')).text, 'User-agent: *\nAllow: /policy\nDisallow: /\n', 'the console stays out of search; only the public policy is allowed');
     });
 
     await check('the staff session is not an API credential: /api/v1 still needs a service token', async () => {
