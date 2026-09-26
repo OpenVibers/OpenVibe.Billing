@@ -81,7 +81,9 @@ function createApp(opts = {}) {
     app.use('/webhooks', webhooksRouter({ ctx, adapters }));
     app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters }));
 
-    app.get('/robots.txt', (req, res) => res.type('text/plain').send('User-agent: *\nDisallow: /\n'));
+    // The billing policy is public and indexable; the staff console and the API are not.
+    app.get('/robots.txt', (req, res) => res.type('text/plain').send('User-agent: *\nAllow: /policy\nDisallow: /\n'));
+    app.use(require('./policy').policyRouter({ config }));
     app.use(consoleRouter({ ctx, adapters, keys, fetchImpl }));
     app.use((req, res) => http.sendProblem(res, 404, 'not_found', { ctx: req.ov }));
     // Malformed JSON and other body-parser errors.
