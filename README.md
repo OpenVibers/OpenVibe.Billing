@@ -47,7 +47,7 @@ webhooks land here and nowhere else.
 - OpenVibe.Network (JWKS for service tokens; SSO with PKCE for the staff console; `identity.subject.resolve` for the Live import)
 - OpenVibe.Events (the outbox relay, only when `EVENTS_URL` is set)
 - the payment providers whose secrets are configured (none in production today)
-- `openvibe-contracts` v0.49.0, `openvibe-sdk` v0.12.0 (service tokens, per-person limits), `openvibe-shared` v1.22.0, pinned by release tarball
+- `openvibe-contracts` v0.49.0, `openvibe-sdk` v0.12.0 (service tokens, per-person limits), `openvibe-shared` v1.25.0, pinned by release tarball
 
 ## Capabilities
 
