@@ -27,6 +27,40 @@ webhooks land here and nowhere else.
 | EXTERNAL (tips on a streamer's own PowerChat) | stored receipt (`external_receipts`), no journal entry; announced as `billing.receipt.external` once Billing is the authority; a direct-route subscription grants its entitlement only |
 | LOYALTY, COSMETIC, GAME-STATE, LEGACY | not here (rule 5–8) |
 
+## Owns
+
+- the journal (`accounts`, `transactions`, `ledger_entries`, `account_balances`), provider receipts
+  (`provider_events`, `external_receipts`), intents, subscriptions and entitlements, cashouts, the
+  freeze, reconciliation runs, import runs and the staff audit log, in Billing's own SQLite
+- provider webhooks (PowerChat, Stripe, PayPal, CCBill, NOWPayments): they land here and nowhere else
+- the `billing.*` events and the public billing policy page (`/policy`, every number from the rates)
+
+## Does not own
+
+- loyalty points, cosmetics, game state (ADR-012 rules 5–8): OpenCoins stay in Network, channel points
+  in Live
+- product UIs: tips (OpenVibe.Tips), memberships and perks (OpenVibe.VIP), checkout pages (each product)
+- identity (OpenVibe.Network)
+
+## Depends on
+
+- OpenVibe.Network (JWKS for service tokens; SSO with PKCE for the staff console; `identity.subject.resolve` for the Live import)
+- OpenVibe.Events (the outbox relay, only when `EVENTS_URL` is set)
+- the payment providers whose secrets are configured (none in production today)
+- `openvibe-contracts` v0.49.0, `openvibe-sdk` v0.12.0 (service tokens, per-person limits), `openvibe-shared` v1.22.0, pinned by release tarball
+
+## Capabilities
+
+Implemented here (the service manifest's `capabilities`, audience `openvibe.billing`; routes under
+[API](#api)): `billing.intent.create`, `billing.transfer.create`, `billing.balance.read`,
+`billing.cashout.request`, `billing.cashout.manage`, `billing.subscription.manage`,
+`billing.entitlement.check` and `billing.ledger.admin`. Callers today are Live (after the cutover),
+Tips (`billing.intent.create`, `billing.transfer.create`) and VIP (`billing.intent.create`,
+`billing.subscription.manage`, `billing.entitlement.check`).
+
+Called elsewhere, as the service principal `billing`: `events.event.publish` (Events) and
+`identity.subject.resolve` (Network, the Live import).
+
 ## Run it
 
 ```bash
@@ -251,6 +285,52 @@ Reversing a subscription payment revokes the periods it granted.
 - **Mapping of Live's tables** to Billing's (including payouts, refunds and plans, which have no table
   of their own on Live): [docs/live-mapping.md](docs/live-mapping.md).
 
+## Acceptance
+
+`npm test` runs every `test/*.test.js` against stub Network, Events and providers, temp databases and
+random ports. What they prove: the journal balances per currency and refuses edits
+(`ledger.test.js`); a receipt settles once whatever retries carry it, and reversals claw back only what
+can be (`webhooks.test.js`, `providers.test.js`, `stripe.test.js`); subscriptions and entitlements
+(`subscriptions.test.js`); EXTERNAL receipts are announced once and only under `billing`
+(`external.test.js`); the import reconciles (`import.test.js`); freeze, reconciliation and review
+(`operations.test.js`); the cutover sequence (`cutover.test.js`); the staff console and its staff map
+(`console.test.js`, `staff-map.test.js`); the public policy (`policy.test.js`); the vhost keeps `/api/v1`
+off the public host (`nginx-vhost.test.js`, `security.test.js`); per-person limits
+(`actor-limits.test.js`); service auth and the outbox (`auth-outbox.test.js`).
+
+## Security
+
+Reporting a vulnerability: [SECURITY.md](SECURITY.md). The rules the code keeps:
+
+- **Auth.** `/api/v1` answers only on loopback (nginx denies it publicly) and needs a Network service
+  token for audience `openvibe.billing` with the route's capability; every POST needs an
+  `Idempotency-Key`. The staff console is Network SSO with PKCE, limited to `BILLING_STAFF_SUBJECTS`,
+  and every staff action is audited (`billing.staff.action`).
+- **Money integrity.** The journal is append-only (triggers refuse UPDATE/DELETE), every transaction
+  sums to zero per currency, funds checks run inside the transaction that moves money, and a receipt is
+  stored before it is processed. The freeze stops every mutation; hourly reconciliation checks the
+  ledger against the receipts.
+- **Webhooks.** Each provider's signature is verified before anything is read; a disabled provider
+  answers 404. A buyer-editable reference on a tip to a creator's own account moves no money
+  (`test/security.test.js`).
+- **Secrets.** Provider secrets (`POWERCHAT_WEBHOOK_SECRET`, `STRIPE_*`, `PAYPAL_*`, `CCBILL_*`,
+  `NOWPAYMENTS_*`), `OV_OAUTH_CLIENT_SECRET` and `BILLING_SESSION_SECRET` live in
+  `/etc/openvibe/billing.env` (0600), by name only. `/metrics` answers direct loopback callers only.
+- **Egress.** Billing calls Network, Events and the enabled providers' APIs only.
+
+## Deploy
+
+Production deploys with `sudo ovhost deploy billing` on the host (strategy `git-checkout`: fetch,
+fast-forward `/opt/openvibe.billing`, install on a lockfile change, restart, wait for `/api/ready`).
+The unit is `openvibe-billing.service` on `127.0.0.1:4600`, the env file `/etc/openvibe/billing.env`. State lives in
+`/var/lib/openvibe-billing`; nginx serves `billing.openvibe.network` from
+[deploy/nginx/billing.openvibe.network.conf](deploy/nginx/billing.openvibe.network.conf) (console, `/policy`,
+`/webhooks/*`, `/api/health`). Freeze the economy before any risky change (below).
+Rollback: ovhost puts the previous sha back by itself when `/api/ready` does not answer 2xx after the
+restart; afterwards `sudo ovhost rollback billing --to <sha>`. Nothing blocks a rollback: the schema
+code only adds tables and columns.
+`BILLING_LIMITS=off` turns the per-person limits off without a deploy.
+
 ## Cutover runbook (Live → Billing)
 
 The exact production sequence, rollback, grants and the Live behaviour the switch cannot preserve are in
@@ -280,7 +360,7 @@ Billing did itself.
 is not a public product and is not the money authority until the cutover above and everything in plan
 §12.12 holds: owning runtime with health/readiness and `/metrics` ✔; canonical identity and
 scoped service principals ✔ (principal `billing`); server-rendered public routes useful without
-JavaScript (not yet — the only pages are the staff-only console); real persistence and end-to-end
+JavaScript (partly — the public billing policy at `/policy`; the other pages are the staff-only console); real persistence and end-to-end
 workflows ✔ in tests, shadow only in production; capability/event registration against
 OpenVibe.Contracts ✔ (v0.8.0); migration strategy ✔ (shadow import reconciles; restore drill passed
 2026-09-23) with a security review, sitemap/robots still to do; acceptance tests ✔. A shadow deployment
