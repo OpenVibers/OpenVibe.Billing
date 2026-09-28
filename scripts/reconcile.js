@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * Run a reconciliation against BILLING_DB_PATH, store it in reconciliation_runs and print it.
+ * Run a reconciliation of the ledger (DATABASE_URL), store it in reconciliation_runs and print it.
  *   node scripts/reconcile.js [--json]      exit 1 when any check fails
  */
 (async () => {
