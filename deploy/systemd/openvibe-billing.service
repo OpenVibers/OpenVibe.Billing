@@ -1,9 +1,10 @@
 [Unit]
 Description=OpenVibe.Billing — the isolated money ledger (journal, provider receipts, subscriptions, payouts)
 # Network signs the service tokens Billing verifies (its key is fetched at boot and retried);
-# Events receives the outbox when EVENTS_URL is set. Billing starts without either.
-After=network.target
-Wants=openvibe-network.service
+# Events receives the outbox when EVENTS_URL is set. Billing starts without either. The ledger is ov_billing on the
+# host's data role (ADR-035): PostgreSQL through PgBouncer, and Valkey for the per-person limit counters.
+After=network.target postgresql.service pgbouncer.service valkey-server.service
+Wants=openvibe-network.service postgresql.service pgbouncer.service valkey-server.service
 
 [Service]
 Type=simple
@@ -18,8 +19,8 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/env node /opt/openvibe.billing/server/index.js
 Restart=always
 RestartSec=5
-# The ledger database lives in /var/lib/openvibe-billing (ADR-007: one database per service);
-# the code tree stays read-only.
+# /var/lib/openvibe-billing keeps the SQLite ledger the service moved from (read-only after the switch: the rollback
+# for 7 days; scripts/migrate-to-postgres.js reads it); the code tree stays read-only.
 StateDirectory=openvibe-billing
 StateDirectoryMode=0700
 Environment=BILLING_DB_PATH=/var/lib/openvibe-billing/billing.db

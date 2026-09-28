@@ -14,30 +14,30 @@
  *
  * Partial reversals are supported; the cumulative reversed amount never exceeds what was paid.
  */
-const { post, getTxn, balance } = require('../ledger');
+const { post, getTxn, balance, money } = require('../ledger');
 const { enqueue } = require('../outbox');
 const { A, entry, fail } = require('./common');
 const { summary } = require('./purchases');
 const intents = require('./intents');
 
-function reversedCents(db, txnId) {
-    return db.prepare(`SELECT COALESCE(SUM(json_extract(metadata, '$.cents')), 0) AS n FROM transactions WHERE reverses_txn = ? AND type IN ('refund', 'chargeback')`).get(txnId).n;
+async function reversedCents(db, txnId) {
+    return (await db.prepare(`SELECT COALESCE(SUM(json_extract(metadata, '$.cents')::bigint), 0)::bigint AS n FROM transactions WHERE reverses_txn = ? AND type IN ('refund', 'chargeback')`).get(txnId)).n;
 }
 
 /**
  * input: { kind: 'refund'|'chargeback', provider, originalReceiptRef, reversalRef, cents?, cumulativeCents?,
  *          idempotencyKey, sourceEventId, actor, reason }
  */
-function reverseReceipt(ctx, input) {
+async function reverseReceipt(ctx, input) {
     const { db, rates } = ctx;
-    return db.transaction(() => {
-        const existing = db.prepare('SELECT id FROM transactions WHERE idempotency_key = ? OR (receipt_ref IS NOT NULL AND receipt_ref = ?)').get(input.idempotencyKey, input.reversalRef || null);
-        if (existing) return { txn: getTxn(db, existing.id), replay: true };
-        const origRow = db.prepare('SELECT id FROM transactions WHERE receipt_ref = ?').get(input.originalReceiptRef);
+    return await money(db, async () => {
+        const existing = await db.prepare('SELECT id FROM transactions WHERE idempotency_key = ? OR (receipt_ref IS NOT NULL AND receipt_ref = ?)').get(input.idempotencyKey, input.reversalRef || null);
+        if (existing) return { txn: await getTxn(db, existing.id), replay: true };
+        const origRow = await db.prepare('SELECT id FROM transactions WHERE receipt_ref = ?').get(input.originalReceiptRef);
         if (!origRow) fail(404, 'billing.original_not_found', `no settled receipt ${input.originalReceiptRef}`);
-        const orig = getTxn(db, origRow.id);
+        const orig = await getTxn(db, origRow.id);
         const paid = Number(orig.metadata.paid_cents) || 0;
-        const done = reversedCents(db, orig.id);
+        const done = await reversedCents(db, orig.id);
         const remaining = paid - done;
         let cents = input.cumulativeCents != null ? Number(input.cumulativeCents) - done : (input.cents != null ? Number(input.cents) : remaining);
         cents = Math.min(Math.round(cents), remaining);
@@ -54,7 +54,7 @@ function reverseReceipt(ctx, input) {
             const B = Number(orig.metadata.bits) || 0;
             const b = Math.round((B * (done + cents)) / paid) - Math.round((B * done) / paid);
             const owner = orig.to_subject;
-            const clawed = Math.max(0, Math.min(balance(db, A.credit(owner)), b));
+            const clawed = Math.max(0, Math.min(await balance(db, A.credit(owner)), b));
             const unrecovered = b - clawed;
             const nonFx = cents - rates.valueCents(clawed);
             entries.push(entry(A.credit(owner), -clawed), entry(A.fxBits(), clawed), entry(A.fxCents(), -rates.valueCents(clawed)), entry(A.clearing(orig.provider), cents));
@@ -79,7 +79,7 @@ function reverseReceipt(ctx, input) {
         }
         if (review) meta.review = 'required';
 
-        const { txn } = post(ctx, {
+        const { txn } = await post(ctx, {
             type: kind,
             idempotencyKey: input.idempotencyKey,
             reversesTxn: orig.id,
@@ -93,14 +93,14 @@ function reverseReceipt(ctx, input) {
             sourceEventId: input.sourceEventId,
             metadata: { ...meta, rates: rates.snapshot() },
         });
-        if (orig.type === 'subscription') revoked = require('./subscriptions').revokeForTxn(ctx, orig.id, kind);
-        if (done + cents >= paid && orig.metadata.intent_id) intents.setStatus(ctx, orig.metadata.intent_id, 'refunded');
-        enqueue(ctx, {
+        if (orig.type === 'subscription') revoked = await require('./subscriptions').revokeForTxn(ctx, orig.id, kind);
+        if (done + cents >= paid && orig.metadata.intent_id) await intents.setStatus(ctx, orig.metadata.intent_id, 'refunded');
+        await enqueue(ctx, {
             event_type: 'billing.transaction.reversed', subject: { type: 'transaction', id: txn.id },
             payload: { ...summary(txn), reverses_txn: orig.id, review: review ? 'required' : null, entitlements_revoked: revoked },
         });
         return { txn, replay: false, review };
-    })();
+    });
 }
 
 module.exports = { reverseReceipt, reversedCents };

@@ -73,11 +73,11 @@ function text(v, field, max = 300) {
     return s || null;
 }
 
-function isFrozen(db) {
-    return !!db.prepare('SELECT freeze FROM settings WHERE id = 1').get().freeze;
+async function isFrozen(db) {
+    return !!(await db.prepare('SELECT "freeze" FROM settings WHERE id = 1').get()).freeze;
 }
-function assertNotFrozen(ctx) {
-    if (isFrozen(ctx.db)) fail(503, 'billing.frozen', 'the economy is frozen: writes are refused, reads are served');
+async function assertNotFrozen(ctx) {
+    if (await isFrozen(ctx.db)) fail(503, 'billing.frozen', 'the economy is frozen: writes are refused, reads are served');
 }
 
 /** Movement summary for a subject from a transaction's entries (used in API responses). */

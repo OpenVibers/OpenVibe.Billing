@@ -33,9 +33,9 @@ const { createMetrics } = require('./metrics');
 
 const VERSION = require('../package.json').version;
 
-function createApp(opts = {}) {
+async function createApp(opts = {}) {
     const config = opts.config || loadConfig();
-    const db = opts.db || openDb(config.dbPath);
+    const db = opts.db || await openDb(config, { log: opts.log || console });
     const fetchImpl = opts.fetchImpl || globalThis.fetch;
     const log = opts.log || console;
     const keys = opts.keys || createKeyProvider(config, { fetchImpl, log });
@@ -63,26 +63,32 @@ function createApp(opts = {}) {
     require('openvibe-shared/trace').install(app);
     app.use((req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
 
-    app.get('/api/health', (req, res) => res.json({
-        ok: true, service: 'billing', version: VERSION, frozen: isFrozen(db), authority: config.authority,
+    app.get('/api/health', async (req, res) => res.json({
+        ok: true, service: 'billing', version: VERSION, frozen: await isFrozen(db), authority: config.authority,
         providers: Object.fromEntries(Object.values(adapters).map((a) => [a.name, a.enabled])),
         events_relay: !!config.events.url,
     }));
     // Readiness in the openvibe-shared/ready shape (status, named checks, release): 503 when the ledger
     // database or the Network key fails; the money freeze and the authority show without failing it.
+    // Valkey (ADR-035): the per-person limit counters, kept across restarts; opts.valkey for tests (null: none, counted
+    // in the process).
+    const valkey = opts.valkey !== undefined ? opts.valkey
+        : (config.valkey.url ? require('openvibe-sdk/valkey').createValkey({ url: config.valkey.url, prefix: config.valkey.prefix }) : null);
+    app.locals.valkey = valkey;
     const readiness = require('openvibe-shared/ready').createReadiness({
         service: 'billing', release: release.release,
         checks: [
-            { name: 'db', required: true, check: () => db.prepare('SELECT 1 AS ok FROM settings WHERE id = 1').get().ok === 1 || 'settings row missing' },
+            { name: 'db', required: true, check: async () => (await db.prepare('SELECT 1 AS ok FROM settings WHERE id = 1').get()).ok === 1 || 'settings row missing' },
             { name: 'network_jwks', required: true, check: () => Boolean(keys.get()) || 'Network public key not loaded' },
-            { name: 'money_writes', required: false, check: () => (isFrozen(db) ? 'frozen' : true) },
+            { name: 'money_writes', required: false, check: async () => (await isFrozen(db) ? 'frozen' : true) },
+            { name: 'valkey', required: false, check: async () => (valkey ? await valkey.ready() : { skipped: 'VALKEY_URL not set: per-person limits count in this process only' }) },
         ],
     });
     app.get('/api/ready', readiness.handler);
 
     app.use('/webhooks', webhooksRouter({ ctx, adapters }));
     // Per-person limits on the money-creating routes (api/actor-limits.js); the webhooks above never are.
-    const limits = createActorLimits({ config, db, now: opts.limitsNow || (() => Date.now()), registry: metrics.registry, log });
+    const limits = createActorLimits({ config, db, now: opts.limitsNow || (() => Date.now()), registry: metrics.registry, log, valkey });
     app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters, limits }));
 
     // The billing policy is public and indexable; the staff console and the API are not.

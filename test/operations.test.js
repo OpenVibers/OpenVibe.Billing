@@ -37,7 +37,7 @@ const { boot, fund, check, done } = require('./helpers/app');
         assert.strictEqual(r.json.transaction.metadata.revenue_cents, 300);
         assert.strictEqual(r.json.transaction.metadata.rates.bits_per_usd, 100);
         assert.strictEqual((await t.balances(viewer.id)).credit, 1000);
-        t.assertReconciled('after purchase');
+        await t.assertReconciled('after purchase');
     });
 
     await check('the same provider payment settles once, whatever key carries it', async () => {
@@ -59,7 +59,7 @@ const { boot, fund, check, done } = require('./helpers/app');
         assert.deepStrictEqual(donation.metadata.target, { service: 'live', type: 'stream', id: '77' });
         assert.strictEqual(r.json.balance.credit, 600);
         assert.strictEqual((await t.balances(streamer.id)).payable, 400);
-        t.assertReconciled('after transfer');
+        await t.assertReconciled('after transfer');
     });
 
     await check('replaying an Idempotency-Key returns the original response and moves nothing', async () => {
@@ -115,7 +115,7 @@ const { boot, fund, check, done } = require('./helpers/app');
         assert.strictEqual(over.json.code, 'billing.already_reversed');
         const tx = await t.call('GET', `/api/v1/transactions/${donation.id}`);
         assert.deepStrictEqual(tx.json.reversed_by, [r.json.transaction.id]);
-        t.assertReconciled('after transfer refund');
+        await t.assertReconciled('after transfer refund');
     });
 
     await check('recycle moves payable back to spendable credit as a journal entry', async () => {
@@ -123,7 +123,7 @@ const { boot, fund, check, done } = require('./helpers/app');
         assert.strictEqual(r.status, 201, r.text);
         assert.strictEqual(r.json.transaction.type, 'recycle');
         assert.deepStrictEqual([r.json.balance.credit, r.json.balance.payable], [50, 250]);
-        t.assertReconciled('after recycle');
+        await t.assertReconciled('after recycle');
     });
 
     let cashout;
@@ -140,9 +140,9 @@ const { boot, fund, check, done } = require('./helpers/app');
         assert.strictEqual(cashout.value_cents, 1000);
         const b = await t.balances(streamer.id);
         assert.deepStrictEqual([b.payable, b.pending_payouts], [250, 1000]);
-        t.assertReconciled('after cashout request');
+        await t.assertReconciled('after cashout request');
         // The event stream gets the payout TYPE only, never the creator's address (a PayPal email).
-        const outboxText = JSON.stringify(t.db.prepare("SELECT event FROM outbox WHERE event LIKE '%billing.cashout.%'").all());
+        const outboxText = JSON.stringify(await t.db.prepare("SELECT event FROM outbox WHERE event ILIKE '%billing.cashout.%'").all());
         assert.ok(outboxText.includes('billing.cashout.requested'), 'the requested event is queued');
         assert.ok(!outboxText.includes('s@example.com'), 'no payout address in any cashout event');
         assert.strictEqual(cashout.payout_method.address, 's@example.com', 'the API itself still returns it to the caller');
@@ -163,7 +163,7 @@ const { boot, fund, check, done } = require('./helpers/app');
         assert.strictEqual(ok.json.cashout.status, 'paid');
         assert.strictEqual(ok.json.cashout.payout_reference, 'PAYPAL-BATCH-1');
         assert.strictEqual((await t.balances(streamer.id)).pending_payouts, 0);
-        const r = t.assertReconciled('after payout');
+        const r = await t.assertReconciled('after payout');
         assert.strictEqual(r.checks.find((c) => c.id === 'payouts.references').ok, true);
     });
 
@@ -181,7 +181,7 @@ const { boot, fund, check, done } = require('./helpers/app');
         assert.strictEqual(tx.json.transaction.reverses_txn, r.json.cashout.request_txn);
         const list = await t.call('GET', '/api/v1/cashouts?status=denied', { cap: ['billing.cashout.manage'] });
         assert.strictEqual(list.json.cashouts.length, 1);
-        t.assertReconciled('after deny');
+        await t.assertReconciled('after deny');
     });
 
     await check('an operator adjustment is a balanced transaction with a reason', async () => {
@@ -193,7 +193,7 @@ const { boot, fund, check, done } = require('./helpers/app');
         assert.strictEqual(r.status, 201, r.text);
         assert.strictEqual(r.json.transaction.type, 'adjustment');
         assert.strictEqual(r.json.transaction.metadata.reason, 'goodwill after outage');
-        t.assertReconciled('after adjustment');
+        await t.assertReconciled('after adjustment');
         const denied = await t.call('POST', '/api/v1/admin/adjustments', { cap: ['billing.transfer.create'], body: {} });
         assert.strictEqual(denied.status, 403);
     });

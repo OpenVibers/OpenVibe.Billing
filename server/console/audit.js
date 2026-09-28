@@ -2,9 +2,9 @@
 
 /**
  * staff_audit: one append-only row per staff action (and per refused one). A done action is also
- * announced as `billing.staff.action` (visibility internal) through the outbox, in the same SQLite
+ * announced as `billing.staff.action` (visibility internal) through the outbox, in the same
  * transaction as the row — and, for money actions, as the effect itself (callers wrap the ops call
- * and record() in one db.transaction).
+ * and record() in one money() transaction).
  *
  * The row holds no secrets: actor subject, action, target, reason, a small whitelisted detail
  * (codes, payout reference, counts), the request id and a keyed hash of the client address.
@@ -12,7 +12,7 @@
 const { iso, prefixedId } = require('../ledger');
 const { enqueue } = require('../outbox');
 
-function record(ctx, { actor, action, target, reason, outcome = 'done', detail, requestId, ipHash, traceId }) {
+async function record(ctx, { actor, action, target, reason, outcome = 'done', detail, requestId, ipHash, traceId }) {
     const ms = ctx.now();
     const id = prefixedId('sa', ms);
     const row = {
@@ -21,10 +21,10 @@ function record(ctx, { actor, action, target, reason, outcome = 'done', detail, 
         reason: reason ? String(reason).slice(0, 500) : null, outcome, detail: JSON.stringify(detail || {}),
         request_id: requestId || null, ip_hash: ipHash || null,
     };
-    ctx.db.prepare(`INSERT INTO staff_audit (id, at, actor_subject, actor_username, action, target_type, target_id, reason, outcome, detail, request_id, ip_hash)
+    await ctx.db.prepare(`INSERT INTO staff_audit (id, at, actor_subject, actor_username, action, target_type, target_id, reason, outcome, detail, request_id, ip_hash)
         VALUES (@id, @at, @actor_subject, @actor_username, @action, @target_type, @target_id, @reason, @outcome, @detail, @request_id, @ip_hash)`).run(row);
     if (outcome === 'done' && row.actor_subject) {
-        enqueue(ctx, {
+        await enqueue(ctx, {
             event_type: 'billing.staff.action',
             subject: { type: 'staff_action', id },
             actor: { type: 'user', id: row.actor_subject },
@@ -39,8 +39,8 @@ function record(ctx, { actor, action, target, reason, outcome = 'done', detail, 
     return row;
 }
 
-function list(db, { limit = 200 } = {}) {
-    return db.prepare('SELECT * FROM staff_audit ORDER BY seq DESC LIMIT ?').all(Math.min(500, limit))
+async function list(db, { limit = 200 } = {}) {
+    return (await db.prepare('SELECT * FROM staff_audit ORDER BY seq DESC LIMIT ?').all(Math.min(500, limit)))
         .map((r) => ({ ...r, detail: JSON.parse(r.detail || '{}') }));
 }
 

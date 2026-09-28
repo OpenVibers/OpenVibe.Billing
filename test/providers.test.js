@@ -64,14 +64,14 @@ async function startProviderStub() {
         assert.strictEqual(noPrice.json.result.review, true);
         const ok = await post('secret=cc-secret&eventType=NewSaleSuccess', { transactionId: 'T1', 'X-intent': i.id, billedInitialPrice: '13.00' });
         assert.strictEqual(ok.json.result.effect, 'settled', JSON.stringify(ok.json));
-        assert.strictEqual(t.db.prepare("SELECT payload FROM provider_events WHERE provider = 'ccbill' AND provider_event_id = 'NewSaleSuccess:T1'").get().payload.includes('cc-secret'), false, 'the secret is never stored');
+        assert.strictEqual((await t.db.prepare("SELECT payload FROM provider_events WHERE provider = 'ccbill' AND provider_event_id = 'NewSaleSuccess:T1'").get()).payload.includes('cc-secret'), false, 'the secret is never stored');
         const again = await post('secret=cc-secret&eventType=NewSaleSuccess', { transactionId: 'T1', 'X-intent': i.id, billedInitialPrice: '13.00' });
         assert.strictEqual(again.json.duplicate, true);
         assert.strictEqual((await t.balances(buyer.id)).credit, 1000);
         const cb = await post('secret=cc-secret&eventType=Chargeback', { transactionId: 'T1', amount: '13.00' });
         assert.strictEqual(cb.json.result.effect, 'settled', JSON.stringify(cb.json));
         assert.strictEqual((await t.balances(buyer.id)).credit, 0);
-        t.assertReconciled('after ccbill');
+        await t.assertReconciled('after ccbill');
     });
 
     await check('NOWPayments: HMAC-SHA512 IPN, several statuses settle one payment once, refunded reverses', async () => {
@@ -92,7 +92,7 @@ async function startProviderStub() {
         const r = await ipn({ ...body, payment_status: 'refunded' });
         assert.strictEqual(r.json.result.effect, 'settled');
         assert.strictEqual((await t.balances(buyer.id)).credit, 0);
-        t.assertReconciled('after nowpayments');
+        await t.assertReconciled('after nowpayments');
     });
 
     await check('PayPal: verified webhooks, capture after return settles once, reversal is a chargeback', async () => {
@@ -115,7 +115,7 @@ async function startProviderStub() {
         const tx = (await t.call('GET', `/api/v1/transactions/${rev.json.result.txn_id}`)).json.transaction;
         assert.strictEqual(tx.type, 'chargeback');
         assert.strictEqual((await t.balances(buyer.id)).credit, 0);
-        t.assertReconciled('after paypal');
+        await t.assertReconciled('after paypal');
     });
 
     await t.close();

@@ -34,7 +34,7 @@ async function main() {
     const config = loadConfig();
     if (path.resolve(livePath) === path.resolve(config.dbPath)) throw new Error('--live-db points at the Billing database');
     const live = new Database(livePath, { readonly: true, fileMustExist: true });
-    const db = openDb(config.dbPath);
+    const db = await openDb(config);
     const ctx = { db, config, rates: createRates(config.rates), now: () => Date.now(), log: console };
     const identity = createIdentity(config);
     if (flag('accounts-only')) {
@@ -50,7 +50,7 @@ async function main() {
         return;
     }
     const report = await importLive(ctx, { live, resolveLiveUsers: identity.resolveLiveUsers, dryRun: flag('dry-run') });
-    const rec = flag('dry-run') ? null : reconcile(ctx, { trigger: 'import' });
+    const rec = flag('dry-run') ? null : await reconcile(ctx, { trigger: 'import' });
     if (flag('json')) console.log(JSON.stringify({ import: report, reconciliation: rec }, null, 2));
     else {
         console.log(`import ${report.run_id}${report.dry_run ? ' (DRY RUN — nothing kept)' : ''}`);

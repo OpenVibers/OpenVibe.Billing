@@ -31,7 +31,8 @@ webhooks land here and nowhere else.
 
 - the journal (`accounts`, `transactions`, `ledger_entries`, `account_balances`), provider receipts
   (`provider_events`, `external_receipts`), intents, subscriptions and entitlements, cashouts, the
-  freeze, reconciliation runs, import runs and the staff audit log, in Billing's own SQLite
+  freeze, reconciliation runs, import runs and the staff audit log, in Billing's own PostgreSQL database
+  (`ov_billing` on the host's data role, ADR-035; schema in [migrations/](migrations/))
 - provider webhooks (PowerChat, Stripe, PayPal, CCBill, NOWPayments): they land here and nowhere else
 - the `billing.*` events and the public billing policy page (`/policy`, every number from the rates)
 
@@ -47,7 +48,9 @@ webhooks land here and nowhere else.
 - OpenVibe.Network (JWKS for service tokens; SSO with PKCE for the staff console; `identity.subject.resolve` for the Live import)
 - OpenVibe.Events (the outbox relay, only when `EVENTS_URL` is set)
 - the payment providers whose secrets are configured (none in production today)
-- `openvibe-contracts` v0.49.0, `openvibe-sdk` v0.12.0 (service tokens, per-person limits), `openvibe-shared` v1.25.0, pinned by release tarball
+- `openvibe-contracts` v0.76.0, `openvibe-sdk` v0.21.2 (service tokens, per-person limits, `openvibe-sdk/db`), `openvibe-shared` v1.28.0, pinned by release tarball
+- **PostgreSQL 18 and Valkey 9** (OpenVibe.Host `roles/data/`, ADR-035): every read and write is async through
+  `openvibe-sdk/db`; Valkey holds the per-person limit counters (optional: without `VALKEY_URL` they count in the process)
 
 ## Capabilities
 
@@ -85,8 +88,9 @@ Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
   `ledger_entries(txn_id, account_id, amount)` with signed integer minor units. Every transaction sums
   to zero **per currency** (`vibes-bits`, `usd-cents`); triggers refuse UPDATE/DELETE on entries and
   transactions; corrections are reversing transactions. `account_balances` is a cache updated in the
-  same SQLite transaction and verified by reconciliation. Funds checks run inside the transaction
-  that moves the money.
+  same transaction and verified by reconciliation. Funds checks run inside the transaction that moves
+  the money, and every money transaction is SERIALIZABLE (`ledger.js` `money()`, retried on a
+  serialization failure), so two movements that each passed a check cannot both commit.
 - **Two currencies.** Money arrives in cents and becomes bits through the `fx_conversion` account pair
   at the recorded value rate (`bits_per_usd`, 100 today); reconciliation checks that each transaction's
   cents side mirrors its bits side. Anything a payment exceeds the bits' value by is `platform_revenue`.
@@ -94,7 +98,7 @@ Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
   70 % streamer share, 10 % site-route fee, minimum cashout, escrow days. Each transaction records the
   rates it used.
 - **Receipts**: webhooks are verified, stored in `provider_events` (UNIQUE provider + event id) before
-  anything else, then processed with the effect and the "processed" mark in one SQLite transaction.
+  anything else, then processed with the effect and the "processed" mark in one transaction, with the receipt's row locked.
   Every settling transaction has a unique `receipt_ref` (`<provider>:<payment id>`), so a payment
   settles once whatever event, retry or API call carries it.
 - **Freeze** (ADR-012 rule 11): `settings.freeze`; while on, every mutating endpoint answers
@@ -236,7 +240,7 @@ reprocess — and every refused attempt (non-staff sign-in, CSRF failure, a refu
 in the append-only `staff_audit` table (actor subject and username, action, target, reason, outcome,
 a small detail such as the payout reference or refusal code, request id, and an HMAC of the client IP
 keyed by `BILLING_SESSION_SECRET`). Done actions are also written to the outbox as
-`billing.staff.action` (visibility `internal`, actor = the staff subject), in the same SQLite
+`billing.staff.action` (visibility `internal`, actor = the staff subject), in the same
 transaction as their effect. Adjustments are not in the console; they stay on the API
 (`POST /api/v1/admin/adjustments`).
 
@@ -322,13 +326,16 @@ Reporting a vulnerability: [SECURITY.md](SECURITY.md). The rules the code keeps:
 
 Production deploys with `sudo ovhost deploy billing` on the host (strategy `git-checkout`: fetch,
 fast-forward `/opt/openvibe.billing`, install on a lockfile change, restart, wait for `/api/ready`).
-The unit is `openvibe-billing.service` on `127.0.0.1:4600`, the env file `/etc/openvibe/billing.env`. State lives in
-`/var/lib/openvibe-billing`; nginx serves `billing.openvibe.network` from
+The unit is `openvibe-billing.service` on `127.0.0.1:4600`, the env file `/etc/openvibe/billing.env`. The ledger is
+`ov_billing` on the host's data role (`sudo /opt/openvibe.host/roles/data/add-service.sh billing` writes its settings);
+the release migrates it at boot. The one-time move from SQLite is `scripts/migrate-to-postgres.js` (openvibe-sdk
+`runSqliteMigration`, with a `--pglite` rehearsal mode; it refuses to empty a PostgreSQL journal that already has
+transactions), run while the service is stopped and frozen; the old `/var/lib/openvibe-billing/billing.db` stays
+read-only for 7 days as the rollback. nginx serves `billing.openvibe.network` from
 [deploy/nginx/billing.openvibe.network.conf](deploy/nginx/billing.openvibe.network.conf) (console, `/policy`,
 `/webhooks/*`, `/api/health`). Freeze the economy before any risky change (below).
 Rollback: ovhost puts the previous sha back by itself when `/api/ready` does not answer 2xx after the
-restart; afterwards `sudo ovhost rollback billing --to <sha>`. Nothing blocks a rollback: the schema
-code only adds tables and columns.
+restart; afterwards `sudo ovhost rollback billing --to <sha>`. Migrations only add tables and columns.
 `BILLING_LIMITS=off` turns the per-person limits off without a deploy.
 
 ## Cutover runbook (Live → Billing)

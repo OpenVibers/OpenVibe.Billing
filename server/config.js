@@ -69,6 +69,10 @@ function loadConfig(env = process.env) {
         host: env.HOST || '127.0.0.1',
         baseUrl,
         trustProxy: env.TRUST_PROXY != null ? Number(env.TRUST_PROXY) : 1,
+        // PostgreSQL (ADR-035): DATABASE_URL serves (PgBouncer), DATABASE_DIRECT_URL migrates (owner). dbPath: the SQLite
+        // file of releases before PostgreSQL, read once by scripts/migrate-to-postgres.js.
+        db: { url: env.DATABASE_URL || '', directUrl: env.DATABASE_DIRECT_URL || '' },
+        valkey: { url: env.VALKEY_URL || '', prefix: env.VALKEY_PREFIX || 'ov:billing:' },
         dbPath: env.BILLING_DB_PATH || './data/billing.db',
         // 'live' (default, shadow): EXTERNAL PowerChat tips are recorded but not announced, because
         // Live announces them from its own webhook. 'billing': they are announced as

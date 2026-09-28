@@ -15,17 +15,17 @@ function parse(row) {
 }
 
 /** By id, or by a Live order id for intents imported from payment_orders. */
-function find(db, ref) {
+async function find(db, ref) {
     const s = String(ref || '');
-    if (/^\d+$/.test(s)) return parse(db.prepare('SELECT * FROM payment_intents WHERE legacy_order_id = ?').get(Number(s)));
-    return parse(db.prepare('SELECT * FROM payment_intents WHERE id = ?').get(s));
+    if (/^\d+$/.test(s)) return parse(await db.prepare('SELECT * FROM payment_intents WHERE legacy_order_id = ?').get(Number(s)));
+    return parse(await db.prepare('SELECT * FROM payment_intents WHERE id = ?').get(s));
 }
 
-function findByProviderRef(db, provider, ref) {
-    return parse(db.prepare('SELECT * FROM payment_intents WHERE provider = ? AND provider_ref = ?').get(provider, ref));
+async function findByProviderRef(db, provider, ref) {
+    return parse(await db.prepare('SELECT * FROM payment_intents WHERE provider = ? AND provider_ref = ?').get(provider, ref));
 }
 
-function create(ctx, input) {
+async function create(ctx, input) {
     const { db, rates } = ctx;
     const provider = String(input.provider || '').toLowerCase();
     if (!/^[a-z][a-z0-9_-]{1,39}$/.test(provider)) fail(422, 'billing.invalid_input', 'provider is required');
@@ -60,11 +60,11 @@ function create(ctx, input) {
     }
     row.metadata = { rates: rates.snapshot({ price_tiers: kind === 'purchase' ? rates.priceTiers : undefined, sub_share_pct: rates.subSharePct, site_route_fee_pct: rates.siteRouteFeePct }) };
     if (row.receiving_account) row.metadata.receiving_account = row.receiving_account;
-    db.prepare(`INSERT INTO payment_intents (id, provider, provider_ref, kind, subject, streamer_subject, amount_cents, fee_cents, bits, route,
+    await db.prepare(`INSERT INTO payment_intents (id, provider, provider_ref, kind, subject, streamer_subject, amount_cents, fee_cents, bits, route,
             auto_renew, status, metadata, created_at, updated_at)
         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?)`).run(row.id, provider, kind, subject, row.streamer_subject,
         row.amount_cents, row.fee_cents, row.bits, row.route, row.auto_renew, JSON.stringify(row.metadata), iso(ms), iso(ms));
-    return find(db, row.id);
+    return await find(db, row.id);
 }
 
 /**
@@ -82,18 +82,18 @@ function refuseIfSettledInLive(i) {
     }
 }
 
-function setProviderRef(ctx, id, ref) {
-    ctx.db.prepare('UPDATE payment_intents SET provider_ref = ?, updated_at = ? WHERE id = ?').run(ref, iso(ctx.now()), id);
+async function setProviderRef(ctx, id, ref) {
+    await ctx.db.prepare('UPDATE payment_intents SET provider_ref = ?, updated_at = ? WHERE id = ?').run(ref, iso(ctx.now()), id);
 }
-function mergeMetadata(ctx, id, extra) {
-    const row = find(ctx.db, id);
-    ctx.db.prepare('UPDATE payment_intents SET metadata = ?, updated_at = ? WHERE id = ?').run(JSON.stringify({ ...row.metadata, ...extra }), iso(ctx.now()), id);
+async function mergeMetadata(ctx, id, extra) {
+    const row = await find(ctx.db, id);
+    await ctx.db.prepare('UPDATE payment_intents SET metadata = ?, updated_at = ? WHERE id = ?').run(JSON.stringify({ ...row.metadata, ...extra }), iso(ctx.now()), id);
 }
-function setStatus(ctx, id, status) {
-    ctx.db.prepare('UPDATE payment_intents SET status = ?, updated_at = ? WHERE id = ?').run(status, iso(ctx.now()), id);
+async function setStatus(ctx, id, status) {
+    await ctx.db.prepare('UPDATE payment_intents SET status = ?, updated_at = ? WHERE id = ?').run(status, iso(ctx.now()), id);
 }
-function markSettled(ctx, id, txnId) {
-    ctx.db.prepare("UPDATE payment_intents SET status = 'settled', settled_txn = ?, updated_at = ? WHERE id = ?").run(txnId, iso(ctx.now()), id);
+async function markSettled(ctx, id, txnId) {
+    await ctx.db.prepare("UPDATE payment_intents SET status = 'settled', settled_txn = ?, updated_at = ? WHERE id = ?").run(txnId, iso(ctx.now()), id);
 }
 
 function present(i) {

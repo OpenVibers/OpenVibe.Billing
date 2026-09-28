@@ -52,8 +52,8 @@ function createPaypal(cfg, { fetchImpl = globalThis.fetch } = {}) {
         return { eventId: event.id ? String(event.id) : null, type: String(event.event_type || 'unknown'), payload: event };
     }
 
-    function settlePlan(ctx, capture, key, actor) {
-        const intent = intents.find(ctx.db, capture.custom_id || (capture.supplementary_data && capture.supplementary_data.related_ids && capture.supplementary_data.related_ids.order_id));
+    async function settlePlan(ctx, capture, key, actor) {
+        const intent = await intents.find(ctx.db, capture.custom_id || (capture.supplementary_data && capture.supplementary_data.related_ids && capture.supplementary_data.related_ids.order_id));
         if (!intent) return { effect: 'none', reason: 'capture without a Billing intent' };
         const paid = capture.amount && capture.amount.currency_code === 'USD' ? cents(capture.amount.value) : null;
         if (!paid) return { effect: 'none', reason: 'capture without a USD amount' };
@@ -67,7 +67,7 @@ function createPaypal(cfg, { fetchImpl = globalThis.fetch } = {}) {
         const r = event.resource || {};
         const key = `pe:paypal:${row.provider_event_id}`;
         const actor = { principal: 'provider:paypal', provider_event: row.provider_event_id };
-        if (event.event_type === 'PAYMENT.CAPTURE.COMPLETED') return settlePlan(ctx, r, key, actor);
+        if (event.event_type === 'PAYMENT.CAPTURE.COMPLETED') return await settlePlan(ctx, r, key, actor);
         if (event.event_type === 'PAYMENT.CAPTURE.REFUNDED' || event.event_type === 'PAYMENT.CAPTURE.REVERSED') {
             const up = (r.links || []).find((l) => l.rel === 'up');
             const captureId = up ? String(up.href).split('/').filter(Boolean).pop() : r.capture_id;
@@ -104,7 +104,7 @@ function createPaypal(cfg, { fetchImpl = globalThis.fetch } = {}) {
         });
         const cap = j.purchase_units && j.purchase_units[0] && j.purchase_units[0].payments && j.purchase_units[0].payments.captures && j.purchase_units[0].payments.captures[0];
         if (j.status !== 'COMPLETED' || !cap) return { effect: 'none', reason: `order ${j.status}` };
-        return settlePlan(ctx, { ...cap, custom_id: cap.custom_id || intent.id }, `paypal-capture:${cap.id}`, { principal: 'provider:paypal', capture: cap.id });
+        return await settlePlan(ctx, { ...cap, custom_id: cap.custom_id || intent.id }, `paypal-capture:${cap.id}`, { principal: 'provider:paypal', capture: cap.id });
     }
 
     return { name: 'paypal', enabled, verify, parse, interpret, createCheckout, capture };

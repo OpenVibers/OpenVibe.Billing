@@ -11,14 +11,14 @@
  *                     their payable (MONEY); the tipper may be unknown.
  */
 const { validate } = require('openvibe-contracts');
-const { post, getTxn, requireFunds } = require('../ledger');
+const { post, getTxn, requireFunds, money } = require('../ledger');
 const { enqueue } = require('../outbox');
 const { A, MAX_RECEIPT_CENTS, entry, receiptEntries, fail, positiveInt, text } = require('./common');
 const { summary } = require('./purchases');
 
 const KINDS = ['tip', 'donation', 'paid_interaction'];
 
-function create(ctx, input) {
+async function create(ctx, input) {
     const { db, rates } = ctx;
     const amount = positiveInt(input.amount, 'amount', rates.maxBits);
     const from = input.from;
@@ -33,11 +33,11 @@ function create(ctx, input) {
         target = input.target;
     }
     const message = text(input.message, 'message', 500);
-    return db.transaction(() => {
-        const existing = db.prepare('SELECT id FROM transactions WHERE idempotency_key = ?').get(input.idempotencyKey);
-        if (existing) return { txn: getTxn(db, existing.id), replay: true };
-        requireFunds(db, A.credit(from), amount, 'credit');
-        const { txn } = post(ctx, {
+    return await money(db, async () => {
+        const existing = await db.prepare('SELECT id FROM transactions WHERE idempotency_key = ?').get(input.idempotencyKey);
+        if (existing) return { txn: await getTxn(db, existing.id), replay: true };
+        await requireFunds(db, A.credit(from), amount, 'credit');
+        const { txn } = await post(ctx, {
             type: 'donation',
             idempotencyKey: input.idempotencyKey,
             entries: [entry(A.credit(from), -amount), entry(A.payable(to), amount)],
@@ -46,25 +46,25 @@ function create(ctx, input) {
             toSubject: to,
             metadata: { kind, amount_bits: amount, target, message, rates: rates.snapshot() },
         });
-        enqueue(ctx, { event_type: 'billing.transaction.settled', subject: { type: 'transaction', id: txn.id }, payload: summary(txn), traceId: input.traceId });
+        await enqueue(ctx, { event_type: 'billing.transaction.settled', subject: { type: 'transaction', id: txn.id }, payload: summary(txn), traceId: input.traceId });
         return { txn, replay: false };
-    })();
+    });
 }
 
-function refund(ctx, input) {
+async function refund(ctx, input) {
     const { db } = ctx;
-    return db.transaction(() => {
-        const existing = db.prepare('SELECT id FROM transactions WHERE idempotency_key = ?').get(input.idempotencyKey);
-        if (existing) return { txn: getTxn(db, existing.id), replay: true };
-        const orig = getTxn(db, input.txnId);
+    return await money(db, async () => {
+        const existing = await db.prepare('SELECT id FROM transactions WHERE idempotency_key = ?').get(input.idempotencyKey);
+        if (existing) return { txn: await getTxn(db, existing.id), replay: true };
+        const orig = await getTxn(db, input.txnId);
         if (!orig || orig.type !== 'donation') fail(404, 'billing.transaction_not_found', `no donation ${input.txnId}`);
         if (!orig.from_subject || orig.receipt_ref) fail(422, 'billing.not_refundable', 'only credit-funded transfers are refunded this way; provider receipts are reversed by their provider events');
-        const done = db.prepare(`SELECT COALESCE(SUM(json_extract(metadata, '$.amount_bits')), 0) AS n FROM transactions WHERE reverses_txn = ? AND type = 'refund'`).get(orig.id).n;
+        const done = (await db.prepare(`SELECT COALESCE(SUM(json_extract(metadata, '$.amount_bits')::bigint), 0)::bigint AS n FROM transactions WHERE reverses_txn = ? AND type = 'refund'`).get(orig.id)).n;
         const remaining = orig.metadata.amount_bits - done;
         const amount = input.amount != null ? positiveInt(input.amount, 'amount') : remaining;
         if (amount > remaining) fail(409, 'billing.already_reversed', `only ${remaining} bits of ${orig.id} remain refundable`);
-        requireFunds(db, A.payable(orig.to_subject), amount, "recipient's payable");
-        const { txn } = post(ctx, {
+        await requireFunds(db, A.payable(orig.to_subject), amount, "recipient's payable");
+        const { txn } = await post(ctx, {
             type: 'refund',
             idempotencyKey: input.idempotencyKey,
             reversesTxn: orig.id,
@@ -75,20 +75,20 @@ function refund(ctx, input) {
             test: orig.test,
             metadata: { amount_bits: amount, reason: text(input.reason, 'reason', 300) },
         });
-        enqueue(ctx, { event_type: 'billing.transaction.reversed', subject: { type: 'transaction', id: txn.id }, payload: { ...summary(txn), reverses_txn: orig.id } });
+        await enqueue(ctx, { event_type: 'billing.transaction.reversed', subject: { type: 'transaction', id: txn.id }, payload: { ...summary(txn), reverses_txn: orig.id } });
         return { txn, replay: false };
-    })();
+    });
 }
 
-function fromReceipt(ctx, input) {
+async function fromReceipt(ctx, input) {
     const { db, rates } = ctx;
-    return db.transaction(() => {
-        const dup = db.prepare('SELECT id FROM transactions WHERE receipt_ref = ?').get(input.receiptRef);
-        if (dup) return { txn: getTxn(db, dup.id), replay: true, duplicateReceipt: true };
+    return await money(db, async () => {
+        const dup = await db.prepare('SELECT id FROM transactions WHERE receipt_ref = ?').get(input.receiptRef);
+        if (dup) return { txn: await getTxn(db, dup.id), replay: true, duplicateReceipt: true };
         const paidCents = positiveInt(input.paidCents, 'amount_cents', MAX_RECEIPT_CENTS);
         if (input.from && input.from === input.to) fail(422, 'billing.self_dealing', 'a creator cannot route a tip to themselves');
         const bits = rates.bitsForValueCents(paidCents);
-        const { txn } = post(ctx, {
+        const { txn } = await post(ctx, {
             type: 'donation',
             idempotencyKey: input.idempotencyKey,
             entries: receiptEntries(rates, { provider: input.provider, paidCents, bits, target: A.payable(input.to) }),
@@ -101,9 +101,9 @@ function fromReceipt(ctx, input) {
             sourceEventId: input.sourceEventId,
             metadata: { kind: 'tip', route: 'site', paid_cents: paidCents, amount_bits: bits, rates: rates.snapshot(), ...(input.metadata || {}) },
         });
-        enqueue(ctx, { event_type: 'billing.transaction.settled', subject: { type: 'transaction', id: txn.id }, payload: summary(txn) });
+        await enqueue(ctx, { event_type: 'billing.transaction.settled', subject: { type: 'transaction', id: txn.id }, payload: summary(txn) });
         return { txn, replay: false };
-    })();
+    });
 }
 
 module.exports = { create, refund, fromReceipt };

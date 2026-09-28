@@ -126,13 +126,13 @@ function createPowerchat(cfg, { network } = {}) {
         let m;
         if ((m = ref.match(/^pcorder:(.+)$/))) {
             if (!onSite) return offSite('purchase checkout');
-            const intent = intents.find(ctx.db, m[1]);
+            const intent = await intents.find(ctx.db, m[1]);
             if (!intent || intent.kind !== 'purchase') return { effect: 'none', reason: `purchase checkout ${ref} has no purchase intent` };
             if (cents < 1) return { effect: 'none', reason: 'zero-amount purchase' };
             return { effect: 'purchase', args: { provider: 'powerchat', receiptRef, intentId: intent.id, paidCents: cents, test: isTest, idempotencyKey: key, actor, metadata: meta } };
         }
         if ((m = ref.match(/^pcsub:(.+)$/))) {
-            const intent = intents.find(ctx.db, m[1]);
+            const intent = await intents.find(ctx.db, m[1]);
             if (!intent || intent.kind !== 'subscription' || !intent.streamer_subject) return { effect: 'none', reason: `subscription checkout ${ref} has no subscription intent` };
             const route = intent.route === 'direct' ? 'direct' : 'site';
             if (route === 'site' && !onSite) return offSite('site-routed subscription checkout');

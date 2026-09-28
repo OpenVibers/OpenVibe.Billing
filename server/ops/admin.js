@@ -7,22 +7,22 @@
  * mandatory reason — the only way an operator changes a balance (e.g. resolving a chargeback
  * flagged for review, or settling an import hold once its owner is known).
  */
-const { post, getTxn, iso } = require('../ledger');
+const { post, getTxn, iso, money } = require('../ledger');
 const { enqueue } = require('../outbox');
 const { entry, fail, positiveInt, text } = require('./common');
 const { ACCOUNT_KINDS, CURRENCIES } = require('../db');
 const { summary } = require('./purchases');
 
-function freezeState(db) {
-    const r = db.prepare('SELECT * FROM settings WHERE id = 1').get();
+async function freezeState(db) {
+    const r = await db.prepare('SELECT * FROM settings WHERE id = 1').get();
     return { frozen: !!r.freeze, reason: r.freeze_reason || null, frozen_at: r.frozen_at || null, frozen_by: r.frozen_by ? JSON.parse(r.frozen_by) : null };
 }
 
-function setFreeze(ctx, { on, reason, actor }) {
+async function setFreeze(ctx, { on, reason, actor }) {
     const { db } = ctx;
-    db.prepare('UPDATE settings SET freeze = ?, freeze_reason = ?, frozen_at = ?, frozen_by = ? WHERE id = 1')
+    await db.prepare('UPDATE settings SET "freeze" = ?, freeze_reason = ?, frozen_at = ?, frozen_by = ? WHERE id = 1')
         .run(on ? 1 : 0, on ? text(reason, 'reason', 300) : null, on ? iso(ctx.now()) : null, on ? JSON.stringify(actor || {}) : null);
-    return freezeState(db);
+    return await freezeState(db);
 }
 
 function account(v, field) {
@@ -33,17 +33,17 @@ function account(v, field) {
 }
 
 /** Move `amount` from `from` to `to` (same currency). */
-function adjust(ctx, input) {
+async function adjust(ctx, input) {
     const from = account(input.from, 'from');
     const to = account(input.to, 'to');
     if (from.currency !== to.currency) fail(422, 'billing.invalid_input', 'an adjustment moves value within one currency');
     const amount = positiveInt(input.amount, 'amount', 1_000_000_000);
     const reason = text(input.reason, 'reason', 500);
     if (!reason) fail(422, 'billing.invalid_input', 'an adjustment needs a reason');
-    return ctx.db.transaction(() => {
-        const existing = ctx.db.prepare('SELECT id FROM transactions WHERE idempotency_key = ?').get(input.idempotencyKey);
-        if (existing) return { txn: getTxn(ctx.db, existing.id), replay: true };
-        const { txn } = post(ctx, {
+    return await money(ctx.db, async () => {
+        const existing = await ctx.db.prepare('SELECT id FROM transactions WHERE idempotency_key = ?').get(input.idempotencyKey);
+        if (existing) return { txn: await getTxn(ctx.db, existing.id), replay: true };
+        const { txn } = await post(ctx, {
             type: 'adjustment',
             idempotencyKey: input.idempotencyKey,
             entries: [entry(from, -amount), entry(to, amount)],
@@ -52,9 +52,9 @@ function adjust(ctx, input) {
             toSubject: to.owner && to.owner.startsWith('usr_') ? to.owner : null,
             metadata: { reason, amount, currency: from.currency, relates_to: input.relatesTo || null },
         });
-        enqueue(ctx, { event_type: 'billing.transaction.settled', subject: { type: 'transaction', id: txn.id }, payload: summary(txn) });
+        await enqueue(ctx, { event_type: 'billing.transaction.settled', subject: { type: 'transaction', id: txn.id }, payload: summary(txn) });
         return { txn, replay: false };
-    })();
+    });
 }
 
 module.exports = { freezeState, setFreeze, adjust };

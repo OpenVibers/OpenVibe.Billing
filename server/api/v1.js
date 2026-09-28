@@ -10,7 +10,7 @@
  */
 const express = require('express');
 const { http, capabilities } = require('openvibe-contracts');
-const { getTxn, present: presentTxn, balance, BillingError } = require('../ledger');
+const { getTxn, present: presentTxn, balance, BillingError, money } = require('../ledger');
 const { A, userSubject, positiveInt, isFrozen, fail } = require('../ops/common');
 const { idempotent } = require('./idempotency');
 const { actorOf } = require('./auth');
@@ -40,7 +40,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
     const r = express.Router();
     const { db } = ctx;
     const idem = idempotent(db, ctx.now);
-    const notFrozen = (req, res, next) => (isFrozen(db)
+    const notFrozen = async (req, res, next) => (await isFrozen(db)
         ? http.sendProblem(res, 503, 'billing.frozen', { detail: 'the economy is frozen: writes are refused, reads are served', ctx: req.ov })
         : next());
     /**
@@ -72,7 +72,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
         const adapter = adapters[String(b.provider || '').toLowerCase()];
         if (!adapter) fail(422, 'billing.invalid_input', `unknown provider ${b.provider}`);
         if (!adapter.enabled) fail(409, 'billing.provider_disabled', `${adapter.name} is not enabled on Billing`);
-        const intent = intents.create(ctx, b);
+        const intent = await intents.create(ctx, b);
         let checkoutUrl = null;
         if (adapter.createCheckout) {
             const name = intent.kind === 'purchase' ? `${intent.bits.toLocaleString('en-US')} Vibes` : 'Channel subscription (1 month)';
@@ -81,35 +81,35 @@ function v1Router({ ctx, auth, adapters, limits }) {
                     name, successUrl: b.success_url || `${ctx.config.baseUrl}/checkout/success`, cancelUrl: b.cancel_url || `${ctx.config.baseUrl}/checkout/cancel`,
                     ipnUrl: `${ctx.config.baseUrl}/webhooks/${adapter.name}`,
                 });
-                if (out.providerRef) intents.setProviderRef(ctx, intent.id, out.providerRef);
+                if (out.providerRef) await intents.setProviderRef(ctx, intent.id, out.providerRef);
                 checkoutUrl = out.url || null;
             } catch (e) {
-                intents.setStatus(ctx, intent.id, 'failed');
+                await intents.setStatus(ctx, intent.id, 'failed');
                 fail(502, 'billing.provider_error', `${adapter.name}: ${e.message}`);
             }
         }
-        res.status(201).json({ intent: intents.present(intents.find(db, intent.id)), checkout_url: checkoutUrl });
+        res.status(201).json({ intent: intents.present(await intents.find(db, intent.id)), checkout_url: checkoutUrl });
     }, limits.budget('billing.intent.create', person('subject'))));
-    r.get('/intents/:id', ...read(CAP.intent, (req, res) => {
-        const i = intents.find(db, req.params.id);
+    r.get('/intents/:id', ...read(CAP.intent, async (req, res) => {
+        const i = await intents.find(db, req.params.id);
         if (!i) fail(404, 'billing.intent_not_found', `no intent ${req.params.id}`);
         res.json({ intent: intents.present(i) });
     }));
     r.post('/intents/:id/capture', ...write(CAP.intent, async (req, res) => {
-        const i = intents.find(db, req.params.id);
+        const i = await intents.find(db, req.params.id);
         if (!i) fail(404, 'billing.intent_not_found', `no intent ${req.params.id}`);
         const adapter = adapters[i.provider];
         if (!adapter || !adapter.capture || !adapter.enabled) fail(409, 'billing.provider_disabled', `${i.provider} has no enabled capture`);
         const plan = await adapter.capture(ctx, i);
-        const result = db.transaction(() => providers.applyPlan(ctx, plan, { id: null }))();
-        res.json({ result, intent: intents.present(intents.find(db, i.id)) });
+        const result = await money(db, async () => await providers.applyPlan(ctx, plan, { id: null }));
+        res.json({ result, intent: intents.present(await intents.find(db, i.id)) });
     }));
 
     // ── Purchases: settle a provider receipt (operator/reconciler grade) ──
-    r.post('/purchases/settle', ...write(CAP.admin, (req, res) => {
+    r.post('/purchases/settle', ...write(CAP.admin, async (req, res) => {
         const b = req.body || {};
         if (!b.provider || !b.provider_ref) fail(422, 'billing.invalid_input', 'provider and provider_ref (the provider payment id) are required');
-        const out = purchases.settle(ctx, {
+        const out = await purchases.settle(ctx, {
             provider: String(b.provider).toLowerCase(), receiptRef: `${String(b.provider).toLowerCase()}:${b.provider_ref}`,
             subject: b.subject ? userSubject(b.subject) : null, paidCents: b.amount_cents, bits: b.bits, intentId: b.intent_id,
             test: !!b.test, idempotencyKey: req.idempotencyKey, actor: actorOf(req), traceId: req.ov.traceId,
@@ -118,55 +118,55 @@ function v1Router({ ctx, auth, adapters, limits }) {
     }));
 
     // ── Transfers (tips / donations / paid interactions) ─────
-    r.post('/transfers', ...write(CAP.transfer, (req, res) => {
+    r.post('/transfers', ...write(CAP.transfer, async (req, res) => {
         const b = req.body || {};
-        const out = transfers.create(ctx, {
+        const out = await transfers.create(ctx, {
             from: userSubject(b.from, 'from'), to: userSubject(b.to, 'to'), amount: b.amount, kind: b.kind, target: b.target,
             message: b.message, idempotencyKey: req.idempotencyKey, actor: actorOf(req), traceId: req.ov.traceId,
         });
-        res.status(201).json(txnOut(out.txn, { balance: { credit: balance(db, A.credit(out.txn.from_subject)) } }));
+        res.status(201).json(txnOut(out.txn, { balance: { credit: await balance(db, A.credit(out.txn.from_subject)) } }));
     }, limits.budget('billing.transfer.create', person('from'))));
-    r.post('/transfers/:id/refund', ...write(CAP.transfer, (req, res) => {
+    r.post('/transfers/:id/refund', ...write(CAP.transfer, async (req, res) => {
         const b = req.body || {};
-        const out = transfers.refund(ctx, { txnId: req.params.id, amount: b.amount, reason: b.reason, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
+        const out = await transfers.refund(ctx, { txnId: req.params.id, amount: b.amount, reason: b.reason, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.status(201).json(txnOut(out.txn));
     }, limits.budget('billing.transfer.refund', limits.payerOf)));
 
     // ── Recycle: creator payable → own spendable credit ──────
-    r.post('/recycle', ...write(CAP.cashoutRequest, (req, res) => {
+    r.post('/recycle', ...write(CAP.cashoutRequest, async (req, res) => {
         const b = req.body || {};
         const subject = userSubject(b.subject);
-        const out = cashouts.recycle(ctx, { subject, amount: b.amount, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
-        res.status(201).json(txnOut(out.txn, { balance: balanceOf(subject) }));
+        const out = await cashouts.recycle(ctx, { subject, amount: b.amount, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
+        res.status(201).json(txnOut(out.txn, { balance: await balanceOf(subject) }));
     }, limits.budget('billing.recycle', person('subject'))));
 
     // ── Cashouts ─────────────────────────────────────────────
-    r.post('/cashouts', ...write(CAP.cashoutRequest, (req, res) => {
+    r.post('/cashouts', ...write(CAP.cashoutRequest, async (req, res) => {
         const b = req.body || {};
-        const out = cashouts.request(ctx, { subject: userSubject(b.subject), amount: b.amount, payout_method: b.payout_method, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
+        const out = await cashouts.request(ctx, { subject: userSubject(b.subject), amount: b.amount, payout_method: b.payout_method, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.status(201).json({ cashout: cashouts.present(out.cashout) });
     }, limits.budget('billing.cashout.request', person('subject'))));
-    r.get('/cashouts', ...read(CAP.cashoutManage, (req, res) => {
-        const list = cashouts.list(db, { status: req.query.status, subject: req.query.subject, limit: Number(req.query.limit) || 100 });
+    r.get('/cashouts', ...read(CAP.cashoutManage, async (req, res) => {
+        const list = await cashouts.list(db, { status: req.query.status, subject: req.query.subject, limit: Number(req.query.limit) || 100 });
         res.json({ cashouts: list.map(cashouts.present) });
     }));
-    r.get('/cashouts/:id', ...read([CAP.cashoutManage, CAP.cashoutRequest], (req, res) => {
-        const c = cashouts.find(db, req.params.id);
+    r.get('/cashouts/:id', ...read([CAP.cashoutManage, CAP.cashoutRequest], async (req, res) => {
+        const c = await cashouts.find(db, req.params.id);
         if (!c) fail(404, 'billing.cashout_not_found', `no cashout ${req.params.id}`);
         res.json({ cashout: cashouts.present(c) });
     }));
-    r.post('/cashouts/:id/approve', ...write(CAP.cashoutManage, (req, res) => {
+    r.post('/cashouts/:id/approve', ...write(CAP.cashoutManage, async (req, res) => {
         const b = req.body || {};
-        const out = cashouts.approve(ctx, { id: req.params.id, payout_reference: b.payout_reference, payout_provider: b.payout_provider, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
+        const out = await cashouts.approve(ctx, { id: req.params.id, payout_reference: b.payout_reference, payout_provider: b.payout_provider, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.json({ cashout: cashouts.present(out.cashout) });
     }));
-    r.post('/cashouts/:id/deny', ...write(CAP.cashoutManage, (req, res) => {
-        const out = cashouts.deny(ctx, { id: req.params.id, reason: (req.body || {}).reason, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
+    r.post('/cashouts/:id/deny', ...write(CAP.cashoutManage, async (req, res) => {
+        const out = await cashouts.deny(ctx, { id: req.params.id, reason: (req.body || {}).reason, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.json({ cashout: cashouts.present(out.cashout) });
     }));
 
     // ── Subscriptions and entitlements ───────────────────────
-    r.post('/subscriptions', ...write(CAP.subscription, (req, res) => {
+    r.post('/subscriptions', ...write(CAP.subscription, async (req, res) => {
         const b = req.body || {};
         const source = b.source || 'credit';
         let receipt = null;
@@ -180,48 +180,48 @@ function v1Router({ ctx, auth, adapters, limits }) {
             const provider = String(rc.provider).toLowerCase();
             receipt = { provider, receiptRef: `${provider}:${rc.provider_ref}`, paidCents: rc.amount_cents, feeCents: rc.fee_cents, route: rc.route, providerRef: rc.subscription_ref || null, test: !!rc.test };
         }
-        const out = subscriptions.pay(ctx, {
+        const out = await subscriptions.pay(ctx, {
             subscriber: userSubject(b.subscriber, 'subscriber'), streamer: userSubject(b.streamer, 'streamer'), source,
             priceCents: b.price_cents, autoRenew: b.auto_renew, receipt, idempotencyKey: req.idempotencyKey, actor: actorOf(req),
         });
         res.status(201).json({ subscription: subscriptions.present(out.subscription), entitlement: out.entitlement, transaction: presentTxn(out.txn) });
     }, limits.budget('billing.subscription.create', person('subscriber'))));
-    r.get('/subscriptions', ...read([CAP.entitlement, CAP.subscription], (req, res) => {
-        const list = subscriptions.list(db, {
+    r.get('/subscriptions', ...read([CAP.entitlement, CAP.subscription], async (req, res) => {
+        const list = await subscriptions.list(db, {
             subscriber: req.query.subscriber ? pathSubject(req.query.subscriber) : null,
             streamer: req.query.streamer ? pathSubject(req.query.streamer) : null,
             status: req.query.status || null,
         });
         res.json({ subscriptions: list.map(subscriptions.present) });
     }));
-    r.get('/subscriptions/:id', ...read([CAP.entitlement, CAP.subscription], (req, res) => {
-        const s = subscriptions.find(db, req.params.id);
+    r.get('/subscriptions/:id', ...read([CAP.entitlement, CAP.subscription], async (req, res) => {
+        const s = await subscriptions.find(db, req.params.id);
         if (!s) fail(404, 'billing.subscription_not_found', `no subscription ${req.params.id}`);
-        res.json({ subscription: subscriptions.present(s), entitlement: subscriptions.entitlement(db, s.subscriber, s.streamer, ctx.now()) });
+        res.json({ subscription: subscriptions.present(s), entitlement: await subscriptions.entitlement(db, s.subscriber, s.streamer, ctx.now()) });
     }));
     r.post('/subscriptions/:id/cancel', ...write(CAP.subscription, async (req, res) => {
         const out = await subscriptions.cancel(ctx, { id: req.params.id, actor: actorOf(req) }, adapters);
         res.json({ subscription: subscriptions.present(out.subscription), provider_sync: out.provider_sync });
     }));
-    r.get('/entitlements/:subject', ...read(CAP.entitlement, (req, res) => {
+    r.get('/entitlements/:subject', ...read(CAP.entitlement, async (req, res) => {
         const subject = pathSubject(req.params.subject);
-        if (req.query.streamer) return res.json(subscriptions.entitlement(db, subject, pathSubject(req.query.streamer), ctx.now()));
-        return res.json({ subject: { type: 'user', id: subject }, entitlements: subscriptions.activeEntitlements(db, subject, ctx.now()) });
+        if (req.query.streamer) return res.json(await subscriptions.entitlement(db, subject, pathSubject(req.query.streamer), ctx.now()));
+        return res.json({ subject: { type: 'user', id: subject }, entitlements: await subscriptions.activeEntitlements(db, subject, ctx.now()) });
     }));
 
     // ── Balances and history ─────────────────────────────────
-    function balanceOf(subject) {
-        const credit = balance(db, A.credit(subject));
-        const payable = balance(db, A.payable(subject));
-        const pending = balance(db, A.pending(subject));
+    async function balanceOf(subject) {
+        const credit = await balance(db, A.credit(subject));
+        const payable = await balance(db, A.payable(subject));
+        const pending = await balance(db, A.pending(subject));
         return {
             subject: { type: 'user', id: subject }, currency: 'vibes-bits', credit, payable, pending_payouts: pending,
             payable_value_cents: ctx.rates.valueCents(payable), bits_per_usd: ctx.rates.bitsPerUsd,
         };
     }
-    r.get('/balances/:subject', ...read(CAP.balance, (req, res) => res.json(balanceOf(pathSubject(req.params.subject)))));
+    r.get('/balances/:subject', ...read(CAP.balance, async (req, res) => res.json(await balanceOf(pathSubject(req.params.subject)))));
 
-    r.get('/transactions', ...read(CAP.balance, (req, res) => {
+    r.get('/transactions', ...read(CAP.balance, async (req, res) => {
         const subject = req.query.subject ? pathSubject(req.query.subject) : null;
         if (!subject) fail(422, 'billing.invalid_input', 'subject is required');
         const limit = Math.min(200, positiveInt(req.query.limit || 50, 'limit'));
@@ -229,40 +229,40 @@ function v1Router({ ctx, auth, adapters, limits }) {
         if (req.query.cursor) {
             try { cur = JSON.parse(Buffer.from(String(req.query.cursor), 'base64url').toString('utf8')); } catch { fail(422, 'billing.invalid_input', 'bad cursor'); }
         }
-        const rows = db.prepare(`SELECT t.id, t.created_at FROM transactions t
+        const rows = await db.prepare(`SELECT t.id, t.created_at FROM transactions t
             WHERE (t.from_subject = @s OR t.to_subject = @s OR t.id IN (SELECT e.txn_id FROM ledger_entries e JOIN accounts a ON a.id = e.account_id WHERE a.owner_subject = @s))
-              AND (@c IS NULL OR t.created_at < @c OR (t.created_at = @c AND t.id < @i))
+              AND (@c::text IS NULL OR t.created_at < @c::text OR (t.created_at = @c::text AND t.id < @i::text))
             ORDER BY t.created_at DESC, t.id DESC LIMIT @n`).all({ s: subject, c: cur ? cur[0] : null, i: cur ? cur[1] : null, n: limit + 1 });
         const page = rows.slice(0, limit);
         const next = rows.length > limit ? Buffer.from(JSON.stringify([page[page.length - 1].created_at, page[page.length - 1].id])).toString('base64url') : null;
-        res.json({ transactions: page.map((x) => presentTxn(getTxn(db, x.id))), next_cursor: next });
+        res.json({ transactions: (await Promise.all(page.map(async (x) => presentTxn(await getTxn(db, x.id))))), next_cursor: next });
     }, limits.history));
-    r.get('/transactions/:id', ...read(CAP.balance, (req, res) => {
-        const t = getTxn(db, req.params.id);
+    r.get('/transactions/:id', ...read(CAP.balance, async (req, res) => {
+        const t = await getTxn(db, req.params.id);
         if (!t) fail(404, 'billing.transaction_not_found', `no transaction ${req.params.id}`);
-        const reversals = db.prepare('SELECT id FROM transactions WHERE reverses_txn = ? ORDER BY created_at').all(t.id).map((x) => x.id);
+        const reversals = (await db.prepare('SELECT id FROM transactions WHERE reverses_txn = ? ORDER BY created_at').all(t.id)).map((x) => x.id);
         res.json({ transaction: presentTxn(t), reversed_by: reversals });
     }));
 
     // ── Admin (billing.ledger.admin) ─────────────────────────
-    r.get('/admin/freeze', ...read(CAP.admin, (req, res) => res.json(admin.freezeState(db))));
+    r.get('/admin/freeze', ...read(CAP.admin, async (req, res) => res.json(await admin.freezeState(db))));
     r.post('/admin/freeze', auth.needs(CAP.admin), wrap(async (req, res) => {
         const b = req.body || {};
         if (typeof b.on !== 'boolean') fail(422, 'billing.invalid_input', 'on must be true or false');
-        const state = admin.setFreeze(ctx, { on: b.on, reason: b.reason, actor: actorOf(req) });
+        const state = await admin.setFreeze(ctx, { on: b.on, reason: b.reason, actor: actorOf(req) });
         // Deliveries stored while frozen are processed now, in arrival order.
         const drained = b.on ? null : await providers.processPending(ctx, adapters);
         res.json({ ...state, processed_after_unfreeze: drained });
     }));
-    r.get('/admin/reconcile', ...read(CAP.admin, (req, res) => {
-        const report = reconcile(ctx, { trigger: 'api' });
+    r.get('/admin/reconcile', ...read(CAP.admin, async (req, res) => {
+        const report = await reconcile(ctx, { trigger: 'api' });
         res.status(200).json(report);
     }));
     // Stored runs (scheduled and on demand), newest first; ?failed=1 for failed runs only.
-    r.get('/admin/reconciliations', ...read(CAP.admin, (req, res) => {
+    r.get('/admin/reconciliations', ...read(CAP.admin, async (req, res) => {
         const limit = Math.min(200, positiveInt(req.query.limit || 20, 'limit'));
         const failed = req.query.failed === '1' || req.query.failed === 'true';
-        const rows = db.prepare(`SELECT id, started_at, finished_at, ok, report FROM reconciliation_runs ${failed ? 'WHERE ok = 0' : ''} ORDER BY finished_at DESC, id DESC LIMIT ?`).all(limit);
+        const rows = await db.prepare(`SELECT id, started_at, finished_at, ok, report FROM reconciliation_runs ${failed ? 'WHERE ok = 0' : ''} ORDER BY finished_at DESC, id DESC LIMIT ?`).all(limit);
         res.json({
             runs: rows.map((r) => {
                 const rep = JSON.parse(r.report);
@@ -270,50 +270,50 @@ function v1Router({ ctx, auth, adapters, limits }) {
             }),
         });
     }));
-    r.get('/admin/reconciliations/:id', ...read(CAP.admin, (req, res) => {
+    r.get('/admin/reconciliations/:id', ...read(CAP.admin, async (req, res) => {
         const row = req.params.id === 'latest'
-            ? db.prepare('SELECT report FROM reconciliation_runs ORDER BY finished_at DESC, id DESC LIMIT 1').get()
-            : db.prepare('SELECT report FROM reconciliation_runs WHERE id = ?').get(req.params.id);
+            ? await db.prepare('SELECT report FROM reconciliation_runs ORDER BY finished_at DESC, id DESC LIMIT 1').get()
+            : await db.prepare('SELECT report FROM reconciliation_runs WHERE id = ?').get(req.params.id);
         if (!row) fail(404, 'billing.reconciliation_not_found', `no reconciliation run ${req.params.id}`);
         res.json(JSON.parse(row.report));
     }));
     // Provider account → creator (who an EXTERNAL tip on that account belongs to).
-    r.get('/admin/provider-accounts', ...read(CAP.admin, (req, res) => {
-        res.json({ accounts: db.prepare('SELECT * FROM provider_accounts ORDER BY provider, username').all() });
+    r.get('/admin/provider-accounts', ...read(CAP.admin, async (req, res) => {
+        res.json({ accounts: await db.prepare('SELECT * FROM provider_accounts ORDER BY provider, username').all() });
     }));
     // Not a money movement: allowed while frozen (the cutover maps accounts with Billing frozen).
-    r.post('/admin/provider-accounts', auth.needs(CAP.admin), idem, wrap((req, res) => {
+    r.post('/admin/provider-accounts', auth.needs(CAP.admin), idem, wrap(async (req, res) => {
         const b = req.body || {};
         const provider = String(b.provider || '').toLowerCase();
         if (!adapters[provider]) fail(422, 'billing.invalid_input', `provider must be one of ${Object.keys(adapters).join(', ')}`);
-        const row = external.mapAccount(ctx, { provider, username: b.username, accountId: b.account_id, subject: b.subject, source: 'admin' });
+        const row = await external.mapAccount(ctx, { provider, username: b.username, accountId: b.account_id, subject: b.subject, source: 'admin' });
         res.status(201).json({ account: row });
     }));
-    r.post('/admin/adjustments', ...write(CAP.admin, (req, res) => {
+    r.post('/admin/adjustments', ...write(CAP.admin, async (req, res) => {
         const b = req.body || {};
-        const out = admin.adjust(ctx, { from: b.from, to: b.to, amount: b.amount, reason: b.reason, relatesTo: b.relates_to, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
+        const out = await admin.adjust(ctx, { from: b.from, to: b.to, amount: b.amount, reason: b.reason, relatesTo: b.relates_to, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.status(201).json(txnOut(out.txn));
     }));
-    r.get('/admin/provider-events', ...read(CAP.admin, (req, res) => {
+    r.get('/admin/provider-events', ...read(CAP.admin, async (req, res) => {
         const pending = req.query.pending === '1' || req.query.pending === 'true';
-        const rows = db.prepare(`SELECT * FROM provider_events ${pending ? 'WHERE processed_at IS NULL' : ''} ORDER BY id DESC LIMIT 200`).all().map(providers.parseRow);
+        const rows = (await db.prepare(`SELECT * FROM provider_events ${pending ? 'WHERE processed_at IS NULL' : ''} ORDER BY id DESC LIMIT 200`).all()).map(providers.parseRow);
         res.json({ events: rows.map(providers.present) });
     }));
     r.post('/admin/provider-events/:id/reprocess', auth.needs(CAP.admin), notFrozen, wrap(async (req, res) => {
         const row = await providers.reprocess(ctx, adapters, Number(req.params.id));
         res.json({ event: providers.present(row) });
     }));
-    r.post('/admin/sweep', auth.needs(CAP.admin), notFrozen, wrap((req, res) => res.json(subscriptions.sweep(ctx))));
-    r.get('/admin/import-holds', ...read(CAP.admin, (req, res) => res.json({ holds: db.prepare('SELECT * FROM import_holds ORDER BY live_user_id').all() })));
+    r.post('/admin/sweep', auth.needs(CAP.admin), notFrozen, wrap(async (req, res) => res.json(await subscriptions.sweep(ctx))));
+    r.get('/admin/import-holds', ...read(CAP.admin, async (req, res) => res.json({ holds: await db.prepare('SELECT * FROM import_holds ORDER BY live_user_id').all() })));
 
     return r;
 }
 
 /** Async-safe handler: BillingError → problem+json; anything else → 500. */
 function wrap(fn) {
-    return (req, res, next) => {
+    return async (req, res, next) => {
         try {
-            const p = fn(req, res, next);
+            const p = await fn(req, res, next);
             if (p && typeof p.catch === 'function') p.catch((e) => sendError(req, res, e));
         } catch (e) { sendError(req, res, e); }
     };

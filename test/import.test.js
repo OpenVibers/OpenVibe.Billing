@@ -10,7 +10,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { boot, check, done } = require('./helpers/app');
 
-function fabricateLive(file) {
+async function fabricateLive(file) {
     const live = new Database(file);
     live.exec(`
         CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, openvibe_bucks_balance REAL DEFAULT 0.00,
@@ -48,7 +48,7 @@ function fabricateLive(file) {
             (5, 3, 'powerchat', NULL, 'bucks', 325, 250, NULL, 'paid', '2026-07-06 09:00:00');
     `);
     const future = new Date(Date.now() + 20 * 86_400_000).toISOString().replace('T', ' ').slice(0, 19);
-    live.prepare(`INSERT INTO subscriptions (id, subscriber_id, streamer_id, provider, price_cents, status, auto_renew, current_period_end, created_at)
+    await live.prepare(`INSERT INTO subscriptions (id, subscriber_id, streamer_id, provider, price_cents, status, auto_renew, current_period_end, created_at)
         VALUES (1, 1, 2, 'powerchat', 549, 'active', 1, ?, '2026-07-08 09:00:00'), (2, 4, 2, 'bucks', 499, 'expired', 0, '2026-07-01 00:00:00', '2026-06-01 00:00:00')`).run(future);
     live.close();
     return new Database(file, { readonly: true, fileMustExist: true });
@@ -60,32 +60,32 @@ function fabricateLive(file) {
     const bob = t.network.addUser(2);
     const dave = t.network.addUser(4);
     t.network.addUser(5);
-    const live = fabricateLive(path.join(t.dir, 'live-snapshot.db'));
+    const live = await fabricateLive(path.join(t.dir, 'live-snapshot.db'));
     const { importLive } = require('../server/importer/live');
     const { createIdentity } = require('../server/network');
     const identity = createIdentity(t.config);
-    const run = (opts = {}) => importLive(t.ctx, { live, resolveLiveUsers: identity.resolveLiveUsers, log: { log() {} }, ...opts });
-    const bal = (kind, owner) => { const { balance } = require('../server/ledger'); return balance(t.db, { kind, owner, currency: 'vibes-bits' }); };
-    const count = (table) => t.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+    const run = async (opts = {}) => await importLive(t.ctx, { live, resolveLiveUsers: identity.resolveLiveUsers, log: { log() {} }, ...opts });
+    const bal = async (kind, owner) => { const { balance } = require('../server/ledger'); return await balance(t.db, { kind, owner, currency: 'vibes-bits' }); };
+    const count = async (table) => (await t.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).n;
     console.log('import from live.db');
 
     await check('a dry run reports everything and keeps nothing but its report', async () => {
         const r = await run({ dryRun: true });
         assert.strictEqual(r.dry_run, true);
         assert.ok(r.new_transactions > 0);
-        assert.strictEqual(count('transactions'), 0);
-        assert.strictEqual(count('payment_intents'), 0);
-        assert.strictEqual(t.db.prepare('SELECT dry_run FROM import_runs').get().dry_run, 1);
+        assert.strictEqual(await count('transactions'), 0);
+        assert.strictEqual(await count('payment_intents'), 0);
+        assert.strictEqual((await t.db.prepare('SELECT dry_run FROM import_runs').get()).dry_run, 1);
     });
 
     let report;
     await check('opening balances equal the Live columns', async () => {
         report = await run();
-        assert.strictEqual(bal('user_credit', alice), 1500);
-        assert.strictEqual(bal('creator_payable', bob), 700);
-        assert.strictEqual(bal('payouts_pending', bob), 500, 'the escrowed cashout sits in payouts_pending');
-        assert.strictEqual(bal('user_credit', dave), 101);
-        assert.strictEqual(bal('user_credit', 'hold:live:3'), 250);
+        assert.strictEqual(await bal('user_credit', alice), 1500);
+        assert.strictEqual(await bal('creator_payable', bob), 700);
+        assert.strictEqual(await bal('payouts_pending', bob), 500, 'the escrowed cashout sits in payouts_pending');
+        assert.strictEqual(await bal('user_credit', dave), 101);
+        assert.strictEqual(await bal('user_credit', 'hold:live:3'), 250);
         assert.ok(t.network.resolveCalls.every((c) => c.system === 'live' && c.type === 'user'));
     });
 
@@ -93,35 +93,35 @@ function fabricateLive(file) {
         const adj = report.adjustments.map((a) => [a.live_user_id, a.account, a.replayed_history, a.live_column, a.adjustment]);
         assert.deepStrictEqual(adj.sort(), [[2, 'creator_payable', 300, 700, 400], [4, 'user_credit', 100, 101, 1]].sort());
         assert.ok(report.anomalies.some((a) => a.kind === 'fractional_balance' && a.live_user_id === 4));
-        assert.strictEqual(bal('import_adjustment', null), -401);
+        assert.strictEqual(await bal('import_adjustment', null), -401);
     });
 
     await check('unmapped users are held, never dropped', async () => {
         assert.deepStrictEqual(report.holds.map((h) => [h.live_user_id, h.credit_bits]), [[3, 250]]);
-        const hold = t.db.prepare('SELECT * FROM import_holds WHERE live_user_id = 3').get();
+        const hold = await t.db.prepare('SELECT * FROM import_holds WHERE live_user_id = 3').get();
         assert.strictEqual(hold.resolved_subject, null);
-        const i = t.db.prepare('SELECT subject FROM payment_intents WHERE legacy_order_id = 5').get();
+        const i = await t.db.prepare('SELECT subject FROM payment_intents WHERE legacy_order_id = 5').get();
         assert.strictEqual(i.subject, 'hold:live:3');
     });
 
     await check('history rows become import transactions; test-era rows are flagged test', async () => {
-        const txn = (id) => t.db.prepare('SELECT * FROM transactions WHERE idempotency_key = ?').get(`import:live:txn:${id}`);
-        assert.deepStrictEqual([txn(1).test, txn(2).test], [1, 0]);
-        assert.deepStrictEqual([txn(1).type, txn(1).status], ['import', 'imported']);
-        assert.strictEqual(txn(3).created_at, '2026-07-02T10:00:00.000Z');
+        const txn = async (id) => await t.db.prepare('SELECT * FROM transactions WHERE idempotency_key = ?').get(`import:live:txn:${id}`);
+        assert.deepStrictEqual([(await txn(1)).test, (await txn(2)).test], [1, 0]);
+        assert.deepStrictEqual([(await txn(1)).type, (await txn(1)).status], ['import', 'imported']);
+        assert.strictEqual((await txn(3)).created_at, '2026-07-02T10:00:00.000Z');
         assert.ok(report.unreplayable.some((u) => u.live_txn === 9));
-        const co = t.db.prepare('SELECT status, amount_bits FROM cashouts ORDER BY legacy_live_txn').all();
+        const co = await t.db.prepare('SELECT status, amount_bits FROM cashouts ORDER BY legacy_live_txn').all();
         assert.deepStrictEqual(co.map((c) => [c.status, c.amount_bits]), [['requested', 500], ['denied', 100]]);
     });
 
     await check('payment orders become intents and receipts; duplicate refs and route markers handled', async () => {
         assert.deepStrictEqual(report.duplicate_provider_refs.map((d) => [d.order, d.kept_on_order]), [[3, 2]]);
         assert.strictEqual(report.route_markers, 1);
-        const sub = t.db.prepare('SELECT * FROM payment_intents WHERE legacy_order_id = 4').get();
+        const sub = await t.db.prepare('SELECT * FROM payment_intents WHERE legacy_order_id = 4').get();
         assert.deepStrictEqual([sub.provider_ref, sub.route, sub.fee_cents, sub.auto_renew, sub.status], [null, 'site', 50, 1, 'settled']);
-        assert.strictEqual(t.db.prepare('SELECT status FROM payment_intents WHERE legacy_order_id = 3').get().status, 'expired');
+        assert.strictEqual((await t.db.prepare('SELECT status FROM payment_intents WHERE legacy_order_id = 3').get()).status, 'expired');
         assert.ok(report.anomalies.some((a) => a.kind === 'order_paid_not_credited' && a.order === 5));
-        assert.strictEqual(t.db.prepare("SELECT COUNT(*) AS n FROM provider_events WHERE type = 'live.payment_order'").get().n, 4);
+        assert.strictEqual((await t.db.prepare("SELECT COUNT(*) AS n FROM provider_events WHERE type = 'live.payment_order'").get()).n, 4);
     });
 
     await check('subscriptions become entitlements', async () => {
@@ -134,28 +134,28 @@ function fabricateLive(file) {
     });
 
     await check('the journal reconciles after import', async () => {
-        const rec = t.assertReconciled('after import');
+        const rec = await t.assertReconciled('after import');
         assert.strictEqual(rec.warnings.import_holds.length, 1);
         assert.ok(rec.totals.test_transactions >= 1);
     });
 
     await check('a re-run over the same snapshot changes nothing', async () => {
-        const before = { txns: count('transactions'), entries: count('ledger_entries'), intents: count('payment_intents'), subs: count('subscriptions'), ents: count('entitlements'), cashouts: count('cashouts') };
+        const before = { txns: await count('transactions'), entries: await count('ledger_entries'), intents: await count('payment_intents'), subs: await count('subscriptions'), ents: await count('entitlements'), cashouts: await count('cashouts') };
         const again = await run();
         assert.strictEqual(again.new_transactions, 0);
         assert.deepStrictEqual(again.adjustments, []);
-        assert.deepStrictEqual({ txns: count('transactions'), entries: count('ledger_entries'), intents: count('payment_intents'), subs: count('subscriptions'), ents: count('entitlements'), cashouts: count('cashouts') }, before);
-        assert.strictEqual(bal('creator_payable', bob), 700);
+        assert.deepStrictEqual({ txns: await count('transactions'), entries: await count('ledger_entries'), intents: await count('payment_intents'), subs: await count('subscriptions'), ents: await count('entitlements'), cashouts: await count('cashouts') }, before);
+        assert.strictEqual(await bal('creator_payable', bob), 700);
     });
 
     await check('a hold is released to the subject once the Network maps the user', async () => {
         const carol = t.network.addUser(3);
         const r = await run();
         assert.deepStrictEqual(r.holds, []);
-        assert.strictEqual(bal('user_credit', carol), 250);
-        assert.strictEqual(bal('user_credit', 'hold:live:3'), 0);
-        assert.strictEqual(t.db.prepare('SELECT resolved_subject FROM import_holds WHERE live_user_id = 3').get().resolved_subject, carol);
-        t.assertReconciled('after release');
+        assert.strictEqual(await bal('user_credit', carol), 250);
+        assert.strictEqual(await bal('user_credit', 'hold:live:3'), 0);
+        assert.strictEqual((await t.db.prepare('SELECT resolved_subject FROM import_holds WHERE live_user_id = 3').get()).resolved_subject, carol);
+        await t.assertReconciled('after release');
         assert.strictEqual((await run()).new_transactions, 0);
     });
 

@@ -36,8 +36,8 @@ function webhooksRouter({ ctx, adapters }) {
             let parsed;
             try { parsed = adapter.parse(req); } catch { return http.sendProblem(res, 400, 'webhook.malformed', { detail: 'unparseable payload', ctx: req.ov }); }
             if (!parsed.eventId) return http.sendProblem(res, 400, 'webhook.malformed', { detail: 'no event id', ctx: req.ov });
-            const { row, duplicate } = providers.store(ctx, adapter.name, parsed);
-            if (isFrozen(ctx.db)) return res.status(202).json({ received: true, queued: true, event: row.id, duplicate });
+            const { row, duplicate } = await providers.store(ctx, adapter.name, parsed);
+            if (await isFrozen(ctx.db)) return res.status(202).json({ received: true, queued: true, event: row.id, duplicate });
             const after = row.processed_at ? row : await providers.process(ctx, adapters, row);
             return res.status(200).json({ received: true, duplicate, event: after.id, processed: !!after.processed_at, result: after.result || null });
         } catch (e) {

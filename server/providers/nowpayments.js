@@ -45,7 +45,7 @@ function createNowpayments(cfg, { fetchImpl = globalThis.fetch } = {}) {
             return { effect: 'reverse', args: { kind: 'refund', provider: 'nowpayments', originalReceiptRef: `nowpayments:${b.payment_id}`, reversalRef: `nowpayments:refund:${b.payment_id}`, idempotencyKey: key, actor, reason: 'refunded' } };
         }
         if (!['finished', 'confirmed', 'sending'].includes(status)) return { effect: 'none', reason: `payment ${status}` };
-        const intent = intents.find(ctx.db, b.order_id);
+        const intent = await intents.find(ctx.db, b.order_id);
         if (!intent) return { effect: 'none', reason: 'payment without a Billing intent' };
         if (String(b.price_currency || 'usd').toLowerCase() !== 'usd' || b.price_amount == null) return { effect: 'none', reason: 'payment without a USD price', review: true };
         const receipt = { provider: 'nowpayments', receiptRef: `nowpayments:${b.payment_id}`, paidCents: Math.round(Number(b.price_amount) * 100) };

@@ -20,20 +20,20 @@ const { boot, fund, check, done } = require('./helpers/app');
     const creator = t.user(33);
     const second = t.user(34);
     console.log('actor limits');
-    const count = (table) => t.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+    const count = async (table) => (await t.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).n;
     const checkout = (subject, o = {}) => t.call('POST', '/api/v1/intents', { cap: ['billing.intent.create'], body: { provider: 'powerchat', kind: 'purchase', subject, bits: 500 }, ...o });
 
     await check('checkouts: 5 a minute per person, then 429 rate_limited with Retry-After; nothing is stored', async () => {
         for (let i = 0; i < 5; i++) assert.strictEqual((await checkout(fan)).status, 201, `checkout ${i + 1}`);
-        const before = count('payment_intents');
+        const before = await count('payment_intents');
         const r = await checkout(fan, { key: 'limits-retry-key-1' });
         assert.strictEqual(r.status, 429, r.text);
         assert.strictEqual(r.headers.get('retry-after'), '45');
         assert.strictEqual(r.headers.get('content-type'), 'application/problem+json');
         assert.deepStrictEqual([r.json.code, r.json.status, r.json.retry_after_seconds], ['rate_limited', 429, 45]);
         assert.ok(r.json.detail.includes('billing.intent.create'), r.json.detail);
-        assert.strictEqual(count('payment_intents'), before, 'no intent stored');
-        assert.strictEqual(t.db.prepare("SELECT COUNT(*) AS n FROM idempotency_keys WHERE key = 'limits-retry-key-1'").get().n, 0, 'the refusal is not an idempotent answer');
+        assert.strictEqual(await count('payment_intents'), before, 'no intent stored');
+        assert.strictEqual((await t.db.prepare("SELECT COUNT(*) AS n FROM idempotency_keys WHERE key = 'limits-retry-key-1'").get()).n, 0, 'the refusal is not an idempotent answer');
     });
 
     await check('counted per person, not per service: another service for the same person is refused, another person passes', async () => {
@@ -83,10 +83,10 @@ const { boot, fund, check, done } = require('./helpers/app');
         assert.strictEqual(tipSecond.status, 201, tipSecond.text);
         const cashout = (subject) => t.call('POST', '/api/v1/cashouts', { body: { subject, amount: 500, payout_method: { type: 'paypal', address: 'creator@example.com' } } });
         for (let i = 0; i < 3; i++) assert.strictEqual((await cashout(creator)).status, 201, `cashout ${i + 1}`);
-        const before = count('cashouts');
+        const before = await count('cashouts');
         const r = await cashout(creator);
         assert.deepStrictEqual([r.status, r.json.code], [429, 'rate_limited']);
-        assert.strictEqual(count('cashouts'), before, 'nothing escrowed');
+        assert.strictEqual(await count('cashouts'), before, 'nothing escrowed');
         const ok = await cashout(second);
         assert.strictEqual(ok.status, 201, ok.text);
     });
@@ -120,7 +120,7 @@ const { boot, fund, check, done } = require('./helpers/app');
         for (const [name, n] of [['billing.intent.create', 2], ['billing.transfer.create', 1], ['billing.transfer.refund', 1], ['billing.cashout.request', 1], ['billing.history.read', 1]]) {
             assert.ok(new RegExp(`billing_rate_limited_total\\{limit="${name.replace(/\./g, '\\.')}",window="minute"\\} ${n}`).test(m), `${name}:\n${lines}`);
         }
-        t.assertReconciled('after the refusals');
+        await t.assertReconciled('after the refusals');
     });
 
     await t.close();

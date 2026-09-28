@@ -17,7 +17,7 @@
  *   }
  *
  * OpenVibe.Tips consumes it (the chat line through Live's /internal/tips/deliveries, the overlay
- * alert, goal progress). Written to the outbox in the same SQLite transaction that marks the
+ * alert, goal progress). Written to the outbox in the same transaction that marks the
  * provider event processed.
  *
  * Announced at most once per payment: external_receipts is keyed by receipt_ref, so a redelivery
@@ -35,32 +35,32 @@ const { MAX_RECEIPT_CENTS, fail, userSubject } = require('./common');
 const EVENT_TYPE = 'billing.receipt.external';
 
 /** The creator a provider account belongs to, by account id, then by (lower-case) username. */
-function accountSubject(db, provider, { id, username } = {}) {
+async function accountSubject(db, provider, { id, username } = {}) {
     if (id != null && id !== '') {
-        const r = db.prepare('SELECT subject FROM provider_accounts WHERE provider = ? AND account_id = ?').get(provider, String(id));
+        const r = await db.prepare('SELECT subject FROM provider_accounts WHERE provider = ? AND account_id = ?').get(provider, String(id));
         if (r) return r.subject;
     }
     const name = String(username || '').trim().toLowerCase();
     if (!name) return null;
-    const r = db.prepare('SELECT subject FROM provider_accounts WHERE provider = ? AND username = ?').get(provider, name);
+    const r = await db.prepare('SELECT subject FROM provider_accounts WHERE provider = ? AND username = ?').get(provider, name);
     return r ? r.subject : null;
 }
 
 const USERNAME_RE = /^[a-z0-9_.-]{1,64}$/;
 
 /** Add or correct a mapping (operator or importer). Returns the stored row. */
-function mapAccount(ctx, { provider, username, accountId, subject, source, liveUserId }) {
+async function mapAccount(ctx, { provider, username, accountId, subject, source, liveUserId }) {
     const { db } = ctx;
     const name = String(username || '').trim().toLowerCase();
     if (!USERNAME_RE.test(name)) fail(422, 'billing.invalid_input', 'username must be the provider account name (letters, digits, _ . -)');
     const owner = userSubject(subject, 'subject');
     const at = iso(ctx.now());
-    db.prepare(`INSERT INTO provider_accounts (provider, username, account_id, subject, source, live_user_id, created_at, updated_at)
+    await db.prepare(`INSERT INTO provider_accounts (provider, username, account_id, subject, source, live_user_id, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (provider, username) DO UPDATE SET account_id = COALESCE(excluded.account_id, account_id), subject = excluded.subject,
-            source = excluded.source, live_user_id = COALESCE(excluded.live_user_id, live_user_id), updated_at = excluded.updated_at`)
+        ON CONFLICT (provider, username) DO UPDATE SET account_id = COALESCE(excluded.account_id, provider_accounts.account_id), subject = excluded.subject,
+            source = excluded.source, live_user_id = COALESCE(excluded.live_user_id, provider_accounts.live_user_id), updated_at = excluded.updated_at`)
         .run(provider, name, accountId != null && accountId !== '' ? String(accountId).slice(0, 100) : null, owner, source, liveUserId || null, at, at);
-    return db.prepare('SELECT * FROM provider_accounts WHERE provider = ? AND username = ?').get(provider, name);
+    return await db.prepare('SELECT * FROM provider_accounts WHERE provider = ? AND username = ?').get(provider, name);
 }
 
 /**
@@ -68,21 +68,21 @@ function mapAccount(ctx, { provider, username, accountId, subject, source, liveU
  * sourceEventId, account: { id, username }, streamer?, amountCents, donorName, anonymous, message,
  * appRef, appPurpose, occurredAt, test }. Returns the provider event result.
  */
-function record(ctx, input) {
+async function record(ctx, input) {
     const { db, config, rates } = ctx;
     const cents = Number(input.amountCents);
     if (cents === 0) return { effect: 'none', reason: 'EXTERNAL: a zero-amount tip on the streamer\'s own PowerChat — nothing to record' };
     if (!Number.isSafeInteger(cents) || cents < 1 || cents > MAX_RECEIPT_CENTS) {
         return { effect: 'none', review: true, reason: `EXTERNAL tip with an amount outside 1..${MAX_RECEIPT_CENTS} cents (${String(input.amountCents).slice(0, 40)}) — not recorded, held for review` };
     }
-    const prev = db.prepare('SELECT * FROM external_receipts WHERE receipt_ref = ?').get(input.receiptRef);
+    const prev = await db.prepare('SELECT * FROM external_receipts WHERE receipt_ref = ?').get(input.receiptRef);
     if (prev && prev.status === 'announced') {
         return { effect: 'duplicate_receipt', external: true, announced: false, reason: `payment ${input.receiptRef} was already announced (provider event ${prev.provider_event})` };
     }
     const username = String((input.account && input.account.username) || '').trim().toLowerCase() || null;
     // The creator: named by the caller (a direct-subscription intent already verified the account),
     // else whoever the receiving account is mapped to.
-    const streamer = input.streamer || accountSubject(db, input.provider, input.account || {});
+    const streamer = input.streamer || await accountSubject(db, input.provider, input.account || {});
     let reason = null;
     let review = false;
     if (config.authority !== 'billing') {
@@ -96,7 +96,7 @@ function record(ctx, input) {
     let env = null;
     if (!reason) {
         const anonymous = !!input.anonymous;
-        env = enqueue(ctx, {
+        env = await enqueue(ctx, {
             event_type: EVENT_TYPE,
             subject: { type: 'provider_receipt', id: input.receiptRef },
             payload: {
@@ -123,10 +123,10 @@ function record(ctx, input) {
     }
     const status = env ? 'announced' : 'not_announced';
     if (prev) {
-        db.prepare('UPDATE external_receipts SET status = ?, reason = ?, event_id = ?, streamer_subject = ?, updated_at = ? WHERE receipt_ref = ?')
+        await db.prepare('UPDATE external_receipts SET status = ?, reason = ?, event_id = ?, streamer_subject = ?, updated_at = ? WHERE receipt_ref = ?')
             .run(status, reason, env ? env.event_id : null, streamer, at, input.receiptRef);
     } else {
-        db.prepare(`INSERT INTO external_receipts (receipt_ref, provider, provider_event, receiving_account, streamer_subject, amount_cents, test, status, reason, event_id, created_at, updated_at)
+        await db.prepare(`INSERT INTO external_receipts (receipt_ref, provider, provider_event, receiving_account, streamer_subject, amount_cents, test, status, reason, event_id, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
             .run(input.receiptRef, input.provider, input.sourceEventId, username, streamer, cents, input.test ? 1 : 0, status, reason, env ? env.event_id : null, at, at);
     }

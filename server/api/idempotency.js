@@ -24,14 +24,14 @@ function stable(v) {
 }
 
 function idempotent(db, now) {
-    return function idempotencyKey(req, res, next) {
+    return async function idempotencyKey(req, res, next) {
         const key = req.get('Idempotency-Key');
         if (!key || !KEY_RE.test(key)) {
             return http.sendProblem(res, 400, 'idempotency.key_required', { detail: 'mutating calls need an Idempotency-Key header (8-200 of A-Z a-z 0-9 . _ : -)', ctx: req.ov });
         }
         const scoped = `${req.principal.sub}:${key}`;
         const hash = crypto.createHash('sha256').update(`${req.method} ${req.baseUrl}${req.path}\n${stable(req.body || {})}`).digest('hex');
-        const row = db.prepare('SELECT * FROM idempotency_keys WHERE key = ?').get(scoped);
+        const row = await db.prepare('SELECT * FROM idempotency_keys WHERE key = ?').get(scoped);
         if (row) {
             if (row.request_hash !== hash) {
                 return http.sendProblem(res, 422, 'idempotency.key_reused', { detail: 'this Idempotency-Key was used for a different request', ctx: req.ov });
@@ -41,12 +41,12 @@ function idempotent(db, now) {
         }
         req.idempotencyKey = `api:${scoped}`;
         const json = res.json.bind(res);
-        res.json = (body) => {
+        res.json = async (body) => {
             if (res.statusCode >= 200 && res.statusCode < 300) {
-                db.prepare('INSERT OR IGNORE INTO idempotency_keys (key, request_hash, method, path, status, response, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+                await db.prepare('INSERT INTO idempotency_keys (key, request_hash, method, path, status, response, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING')
                     .run(scoped, hash, req.method, `${req.baseUrl}${req.path}`, res.statusCode, JSON.stringify(body), new Date(now()).toISOString());
             }
-            return json(body);
+            return await json(body);
         };
         return next();
     };

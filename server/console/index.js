@@ -26,12 +26,12 @@
  * and each route names the one capability it needs. Every change goes through the same functions
  * the API calls (server/ops/*, reconcile.js, providers.reprocess/processPending) with the same
  * freeze guard; nothing here moves money on its own. Each staff action writes one staff_audit row
- * and one billing.staff.action outbox event, in the same SQLite transaction as its effect.
+ * and one billing.staff.action outbox event, in the same transaction as its effect.
  */
 const crypto = require('crypto');
 const express = require('express');
 const { capabilities, staff: staffMap } = require('openvibe-contracts');
-const { BillingError, balance } = require('../ledger');
+const { BillingError, balance, money } = require('../ledger');
 const { A, assertNotFrozen, isFrozen, text } = require('../ops/common');
 const cashouts = require('../ops/cashouts');
 const admin = require('../ops/admin');
@@ -108,11 +108,11 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
     const requestId = (req) => (req.ov ? req.ov.requestId : null);
     const trace = (req) => (req.ov ? req.ov.traceId : undefined);
     const actorOf = (req) => ({ principal: req.staff.subject, via: 'staff-console', username: req.staff.username || undefined, request_id: requestId(req) });
-    const record = (req, fields) => audit.record(ctx, {
+    const record = async (req, fields) => await audit.record(ctx, {
         actor: req.staff ? { subject: req.staff.subject, username: req.staff.username } : fields.actor,
         requestId: requestId(req), ipHash: ipHash(req), traceId: trace(req), ...fields,
     });
-    const common = (req) => ({ staff: req.staff, csrf: req.staff ? req.staff.csrf : '', frozen: isFrozen(db) });
+    const common = async (req) => ({ staff: req.staff, csrf: req.staff ? req.staff.csrf : '', frozen: await isFrozen(db) });
 
     // ── Every console response ───────────────────────────────
     r.use((req, res, next) => {
@@ -128,14 +128,14 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
     r.use(express.urlencoded({ extended: false, limit: '16kb', parameterLimit: 50 }));
 
     // ── Session → req.staff ──────────────────────────────────
-    r.use((req, res, next) => {
+    r.use(async (req, res, next) => {
         req.staff = null;
-        const row = sessions.read(req);
+        const row = await sessions.read(req);
         if (!row) return next();
         if (!cc.staffSubjects.includes(row.subject) || !staffMap.can(row.role || 'user', cc.staffCapability)) {
-            sessions.revoke(row);
+            await sessions.revoke(row);
             sessions.clear(res);
-            audit.record(ctx, { actor: { subject: row.subject, username: row.username }, action: 'session.use', outcome: 'refused', reason: cc.staffSubjects.includes(row.subject) ? `the session's role does not hold ${cc.staffCapability}` : 'no longer listed in BILLING_STAFF_SUBJECTS', requestId: requestId(req), ipHash: ipHash(req) });
+            await audit.record(ctx, { actor: { subject: row.subject, username: row.username }, action: 'session.use', outcome: 'refused', reason: cc.staffSubjects.includes(row.subject) ? `the session's role does not hold ${cc.staffCapability}` : 'no longer listed in BILLING_STAFF_SUBJECTS', requestId: requestId(req), ipHash: ipHash(req) });
             return send(res, 403, pages.message({ title: 'Not authorized', text: 'Your account is no longer Billing staff. The session was ended.' }));
         }
         req.staff = { subject: row.subject, username: row.username, role: row.role, csrf: row.csrf, session: row, principal: { sub: row.subject, cap: STAFF_CAPABILITIES } };
@@ -144,17 +144,17 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
 
     /** Staff only, holding `cap` through the staff mapping. POSTs also need the CSRF token. */
     function needs(cap) {
-        return (req, res, next) => {
+        return async (req, res, next) => {
             if (!req.staff) {
                 if (req.method === 'GET') return send(res, 401, pages.signIn({ next: sanitizeNext(req.originalUrl) }));
                 return send(res, 401, pages.signIn({ message: 'Your session has ended. Sign in again, then repeat the action.' }));
             }
             if (!capabilities.grants(req.staff.principal.cap, cap)) {
-                return send(res, 403, pages.message({ title: 'Not authorized', text: `This needs ${cap}.`, ...common(req) }));
+                return send(res, 403, pages.message({ title: 'Not authorized', text: `This needs ${cap}.`, ...await common(req) }));
             }
             if (req.method === 'POST' && !csrfOk(req)) {
-                record(req, { action: 'request.csrf', outcome: 'refused', reason: 'missing or invalid CSRF token / cross-site request', detail: { path: req.path } });
-                return send(res, 403, pages.message({ title: 'Request refused', text: 'The form was stale or came from another site. Reload the page and try again.', ...common(req) }));
+                await record(req, { action: 'request.csrf', outcome: 'refused', reason: 'missing or invalid CSRF token / cross-site request', detail: { path: req.path } });
+                return send(res, 403, pages.message({ title: 'Request refused', text: 'The form was stale or came from another site. Reload the page and try again.', ...await common(req) }));
             }
             return next();
         };
@@ -166,9 +166,9 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
         if (origin && origin !== baseOrigin) return false;
         return sameString((req.body || {})._csrf, req.staff.csrf);
     }
-    const wrap = (fn) => (req, res, next) => Promise.resolve().then(() => fn(req, res, next)).catch((e) => {
+    const wrap = (fn) => (req, res, next) => Promise.resolve().then(async () => await fn(req, res, next)).catch(async (e) => {
         log.error('[Billing] console error:', e);
-        if (!res.headersSent) send(res, 500, pages.message({ title: 'Error', text: 'Something went wrong. Nothing was changed unless the page says so; check the audit log.', ...common(req) }));
+        if (!res.headersSent) send(res, 500, pages.message({ title: 'Error', text: 'Something went wrong. Nothing was changed unless the page says so; check the audit log.', ...await common(req) }));
     });
     const actionKey = (v) => (ACTION_KEY_RE.test(String(v || '')) ? String(v) : null);
     const doneNotice = (req) => NOTICES[req.query.done] ? `${NOTICES[req.query.done]}${req.query.processed ? ` ${Number(req.query.processed) || 0} held webhook(s) processed.` : ''}` : null;
@@ -198,63 +198,63 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
         }
         const listed = !!who.subject && cc.staffSubjects.includes(who.subject);
         if (!listed || !who.money) {
-            audit.record(ctx, {
+            await audit.record(ctx, {
                 actor: { subject: who.subject, username: who.username }, action: 'session.sign_in', outcome: 'refused',
                 reason: !who.subject ? 'token carries no subject' : !who.money ? `the token does not hold ${cc.staffCapability} (role ${who.role || 'none'})` : 'not listed in BILLING_STAFF_SUBJECTS',
                 requestId: requestId(req), ipHash: ipHash(req),
             });
             return send(res, 403, pages.message({ title: 'Not authorized', text: 'This console is only for OpenVibe.Network admins who are Billing staff. Your sign-in was recorded.' }));
         }
-        db.transaction(() => {
-            sessions.create(res, { subject: who.subject, username: who.username, role: who.role, ip: req.ip });
-            audit.record(ctx, { actor: { subject: who.subject, username: who.username }, action: 'session.sign_in', requestId: requestId(req), ipHash: ipHash(req), traceId: trace(req) });
-        })();
+        await money(db, async () => {
+            await sessions.create(res, { subject: who.subject, username: who.username, role: who.role, ip: req.ip });
+            await audit.record(ctx, { actor: { subject: who.subject, username: who.username }, action: 'session.sign_in', requestId: requestId(req), ipHash: ipHash(req), traceId: trace(req) });
+        });
         return res.redirect(303, flow.n || '/');
     }));
 
-    r.post('/auth/logout', needs(CAP.cashoutManage), (req, res) => {
-        db.transaction(() => {
-            sessions.revoke(req.staff.session);
-            record(req, { action: 'session.sign_out' });
-        })();
+    r.post('/auth/logout', needs(CAP.cashoutManage), async (req, res) => {
+        await money(db, async () => {
+            await sessions.revoke(req.staff.session);
+            await record(req, { action: 'session.sign_out' });
+        });
         sessions.clear(res);
         res.redirect(303, '/');
     });
 
     // ── Dashboard ────────────────────────────────────────────
-    r.get('/', (req, res) => {
+    r.get('/', async (req, res) => {
         if (!req.staff) return send(res, 200, pages.signIn({}));
         return send(res, 200, pages.dashboard({
-            ...common(req), freeze: admin.freezeState(db), last: q.lastReconciliation(db), totals: q.outstanding(db),
-            counts: q.counts(db, ctx.now()), rates: ctx.rates,
+            ...await common(req), freeze: await admin.freezeState(db), last: await q.lastReconciliation(db), totals: await q.outstanding(db),
+            counts: await q.counts(db, ctx.now()), rates: ctx.rates,
         }));
     });
 
     // ── Cashouts ─────────────────────────────────────────────
-    r.get('/cashouts', needs(CAP.cashoutManage), (req, res) => {
+    r.get('/cashouts', needs(CAP.cashoutManage), async (req, res) => {
         const tab = q.CASHOUT_TABS[req.query.tab] ? req.query.tab : 'ready';
-        send(res, 200, pages.cashouts({ ...common(req), tab, tabs: q.CASHOUT_TABS, rows: q.cashoutQueue(db, tab, ctx.now()), counts: q.counts(db, ctx.now()), nowMs: ctx.now(), rates: ctx.rates }));
+        send(res, 200, pages.cashouts({ ...await common(req), tab, tabs: q.CASHOUT_TABS, rows: await q.cashoutQueue(db, tab, ctx.now()), counts: await q.counts(db, ctx.now()), nowMs: ctx.now(), rates: ctx.rates }));
     });
 
-    function cashoutPage(req, res, status, c, extra = {}) {
+    async function cashoutPage(req, res, status, c, extra = {}) {
         return send(res, status, pages.cashout({
-            ...common(req), c, nowMs: ctx.now(), approveKey: random(18), denyKey: random(18),
-            balances: { payable: balance(db, A.payable(c.subject)), pending: balance(db, A.pending(c.subject)) },
-            history: db.prepare("SELECT * FROM staff_audit WHERE target_type = 'cashout' AND target_id = ? ORDER BY seq DESC LIMIT 50").all(c.id).map((x) => ({ ...x, detail: JSON.parse(x.detail) })),
+            ...await common(req), c, nowMs: ctx.now(), approveKey: random(18), denyKey: random(18),
+            balances: { payable: await balance(db, A.payable(c.subject)), pending: await balance(db, A.pending(c.subject)) },
+            history: (await db.prepare("SELECT * FROM staff_audit WHERE target_type = 'cashout' AND target_id = ? ORDER BY seq DESC LIMIT 50").all(c.id)).map((x) => ({ ...x, detail: JSON.parse(x.detail) })),
             notice: doneNotice(req), ...extra,
         }));
     }
-    r.get('/cashouts/:id', needs(CAP.cashoutManage), (req, res) => {
-        const c = cashouts.find(db, req.params.id);
-        if (!c) return send(res, 404, pages.message({ title: 'Not found', text: `No cashout ${req.params.id}.`, ...common(req) }));
-        return cashoutPage(req, res, 200, c);
+    r.get('/cashouts/:id', needs(CAP.cashoutManage), async (req, res) => {
+        const c = await cashouts.find(db, req.params.id);
+        if (!c) return send(res, 404, pages.message({ title: 'Not found', text: `No cashout ${req.params.id}.`, ...await common(req) }));
+        return await cashoutPage(req, res, 200, c);
     });
 
     /** Run a cashout decision through ops; audit once (not on a replay); refusals audited as refused. */
     function decide(action, run, validate) {
-        return (req, res) => {
-            const c = cashouts.find(db, req.params.id);
-            if (!c) return send(res, 404, pages.message({ title: 'Not found', text: `No cashout ${req.params.id}.`, ...common(req) }));
+        return async (req, res) => {
+            const c = await cashouts.find(db, req.params.id);
+            if (!c) return send(res, 404, pages.message({ title: 'Not found', text: `No cashout ${req.params.id}.`, ...await common(req) }));
             const b = req.body || {};
             const target = { type: 'cashout', id: c.id };
             const form = { payout_reference: String(b.payout_reference || '').trim().slice(0, 200), payout_provider: String(b.payout_provider || '').slice(0, 20), reason: String(b.reason || '').slice(0, 300) };
@@ -262,11 +262,11 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
                 const key = actionKey(b.action_key);
                 if (!key) throw new BillingError(422, 'console.stale_form', 'the form is missing its action key; reload the page');
                 if (validate) validate(b);
-                const out = db.transaction(() => {
-                    assertNotFrozen(ctx);          // the API's notFrozen guard
-                    const o = run(req, c, b, `staff:${action}:${key}`);
+                const out = await money(db, async () => {
+                    await assertNotFrozen(ctx);          // the API's notFrozen guard
+                    const o = await run(req, c, b, `staff:${action}:${key}`);
                     if (!o.replay) {
-                        record(req, {
+                        await record(req, {
                             action, target, reason: action === 'cashout.deny' ? form.reason : null,
                             detail: action === 'cashout.approve'
                                 ? { payout_reference: o.cashout.payout_reference, payout_provider: o.cashout.payout_provider, amount_bits: c.amount_bits, value_cents: c.value_cents, txn: o.cashout.settle_txn }
@@ -274,95 +274,95 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
                         });
                     }
                     return o;
-                })();
+                });
                 const done = action === 'cashout.approve' ? (out.replay ? 'already_paid' : 'approved') : (out.replay ? 'already_denied' : 'denied');
                 return res.redirect(303, `/cashouts/${encodeURIComponent(c.id)}?done=${done}`);
             } catch (e) {
                 if (!(e instanceof BillingError)) throw e;
-                record(req, { action, target, outcome: 'refused', reason: action === 'cashout.deny' ? form.reason || null : null, detail: { code: e.code } });
-                return cashoutPage(req, res, e.status, cashouts.find(db, c.id), { error: `${e.detail || e.message} (${e.code})`, form });
+                await record(req, { action, target, outcome: 'refused', reason: action === 'cashout.deny' ? form.reason || null : null, detail: { code: e.code } });
+                return await cashoutPage(req, res, e.status, await cashouts.find(db, c.id), { error: `${e.detail || e.message} (${e.code})`, form });
             }
         };
     }
 
-    r.post('/cashouts/:id/approve', needs(CAP.cashoutManage), wrap(decide('cashout.approve', (req, c, b, key) => {
+    r.post('/cashouts/:id/approve', needs(CAP.cashoutManage), wrap(decide('cashout.approve', async (req, c, b, key) => {
         const provider = String(b.payout_provider || 'paypal').toLowerCase();
-        return cashouts.approve(ctx, { id: c.id, payout_reference: b.payout_reference, payout_provider: provider, idempotencyKey: key, actor: actorOf(req) });
+        return await cashouts.approve(ctx, { id: c.id, payout_reference: b.payout_reference, payout_provider: provider, idempotencyKey: key, actor: actorOf(req) });
     }, (b) => {
         if (!text(b.payout_reference, 'payout_reference', 200)) throw new BillingError(422, 'billing.payout_reference_required', 'approving a payout needs the payout reference from the provider');
         if (!PAYOUT_PROVIDERS.includes(String(b.payout_provider || 'paypal').toLowerCase())) throw new BillingError(422, 'billing.invalid_input', `payout provider must be one of ${PAYOUT_PROVIDERS.join(', ')}`);
         if (b.confirm !== 'yes') throw new BillingError(422, 'console.confirm_required', 'tick the confirmation that the payout was sent');
     })));
 
-    r.post('/cashouts/:id/deny', needs(CAP.cashoutManage), wrap(decide('cashout.deny', (req, c, b, key) => (
-        cashouts.deny(ctx, { id: c.id, reason: b.reason, idempotencyKey: key, actor: actorOf(req) })
+    r.post('/cashouts/:id/deny', needs(CAP.cashoutManage), wrap(decide('cashout.deny', async (req, c, b, key) => (
+        await cashouts.deny(ctx, { id: c.id, reason: b.reason, idempotencyKey: key, actor: actorOf(req) })
     ), (b) => {
         if (!text(b.reason, 'reason', 300)) throw new BillingError(422, 'console.reason_required', 'a denial needs a reason');
     })));
 
     // ── Receipts needing review ──────────────────────────────
-    r.get('/receipts', needs(CAP.admin), (req, res) => send(res, 200, pages.receipts({ ...common(req), q: q.reviewQueue(db), notice: doneNotice(req) })));
+    r.get('/receipts', needs(CAP.admin), async (req, res) => send(res, 200, pages.receipts({ ...await common(req), q: await q.reviewQueue(db), notice: doneNotice(req) })));
     r.post('/receipts/:id/reprocess', needs(CAP.admin), wrap(async (req, res) => {
         const id = Number(req.params.id);
         const target = { type: 'provider_event', id: req.params.id };
         try {
             if (!Number.isInteger(id) || id <= 0) throw new BillingError(404, 'billing.event_not_found', `no provider event ${req.params.id}`);
-            assertNotFrozen(ctx);
+            await assertNotFrozen(ctx);
             const row = await providers.reprocess(ctx, adapters, id);
-            record(req, { action: 'provider_event.reprocess', target, detail: { processed: !!row.processed_at, effect: row.result ? row.result.effect : null, code: row.result && row.result.code ? row.result.code : undefined } });
+            await record(req, { action: 'provider_event.reprocess', target, detail: { processed: !!row.processed_at, effect: row.result ? row.result.effect : null, code: row.result && row.result.code ? row.result.code : undefined } });
             return res.redirect(303, '/receipts?done=reprocessed');
         } catch (e) {
             if (!(e instanceof BillingError)) throw e;
-            record(req, { action: 'provider_event.reprocess', target, outcome: 'refused', detail: { code: e.code } });
-            return send(res, e.status, pages.receipts({ ...common(req), q: q.reviewQueue(db), error: `${e.detail || e.message} (${e.code})` }));
+            await record(req, { action: 'provider_event.reprocess', target, outcome: 'refused', detail: { code: e.code } });
+            return send(res, e.status, pages.receipts({ ...await common(req), q: await q.reviewQueue(db), error: `${e.detail || e.message} (${e.code})` }));
         }
     }));
 
-    r.get('/import-holds', needs(CAP.admin), (req, res) => send(res, 200, pages.holds({ ...common(req), rows: q.importHolds(db) })));
+    r.get('/import-holds', needs(CAP.admin), async (req, res) => send(res, 200, pages.holds({ ...await common(req), rows: await q.importHolds(db) })));
 
     // ── Reconciliation ───────────────────────────────────────
-    r.get('/reconciliation', needs(CAP.admin), (req, res) => send(res, 200, pages.reconciliation({ ...common(req), runs: q.reconciliationRuns(db), notice: doneNotice(req) })));
-    r.get('/reconciliation/:id', needs(CAP.admin), (req, res) => {
-        const run = q.reconciliationRun(db, req.params.id);
-        if (!run) return send(res, 404, pages.message({ title: 'Not found', text: `No reconciliation run ${req.params.id}.`, ...common(req) }));
-        return send(res, 200, pages.reconciliationRun({ ...common(req), run }));
+    r.get('/reconciliation', needs(CAP.admin), async (req, res) => send(res, 200, pages.reconciliation({ ...await common(req), runs: await q.reconciliationRuns(db), notice: doneNotice(req) })));
+    r.get('/reconciliation/:id', needs(CAP.admin), async (req, res) => {
+        const run = await q.reconciliationRun(db, req.params.id);
+        if (!run) return send(res, 404, pages.message({ title: 'Not found', text: `No reconciliation run ${req.params.id}.`, ...await common(req) }));
+        return send(res, 200, pages.reconciliationRun({ ...await common(req), run }));
     });
-    r.post('/reconciliation', needs(CAP.admin), (req, res) => {
-        const report = db.transaction(() => {
-            const rep = reconcile(ctx, { trigger: 'console' });
-            record(req, { action: 'reconciliation.run', target: { type: 'reconciliation_run', id: rep.id }, detail: { ok: rep.ok, failed: rep.checks.filter((c) => !c.ok).map((c) => c.id) } });
+    r.post('/reconciliation', needs(CAP.admin), async (req, res) => {
+        const report = await money(db, async () => {
+            const rep = await reconcile(ctx, { trigger: 'console' });
+            await record(req, { action: 'reconciliation.run', target: { type: 'reconciliation_run', id: rep.id }, detail: { ok: rep.ok, failed: rep.checks.filter((c) => !c.ok).map((c) => c.id) } });
             return rep;
-        })();
+        });
         res.redirect(303, `/reconciliation/${encodeURIComponent(report.id)}`);
     });
 
     // ── Freeze ───────────────────────────────────────────────
-    const heldCount = () => db.prepare('SELECT COUNT(*) AS n FROM provider_events WHERE processed_at IS NULL').get().n;
-    r.get('/freeze', needs(CAP.admin), (req, res) => send(res, 200, pages.freeze({ ...common(req), state: admin.freezeState(db), held: heldCount(), notice: doneNotice(req) })));
+    const heldCount = async () => (await db.prepare('SELECT COUNT(*) AS n FROM provider_events WHERE processed_at IS NULL').get()).n;
+    r.get('/freeze', needs(CAP.admin), async (req, res) => send(res, 200, pages.freeze({ ...await common(req), state: await admin.freezeState(db), held: await heldCount(), notice: doneNotice(req) })));
     r.post('/freeze', needs(CAP.admin), wrap(async (req, res) => {
         const b = req.body || {};
         const on = b.on === '1';
         const action = on ? 'economy.freeze' : 'economy.unfreeze';
         const target = { type: 'settings', id: 'freeze' };
-        const refuse = (status, code, detail) => {
-            record(req, { action, target, outcome: 'refused', reason: b.reason ? String(b.reason).slice(0, 300) : null, detail: { code } });
-            return send(res, status, pages.freeze({ ...common(req), state: admin.freezeState(db), held: heldCount(), error: detail }));
+        const refuse = async (status, code, detail) => {
+            await record(req, { action, target, outcome: 'refused', reason: b.reason ? String(b.reason).slice(0, 300) : null, detail: { code } });
+            return send(res, status, pages.freeze({ ...await common(req), state: await admin.freezeState(db), held: await heldCount(), error: detail }));
         };
-        if (b.on !== '1' && b.on !== '0') return refuse(422, 'billing.invalid_input', 'on must be 1 or 0');
+        if (b.on !== '1' && b.on !== '0') return await refuse(422, 'billing.invalid_input', 'on must be 1 or 0');
         let reason;
-        try { reason = text(b.reason, 'reason', 300); } catch (e) { return refuse(422, e.code, e.detail); }
-        if (!reason) return refuse(422, 'console.reason_required', `${on ? 'Freezing' : 'Unfreezing'} needs a reason.`);
-        if (isFrozen(db) === on) return refuse(409, 'console.no_change', `The economy is already ${on ? 'frozen' : 'open'}.`);
-        db.transaction(() => {
-            admin.setFreeze(ctx, { on, reason, actor: actorOf(req) });
-            record(req, { action, target, reason });
-        })();
+        try { reason = text(b.reason, 'reason', 300); } catch (e) { return await refuse(422, e.code, e.detail); }
+        if (!reason) return await refuse(422, 'console.reason_required', `${on ? 'Freezing' : 'Unfreezing'} needs a reason.`);
+        if (await isFrozen(db) === on) return await refuse(409, 'console.no_change', `The economy is already ${on ? 'frozen' : 'open'}.`);
+        await money(db, async () => {
+            await admin.setFreeze(ctx, { on, reason, actor: actorOf(req) });
+            await record(req, { action, target, reason });
+        });
         // As POST /api/v1/admin/freeze: deliveries stored while frozen are processed now, in order.
         const drained = on ? null : await providers.processPending(ctx, adapters);
         return res.redirect(303, `/freeze?done=${on ? 'frozen' : 'unfrozen'}${drained ? `&processed=${drained.processed || 0}` : ''}`);
     }));
 
-    r.get('/audit', needs(CAP.admin), (req, res) => send(res, 200, pages.audit({ ...common(req), rows: audit.list(db) })));
+    r.get('/audit', needs(CAP.admin), async (req, res) => send(res, 200, pages.audit({ ...await common(req), rows: await audit.list(db) })));
 
     return r;
 }

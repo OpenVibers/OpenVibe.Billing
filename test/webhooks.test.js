@@ -20,14 +20,14 @@ const { boot, check, done } = require('./helpers/app');
         return r.json.intent;
     };
     const donation = (data, streamerName = 'openvibe') => ({ type: 'donation.completed', streamer: { id: 'pc1', username: streamerName }, data: { eventId: `don-${Math.random().toString(36).slice(2)}`, ...data } });
-    const eventCount = () => t.db.prepare('SELECT COUNT(*) AS n FROM provider_events').get().n;
+    const eventCount = async () => (await t.db.prepare('SELECT COUNT(*) AS n FROM provider_events').get()).n;
 
     await check('an unsigned or stale delivery is refused and not stored', async () => {
         const bad = await t.powerchat(donation({ amountUsdCents: 100 }), { secret: 'wrong' });
         assert.strictEqual(bad.status, 401);
         const stale = await t.powerchat(donation({ amountUsdCents: 100 }), { ts: Date.now() - 16 * 60 * 1000 });
         assert.strictEqual(stale.status, 401);
-        assert.strictEqual(eventCount(), 0);
+        assert.strictEqual(await eventCount(), 0);
     });
 
     let buyIntent;
@@ -41,7 +41,7 @@ const { boot, check, done } = require('./helpers/app');
         assert.strictEqual((await t.balances(buyer.id)).credit, 1000);
         const i = await t.call('GET', `/api/v1/intents/${buyIntent.id}`);
         assert.strictEqual(i.json.intent.status, 'settled');
-        t.assertReconciled('after pcorder');
+        await t.assertReconciled('after pcorder');
     });
 
     await check('a duplicated delivery produces exactly one accounting effect', async () => {
@@ -51,8 +51,8 @@ const { boot, check, done } = require('./helpers/app');
         const redelivered = await t.powerchat(donation({ eventId: 'don-A', amountUsdCents: 1300, appExternalRef: buyIntent.checkout_ref }), { deliveryId: 'dlv-A-retry' });
         assert.strictEqual(redelivered.json.result.effect, 'duplicate_receipt');
         assert.strictEqual((await t.balances(buyer.id)).credit, 1000);
-        assert.strictEqual(t.db.prepare("SELECT COUNT(*) AS n FROM transactions WHERE receipt_ref = 'powerchat:don-A'").get().n, 1);
-        t.assertReconciled('after duplicates');
+        assert.strictEqual((await t.db.prepare("SELECT COUNT(*) AS n FROM transactions WHERE receipt_ref = 'powerchat:don-A'").get()).n, 1);
+        await t.assertReconciled('after duplicates');
     });
 
     await check('test deliveries and app echoes move no money', async () => {
@@ -72,10 +72,10 @@ const { boot, check, done } = require('./helpers/app');
         assert.strictEqual((await t.balances(streamer.id)).payable, 349);
         const e = await t.call('GET', `/api/v1/entitlements/${buyer.id}?streamer=${streamer.id}`, { cap: ['billing.entitlement.check'] });
         assert.strictEqual(e.json.active, true);
-        const tx = t.db.prepare('SELECT metadata FROM transactions WHERE id = ?').get(r.json.result.txn_id);
+        const tx = await t.db.prepare('SELECT metadata FROM transactions WHERE id = ?').get(r.json.result.txn_id);
         const m = JSON.parse(tx.metadata);
         assert.deepStrictEqual([m.paid_cents, m.fee_cents, m.share_bits], [549, 50, 349]);
-        t.assertReconciled('after site sub');
+        await t.assertReconciled('after site sub');
     });
 
     await check('pcsub direct is EXTERNAL: the entitlement is granted, no money is booked', async () => {
@@ -116,7 +116,7 @@ const { boot, check, done } = require('./helpers/app');
         assert.match(ext.json.result.reason, /EXTERNAL/);
         const site = await t.powerchat(donation({ amountUsdCents: 1000 }, 'openvibe'));
         assert.strictEqual(site.json.result.review, true);
-        const rec = t.assertReconciled('after none-effects');
+        const rec = await t.assertReconciled('after none-effects');
         assert.ok(rec.warnings.events_for_review.length >= 2);
     });
 
@@ -135,7 +135,7 @@ const { boot, check, done } = require('./helpers/app');
         const orig = await t.call('GET', `/api/v1/transactions/${pay.json.result.txn_id}`);
         assert.deepStrictEqual(orig.json.reversed_by, [tx.json.transaction.id]);
         assert.strictEqual(orig.json.transaction.entries.length, 5, 'the original stays as it was');
-        t.assertReconciled('after refund');
+        await t.assertReconciled('after refund');
     });
 
     await check('a chargeback on credit already donated leaves the payable intact and books the loss for review', async () => {
@@ -157,7 +157,7 @@ const { boot, check, done } = require('./helpers/app');
         assert.deepStrictEqual([tx.metadata.bits_clawed_back, tx.metadata.unrecovered_bits, tx.metadata.review], [200, 800, 'required']);
         const loss = tx.entries.find((e) => e.account.kind === 'chargeback_loss');
         assert.strictEqual(loss.amount, -1100, 'unrecovered 800 + spread 300');
-        const rec = t.assertReconciled('after chargeback');
+        const rec = await t.assertReconciled('after chargeback');
         assert.ok(rec.warnings.transactions_for_review.some((x) => x.id === tx.id));
         assert.strictEqual(rec.totals.chargeback_loss_cents, -1100);
         const again = await t.powerchat({ type: 'donation.chargeback', streamer: { username: 'openvibe' }, data: { eventId: 'cb-2', originalEventId: 'don-C' } });
@@ -191,12 +191,12 @@ const { boot, check, done } = require('./helpers/app');
         assert.strictEqual(q.status, 202);
         assert.strictEqual(q.json.queued, true);
         assert.strictEqual((await t.balances(buyer.id)).credit, credit);
-        assert.strictEqual(t.db.prepare("SELECT COUNT(*) AS n FROM provider_events WHERE processed_at IS NULL").get().n, 1);
+        assert.strictEqual((await t.db.prepare("SELECT COUNT(*) AS n FROM provider_events WHERE processed_at IS NULL").get()).n, 1);
         const off = await t.call('POST', '/api/v1/admin/freeze', { key: null, body: { on: false } });
         assert.strictEqual(off.json.frozen, false);
         assert.strictEqual(off.json.processed_after_unfreeze.processed, 1);
         assert.strictEqual((await t.balances(buyer.id)).credit, credit + 100);
-        t.assertReconciled('after unfreeze');
+        await t.assertReconciled('after unfreeze');
     });
 
     await t.close();

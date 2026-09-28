@@ -37,7 +37,7 @@ function createKeyProvider(config, { fetchImpl = globalThis.fetch, log = console
         if (config.network.publicKey || timer) return;
         const retry = () => load().then((k) => { if (!k) setTimeout(retry, 30_000).unref(); });
         retry();
-        timer = setInterval(() => { load(); }, 6 * 60 * 60 * 1000);
+        timer = setInterval(async () => { load(); }, 6 * 60 * 60 * 1000);
         timer.unref();
     }
     function stop() { if (timer) clearInterval(timer); timer = null; }
@@ -62,7 +62,7 @@ function createIdentity(config, { fetchImpl = globalThis.fetch } = {}) {
             body: JSON.stringify(body),
             signal: AbortSignal.timeout(10000),
         });
-        if (res.status === 401 && !retried) { tokens.invalidate(); return post(body, true); }
+        if (res.status === 401 && !retried) { tokens.invalidate(); return await post(body, true); }
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || typeof data.results !== 'object') throw new Error(`resolve-batch ${res.status}: ${(data && (data.detail || data.error)) || 'bad response'}`);
         return data.results;

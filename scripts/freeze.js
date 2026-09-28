@@ -10,18 +10,28 @@
  *   node scripts/freeze.js off                   the running service processes the held webhooks in
  *                                                arrival order on its next retry tick (≤ BILLING_WEBHOOK_RETRY_MS)
  */
-const { loadConfig } = require('../server/config');
-const { openDb } = require('../server/db');
+const os = require('os');
 const admin = require('../server/ops/admin');
 
-const [cmd = 'status', reason] = process.argv.slice(2);
-if (!['status', 'on', 'off'].includes(cmd)) { console.error('usage: freeze.js status | on "<reason>" | off'); process.exit(2); }
-const config = loadConfig();
-const db = openDb(config.dbPath);
-const os = require('os');
-const state = cmd === 'status'
-    ? admin.freezeState(db)
-    : admin.setFreeze({ db, now: () => Date.now() }, { on: cmd === 'on', reason: reason || null, actor: { principal: 'operator:cli', host: os.hostname(), user: os.userInfo().username } });
-const pending = db.prepare('SELECT COUNT(*) AS n FROM provider_events WHERE processed_at IS NULL').get().n;
-console.log(JSON.stringify({ ...state, held_webhooks: pending }));
-db.close();
+/** The command on a database handle (the script opens the service's own; tests pass theirs). Returns what it prints. */
+async function freeze([cmd = 'status', reason] = [], { db }) {
+    if (!['status', 'on', 'off'].includes(cmd)) throw Object.assign(new Error('usage: freeze.js status | on "<reason>" | off'), { usage: true });
+    const state = cmd === 'status'
+        ? await admin.freezeState(db)
+        : await admin.setFreeze({ db, now: () => Date.now() }, { on: cmd === 'on', reason: reason || null, actor: { principal: 'operator:cli', host: os.hostname(), user: os.userInfo().username } });
+    const pending = (await db.prepare('SELECT COUNT(*) AS n FROM provider_events WHERE processed_at IS NULL').get()).n;
+    return { ...state, held_webhooks: pending };
+}
+
+if (require.main === module) {
+    (async () => {
+        const { loadConfig } = require('../server/config');
+        const { openDb } = require('../server/db');
+        const args = process.argv.slice(2);
+        if (!['status', 'on', 'off'].includes(args[0] || 'status')) { console.error('usage: freeze.js status | on "<reason>" | off'); process.exit(2); }
+        const db = await openDb(loadConfig());
+        try { console.log(JSON.stringify(await freeze(args, { db }))); } finally { await db.close(); }
+    })().catch((err) => { console.error(err); process.exit(1); });
+}
+
+module.exports = { freeze };

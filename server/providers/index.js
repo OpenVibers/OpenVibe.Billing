@@ -6,7 +6,7 @@
  *   receive()  verify → store the delivery in provider_events BEFORE doing anything with it
  *              (UNIQUE(provider, provider_event_id): a redelivery is stored once)
  *   process()  interpret the stored payload into a plan, then apply the plan and mark the event
- *              processed in ONE SQLite transaction. Plans settle through the same operations the
+ *              processed in ONE transaction. Plans settle through the same operations the
  *              API uses, keyed pe:<provider>:<event id>, and every settling transaction carries its
  *              provider receipt reference (unique) and source_event_id.
  * While the economy is frozen events are stored but not processed; processPending() runs them in
@@ -19,13 +19,13 @@
  * none (no money effect: test, echo, not handled; `review` marks ones an operator should see) |
  * rejected (a 4xx business refusal, e.g. a refund for an unknown payment).
  *
- * Races: the stored row is the lock. Applying a plan re-reads processed_at inside an IMMEDIATE
- * transaction (the write lock is taken first, so a second process or connection waits rather than
- * failing to upgrade), and a payment's receipt_ref is UNIQUE in the journal, so concurrent deliveries
+ * Races: the stored row is the lock. Applying a plan re-reads processed_at inside a serializable
+ * transaction that locks the row first (FOR UPDATE: a second process or connection waits, then retries
+ * and finds it processed), and a payment's receipt_ref is UNIQUE in the journal, so concurrent deliveries
  * of one payment — same delivery id or not, same process or not — settle it once.
  */
 const crypto = require('crypto');
-const { iso, BillingError } = require('../ledger');
+const { iso, BillingError, money } = require('../ledger');
 const { isFrozen } = require('../ops/common');
 const purchases = require('../ops/purchases');
 const transfers = require('../ops/transfers');
@@ -52,27 +52,27 @@ function createAdapters(config, deps = {}) {
 function parseRow(row) { return row ? { ...row, result: row.result ? JSON.parse(row.result) : null } : null; }
 
 /** Store a verified delivery. Returns { row, duplicate }. */
-function store(ctx, provider, { eventId, type, payload }) {
+async function store(ctx, provider, { eventId, type, payload }) {
     const text = JSON.stringify(payload);
     const hash = crypto.createHash('sha256').update(text).digest('hex');
-    const r = ctx.db.prepare(`INSERT OR IGNORE INTO provider_events (provider, provider_event_id, type, payload_hash, payload, received_at)
-        VALUES (?, ?, ?, ?, ?, ?)`).run(provider, eventId, type, hash, text, iso(ctx.now()));
-    const row = parseRow(ctx.db.prepare('SELECT * FROM provider_events WHERE provider = ? AND provider_event_id = ?').get(provider, eventId));
+    const r = await ctx.db.prepare(`INSERT INTO provider_events (provider, provider_event_id, type, payload_hash, payload, received_at)
+        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`).run(provider, eventId, type, hash, text, iso(ctx.now()));
+    const row = parseRow(await ctx.db.prepare('SELECT * FROM provider_events WHERE provider = ? AND provider_event_id = ?').get(provider, eventId));
     return { row, duplicate: r.changes === 0 };
 }
 
-function applyPlan(ctx, plan, row) {
+async function applyPlan(ctx, plan, row) {
     const withEvent = (args) => ({ ...args, sourceEventId: row.id });
     const settled = (r) => (r.replay ? { effect: 'duplicate_receipt', txn_id: r.txn && r.txn.id } : { effect: 'settled', txn_id: r.txn.id });
     switch (plan.effect) {
         case 'none': return { effect: 'none', reason: plan.reason, review: plan.review || plan.hold || undefined };
         case 'update': plan.apply(ctx); return { effect: 'updated', reason: plan.reason };
-        case 'purchase': return settled(purchases.settle(ctx, withEvent(plan.args)));
-        case 'subscription': return settled(subscriptions.pay(ctx, withEvent(plan.args)));
-        case 'tip': return settled(transfers.fromReceipt(ctx, withEvent(plan.args)));
-        case 'external': return external.record(ctx, withEvent(plan.args));
+        case 'purchase': return settled(await purchases.settle(ctx, withEvent(plan.args)));
+        case 'subscription': return settled(await subscriptions.pay(ctx, withEvent(plan.args)));
+        case 'tip': return settled(await transfers.fromReceipt(ctx, withEvent(plan.args)));
+        case 'external': return await external.record(ctx, withEvent(plan.args));
         case 'reverse': {
-            const r = reversals.reverseReceipt(ctx, withEvent(plan.args));
+            const r = await reversals.reverseReceipt(ctx, withEvent(plan.args));
             if (r.noop) return { effect: 'none', reason: r.noop };
             return { ...settled(r), review: r.review || undefined };
         }
@@ -83,50 +83,51 @@ function applyPlan(ctx, plan, row) {
 /** Process one stored event. Returns the updated row (processed or not). */
 async function process(ctx, adapters, rowOrId) {
     const { db } = ctx;
-    let row = typeof rowOrId === 'object' ? rowOrId : parseRow(db.prepare('SELECT * FROM provider_events WHERE id = ?').get(rowOrId));
+    let row = typeof rowOrId === 'object' ? rowOrId : parseRow(await db.prepare('SELECT * FROM provider_events WHERE id = ?').get(rowOrId));
     if (!row || row.processed_at) return row;
-    if (isFrozen(db)) return row;
+    if (await isFrozen(db)) return row;
     const adapter = adapters[row.provider];
     try {
         if (!adapter) throw new Error(`no adapter for ${row.provider}`);
         const plan = await adapter.interpret(ctx, JSON.parse(row.payload), row);
-        db.transaction(() => {
-            const fresh = db.prepare('SELECT processed_at FROM provider_events WHERE id = ?').get(row.id);
+        // Serializable, with the event row locked: a second process of the same event waits, then sees it processed.
+        await money(db, async () => {
+            const fresh = await db.prepare('SELECT processed_at FROM provider_events WHERE id = ? FOR UPDATE').get(row.id);
             if (fresh.processed_at) return;
             let result;
             try {
-                result = db.transaction(() => applyPlan(ctx, plan, row))();
+                result = await db.tx(async () => await applyPlan(ctx, plan, row));   // a savepoint: a refusal undoes only the plan
             } catch (e) {
                 if (!(e instanceof BillingError) || e.status >= 500) throw e;
                 result = { effect: 'rejected', code: e.code, reason: e.detail || e.message };
             }
-            db.prepare('UPDATE provider_events SET processed_at = ?, result = ?, attempts = attempts + 1, last_error = NULL WHERE id = ?')
+            await db.prepare('UPDATE provider_events SET processed_at = ?, result = ?, attempts = attempts + 1, last_error = NULL WHERE id = ?')
                 .run(iso(ctx.now()), JSON.stringify(result), row.id);
-        }).immediate();
+        });
     } catch (e) {
-        db.prepare('UPDATE provider_events SET attempts = attempts + 1, last_error = ? WHERE id = ?').run(String(e.message).slice(0, 500), row.id);
+        await db.prepare('UPDATE provider_events SET attempts = attempts + 1, last_error = ? WHERE id = ?').run(String(e.message).slice(0, 500), row.id);
         (ctx.log || console).warn(`[Billing] ${row.provider} event ${row.provider_event_id} not processed: ${e.message}`);
     }
-    row = parseRow(db.prepare('SELECT * FROM provider_events WHERE id = ?').get(row.id));
+    row = parseRow(await db.prepare('SELECT * FROM provider_events WHERE id = ?').get(row.id));
     return row;
 }
 
 /** Process every stored-but-unprocessed event in arrival order. */
 async function processPending(ctx, adapters, { limit = 500 } = {}) {
-    if (isFrozen(ctx.db)) return { processed: 0, frozen: true };
-    const rows = ctx.db.prepare('SELECT * FROM provider_events WHERE processed_at IS NULL ORDER BY id LIMIT ?').all(limit).map(parseRow);
+    if (await isFrozen(ctx.db)) return { processed: 0, frozen: true };
+    const rows = (await ctx.db.prepare('SELECT * FROM provider_events WHERE processed_at IS NULL ORDER BY id LIMIT ?').all(limit)).map(parseRow);
     let processed = 0;
     for (const r of rows) {
         const after = await process(ctx, adapters, r);
         if (after && after.processed_at) processed++;
-        if (isFrozen(ctx.db)) break;
+        if (await isFrozen(ctx.db)) break;
     }
     return { processed, pending: rows.length - processed };
 }
 
 /** Reprocess an event (operator): only an unprocessed or rejected one; settled events never re-apply. */
 async function reprocess(ctx, adapters, id) {
-    const row = parseRow(ctx.db.prepare('SELECT * FROM provider_events WHERE id = ?').get(id));
+    const row = parseRow(await ctx.db.prepare('SELECT * FROM provider_events WHERE id = ?').get(id));
     if (!row) throw new BillingError(404, 'billing.event_not_found', `no provider event ${id}`);
     // An EXTERNAL receipt that was not announced (e.g. its account was mapped since) may be retried;
     // one that was announced never is (external_receipts would answer duplicate_receipt anyway).
@@ -134,8 +135,8 @@ async function reprocess(ctx, adapters, id) {
     if (row.processed_at && row.result && !retryable(row.result)) {
         throw new BillingError(409, 'billing.event_settled', `event ${id} already had effect ${row.result.effect}`);
     }
-    if (row.processed_at) ctx.db.prepare('UPDATE provider_events SET processed_at = NULL WHERE id = ?').run(id);
-    return process(ctx, adapters, id);
+    if (row.processed_at) await ctx.db.prepare('UPDATE provider_events SET processed_at = NULL WHERE id = ?').run(id);
+    return await process(ctx, adapters, id);
 }
 
 function present(row) {

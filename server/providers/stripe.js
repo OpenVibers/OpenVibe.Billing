@@ -50,9 +50,9 @@ function createStripe(cfg, { fetchImpl = globalThis.fetch } = {}) {
         return { eventId: event.id ? String(event.id) : null, type: String(event.type || 'unknown'), payload: event };
     }
 
-    function intentFrom(db, meta) {
+    async function intentFrom(db, meta) {
         if (!meta) return null;
-        return intents.find(db, meta.intent_id || meta.order_id);
+        return await intents.find(db, meta.intent_id || meta.order_id);
     }
 
     async function interpret(ctx, event, row) {
@@ -61,10 +61,10 @@ function createStripe(cfg, { fetchImpl = globalThis.fetch } = {}) {
         const actor = { principal: 'provider:stripe', provider_event: row.provider_event_id };
         switch (event.type) {
             case 'checkout.session.completed': {
-                const intent = intentFrom(ctx.db, obj.metadata) || intents.find(ctx.db, obj.client_reference_id);
+                const intent = await intentFrom(ctx.db, obj.metadata) || await intents.find(ctx.db, obj.client_reference_id);
                 if (!intent) return { effect: 'none', reason: 'checkout without a Billing intent' };
                 if (obj.mode === 'subscription') {
-                    return { effect: 'update', reason: 'linked Stripe subscription', apply: (c) => intents.mergeMetadata(c, intent.id, { stripe_subscription: obj.subscription }) };
+                    return { effect: 'update', reason: 'linked Stripe subscription', apply: async (c) => await intents.mergeMetadata(c, intent.id, { stripe_subscription: obj.subscription }) };
                 }
                 if (obj.payment_status && obj.payment_status !== 'paid') return { effect: 'none', reason: `checkout ${obj.payment_status}` };
                 return { effect: 'purchase', args: { provider: 'stripe', receiptRef: `stripe:${obj.payment_intent || obj.id}`, intentId: intent.id, paidCents: obj.amount_total, idempotencyKey: key, actor } };
@@ -73,13 +73,13 @@ function createStripe(cfg, { fetchImpl = globalThis.fetch } = {}) {
             case 'invoice.payment_succeeded': {
                 if (!(obj.amount_paid > 0)) return { effect: 'none', reason: 'zero-amount invoice' };
                 const stripeSub = obj.subscription;
-                const existing = subscriptions.findByProviderRef(ctx.db, 'stripe', stripeSub);
+                const existing = await subscriptions.findByProviderRef(ctx.db, 'stripe', stripeSub);
                 let subscriber; let streamer; let intentId = null;
                 if (existing) { subscriber = existing.subscriber; streamer = existing.streamer; }
                 else {
                     const meta = (obj.subscription_details && obj.subscription_details.metadata) || obj.metadata || {};
-                    let intent = intentFrom(ctx.db, meta);
-                    if (!intent && stripeSub) intent = intents.parse(ctx.db.prepare("SELECT * FROM payment_intents WHERE provider = 'stripe' AND json_extract(metadata, '$.stripe_subscription') = ?").get(stripeSub));
+                    let intent = await intentFrom(ctx.db, meta);
+                    if (!intent && stripeSub) intent = intents.parse(await ctx.db.prepare("SELECT * FROM payment_intents WHERE provider = 'stripe' AND json_extract(metadata, '$.stripe_subscription') = ?").get(stripeSub));
                     if (!intent) return { effect: 'none', reason: `invoice for unknown Stripe subscription ${stripeSub}` };
                     subscriber = intent.subject; streamer = intent.streamer_subject; intentId = intent.id;
                 }
@@ -112,9 +112,9 @@ function createStripe(cfg, { fetchImpl = globalThis.fetch } = {}) {
                     },
                 };
             case 'customer.subscription.deleted': {
-                const sub = subscriptions.findByProviderRef(ctx.db, 'stripe', obj.id);
+                const sub = await subscriptions.findByProviderRef(ctx.db, 'stripe', obj.id);
                 if (!sub) return { effect: 'none', reason: 'unknown Stripe subscription' };
-                return { effect: 'update', reason: 'Stripe subscription ended', apply: (c) => subscriptions.setStatus(c, sub.id, 'canceled', 'stripe_deleted') };
+                return { effect: 'update', reason: 'Stripe subscription ended', apply: async (c) => await subscriptions.setStatus(c, sub.id, 'canceled', 'stripe_deleted') };
             }
             default:
                 return { effect: 'none', reason: `${event.type} is not handled` };
@@ -144,7 +144,7 @@ function createStripe(cfg, { fetchImpl = globalThis.fetch } = {}) {
 
     async function cancelAtPeriodEnd(stripeSubscriptionId) {
         const p = new URLSearchParams({ cancel_at_period_end: 'true' });
-        return api('POST', `/subscriptions/${encodeURIComponent(stripeSubscriptionId)}`, p);
+        return await api('POST', `/subscriptions/${encodeURIComponent(stripeSubscriptionId)}`, p);
     }
 
     return { name: 'stripe', enabled, verify, parse, interpret, createCheckout, cancelAtPeriodEnd };

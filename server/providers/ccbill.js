@@ -55,7 +55,7 @@ function createCcbill(cfg) {
             };
         }
         if (type !== 'NewSaleSuccess') return { effect: 'none', reason: `${type || 'event'} is not handled` };
-        const intent = intents.find(ctx.db, p['X-intent'] || p['X-order'] || p.order);
+        const intent = await intents.find(ctx.db, p['X-intent'] || p['X-order'] || p.order);
         if (!intent) return { effect: 'none', reason: 'sale without a Billing intent' };
         if (price == null) return { effect: 'none', reason: 'sale carried no price — not credited', review: true };
         if (!txId) return { effect: 'none', reason: 'sale without a transaction id', review: true };

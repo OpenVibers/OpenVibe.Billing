@@ -21,7 +21,7 @@
  * balance and entitlement reads (hot paths the services call for every page and chat message),
  * /api/health, /api/ready, /release.json and /metrics.
  */
-const { createActorLimiter } = require('openvibe-sdk/limits');
+const { createActorLimiter, createValkeyLimitStore } = require('openvibe-sdk/limits');
 const { ids } = require('openvibe-contracts');
 
 /** Each budget per person: a minute, an hour. */
@@ -56,7 +56,7 @@ function personOf(v) {
  * createActorLimits({ config, db, now, registry, log }) → { budget(name, personFrom), history, refund }.
  * personFrom(req) names the person a request is counted against (or null: its principal).
  */
-function createActorLimits({ config, db, now = () => Date.now(), registry = null, log = console }) {
+function createActorLimits({ config, db, now = () => Date.now(), registry = null, log = console, valkey = null }) {
     const refused = registry
         ? registry.counter({ name: 'billing_rate_limited_total', help: 'Requests refused 429 by a per-person limit, by limit name and window', labelNames: ['limit', 'window'] })
         : null;
@@ -65,6 +65,7 @@ function createActorLimits({ config, db, now = () => Date.now(), registry = null
     const limiter = createActorLimiter({
         limits: { minute: config.actorLimits.minute, hour: config.actorLimits.hour },
         now,
+        ...(valkey ? { store: createValkeyLimitStore(valkey) } : {}),
         actor(req) {
             if (!enabled) return null;
             const person = req.limitPerson;
@@ -83,8 +84,8 @@ function createActorLimits({ config, db, now = () => Date.now(), registry = null
         const own = BUDGETS[name];
         if (!own) throw new Error(`limits: no budget named ${name}`);
         const limit = limiter(name, own);
-        return function billingActorLimit(req, res, next) {
-            try { req.limitPerson = personFrom(req); } catch { req.limitPerson = null; }
+        return async function billingActorLimit(req, res, next) {
+            try { req.limitPerson = await personFrom(req); } catch { req.limitPerson = null; }
             return limit(req, res, next);
         };
     }
@@ -97,8 +98,8 @@ function createActorLimits({ config, db, now = () => Date.now(), registry = null
     }
 
     /** The payer of the transfer a refund gives back (one primary-key read), else null. */
-    function payerOf(req) {
-        const row = db.prepare('SELECT from_subject FROM transactions WHERE id = ?').get(String(req.params.id));
+    async function payerOf(req) {
+        const row = await db.prepare('SELECT from_subject FROM transactions WHERE id = ?').get(String(req.params.id));
         return row ? personOf(row.from_subject) : null;
     }
 

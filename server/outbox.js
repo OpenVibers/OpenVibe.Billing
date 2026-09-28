@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Transactional outbox (events.event-envelope@1). enqueue() is called inside the same SQLite
+ * Transactional outbox (events.event-envelope@1). enqueue() is called inside the same
  * transaction as the money movement it announces, so an event exists exactly when its effect
  * does. The relay publishes unsent rows to OpenVibe.Events (POST /api/v1/events, service token
  * for audience openvibe.events with events.event.publish) and runs only when EVENTS_URL is set;
@@ -13,7 +13,7 @@ const { ids, validate, serviceAuth } = require('openvibe-contracts');
 const ACTOR = { type: 'service', id: 'billing' };
 
 /** actor defaults to the service itself; staff actions pass the person ({ type: 'user', id }). */
-function enqueue(ctx, { event_type, subject, payload, priority = 'important', traceId, actor }) {
+async function enqueue(ctx, { event_type, subject, payload, priority = 'important', traceId, actor }) {
     const ms = ctx.now();
     const env = {
         event_id: ids.newId('event', ms),
@@ -30,7 +30,7 @@ function enqueue(ctx, { event_type, subject, payload, priority = 'important', tr
     if (traceId && /^[0-9a-f]{32}$/.test(traceId)) env.trace_id = traceId;
     const v = validate('events.event-envelope@1', env);
     if (!v.valid) throw new Error(`outbox: invalid envelope for ${event_type}: ${v.errors.map((e) => `${e.path} ${e.message}`).join('; ')}`);
-    ctx.db.prepare('INSERT INTO outbox (event_id, event, created_at) VALUES (?, ?, ?)').run(env.event_id, JSON.stringify(env), env.timestamp);
+    await ctx.db.prepare('INSERT INTO outbox (event_id, event, created_at) VALUES (?, ?, ?)').run(env.event_id, JSON.stringify(env), env.timestamp);
     return env;
 }
 
@@ -53,7 +53,7 @@ function createRelay({ db, config, fetchImpl = globalThis.fetch, tokenClient, lo
         let sent = 0;
         try {
             for (;;) {
-                const rows = db.prepare('SELECT seq, event_id, event FROM outbox WHERE sent_at IS NULL ORDER BY seq LIMIT 100').all();
+                const rows = await db.prepare('SELECT seq, event_id, event FROM outbox WHERE sent_at IS NULL ORDER BY seq LIMIT 100').all();
                 if (!rows.length) break;
                 const body = { events: rows.map((r) => JSON.parse(r.event)) };
                 let res;
@@ -65,18 +65,18 @@ function createRelay({ db, config, fetchImpl = globalThis.fetch, tokenClient, lo
                         signal: AbortSignal.timeout(10000),
                     });
                 } catch (e) {
-                    markFailed(rows, e.message);
+                    await markFailed(rows, e.message);
                     break;
                 }
                 if (res.status === 401) tokens.invalidate();
                 if (!res.ok) {
                     const text = await res.text().catch(() => '');
-                    markFailed(rows, `${res.status} ${text.slice(0, 300)}`);
+                    await markFailed(rows, `${res.status} ${text.slice(0, 300)}`);
                     break;
                 }
                 const at = new Date().toISOString();
                 const mark = db.prepare('UPDATE outbox SET sent_at = ?, attempts = attempts + 1, last_error = NULL WHERE seq = ?');
-                db.transaction(() => { for (const r of rows) mark.run(at, r.seq); })();
+                await db.tx(async () => { for (const r of rows) await mark.run(at, r.seq); });
                 sent += rows.length;
             }
         } finally {
@@ -85,9 +85,9 @@ function createRelay({ db, config, fetchImpl = globalThis.fetch, tokenClient, lo
         return { sent };
     }
 
-    function markFailed(rows, message) {
+    async function markFailed(rows, message) {
         const mark = db.prepare('UPDATE outbox SET attempts = attempts + 1, last_error = ? WHERE seq = ?');
-        db.transaction(() => { for (const r of rows) mark.run(String(message).slice(0, 500), r.seq); })();
+        await db.tx(async () => { for (const r of rows) await mark.run(String(message).slice(0, 500), r.seq); });
         log.warn(`[Billing] outbox relay: ${rows.length} event(s) not published: ${message}`);
     }
 

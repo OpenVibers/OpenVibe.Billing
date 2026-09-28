@@ -2,7 +2,7 @@
   "name": "openvibe-billing",
   "version": "0.1.0",
   "private": true,
-  "description": "OpenVibe.Billing — the isolated money ledger of the OpenVibe network: a balanced append-only journal, provider receipts, subscriptions/entitlements, refunds and payouts (ADR-012).",
+  "description": "OpenVibe.Billing \u2014 the isolated money ledger of the OpenVibe network: a balanced append-only journal, provider receipts, subscriptions/entitlements, refunds and payouts (ADR-012).",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
@@ -10,20 +10,31 @@
     "test": "node test/run.js",
     "reconcile": "node scripts/reconcile.js",
     "freeze": "node scripts/freeze.js",
-    "import-live": "node scripts/import-live.js"
+    "import-live": "node scripts/import-live.js",
+    "test:pg": "BILLING_TEST_STORE=pg node test/run.js"
   },
-  "keywords": ["openvibe", "billing", "ledger", "double-entry"],
+  "keywords": [
+    "openvibe",
+    "billing",
+    "ledger",
+    "double-entry"
+  ],
   "author": "OpenVibers",
   "license": "AGPL-3.0-only",
   "dependencies": {
     "better-sqlite3": "^11.10.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "openvibe-contracts": "https://codeload.github.com/OpenVibers/OpenVibe.Contracts/tar.gz/refs/tags/v0.49.0",
-    "openvibe-sdk": "https://codeload.github.com/OpenVibers/OpenVibe.SDK/tar.gz/refs/tags/v0.12.0",
-    "openvibe-shared": "https://codeload.github.com/OpenVibers/OpenVibe.Shared/tar.gz/refs/tags/v1.25.0"
+    "iovalkey": "^0.4.0",
+    "openvibe-contracts": "https://codeload.github.com/OpenVibers/OpenVibe.Contracts/tar.gz/refs/tags/v0.76.0",
+    "openvibe-sdk": "https://codeload.github.com/OpenVibers/OpenVibe.SDK/tar.gz/refs/tags/v0.21.2",
+    "openvibe-shared": "https://codeload.github.com/OpenVibers/OpenVibe.Shared/tar.gz/refs/tags/v1.28.0",
+    "pg": "^8.23.0"
   },
   "engines": {
     "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8"
   }
 }

@@ -53,8 +53,8 @@ const DAY = 86_400_000;
     }
     const csrfOf = (page) => (page.text.match(/name="_csrf" value="([^"]+)"/) || [])[1];
     const keyOf = (page, action) => (page.text.match(new RegExp(`action="${action}"><input type="hidden" name="_csrf" value="[^"]+"><input type="hidden" name="action_key" value="([^"]+)"`)) || [])[1];
-    const auditRows = (action, outcome = 'done') => t.db.prepare('SELECT * FROM staff_audit WHERE action = ? AND outcome = ?').all(action, outcome);
-    const staffEvents = (action) => t.db.prepare("SELECT event FROM outbox WHERE json_extract(event, '$.event_type') = 'billing.staff.action' AND json_extract(event, '$.payload.action') = ?").all(action).map((r) => JSON.parse(r.event));
+    const auditRows = async (action, outcome = 'done') => await t.db.prepare('SELECT * FROM staff_audit WHERE action = ? AND outcome = ?').all(action, outcome);
+    const staffEvents = async (action) => (await t.db.prepare("SELECT event FROM outbox WHERE json_extract(event, '$.event_type') = 'billing.staff.action' AND json_extract(event, '$.payload.action') = ?").all(action)).map((r) => JSON.parse(r.event));
     async function newCashout(amount = 600) {
         const r = await t.call('POST', '/api/v1/cashouts', { body: { subject: creator, amount, payout_method: { type: 'paypal', address: 'creator@example.com' } } });
         assert.strictEqual(r.status, 201, r.text);
@@ -94,7 +94,7 @@ const DAY = 86_400_000;
         assert.strictEqual((await get(`/auth/callback?code=${code}&state=wrong`, flow)).status, 400, 'wrong state');
         const [body] = flow.slice('ovb_flow='.length).split('.');
         assert.strictEqual((await get(`/auth/callback?code=${code}&state=${loc.searchParams.get('state')}`, `ovb_flow=${body}.forged`)).status, 400, 'forged signature');
-        assert.strictEqual(t.db.prepare('SELECT COUNT(*) AS n FROM staff_sessions').get().n, 0);
+        assert.strictEqual((await t.db.prepare('SELECT COUNT(*) AS n FROM staff_sessions').get()).n, 0);
     });
 
     await check('a code bound to another PKCE challenge is refused by the Network, no session', async () => {
@@ -116,10 +116,10 @@ const DAY = 86_400_000;
         assert.strictEqual(b.cookie, null);
         const c = await signIn(listedNonAdmin, { role: 'admin', is_owner: false });
         assert.strictEqual(c.cb.status, 403, 'a listed admin who is not the owner: money is the owner\'s (staff.money.cashouts)');
-        assert.strictEqual(t.db.prepare('SELECT COUNT(*) AS n FROM staff_sessions').get().n, 0);
-        const refused = auditRows('session.sign_in', 'refused');
+        assert.strictEqual((await t.db.prepare('SELECT COUNT(*) AS n FROM staff_sessions').get()).n, 0);
+        const refused = await auditRows('session.sign_in', 'refused');
         assert.deepStrictEqual(refused.map((r) => r.actor_subject).sort(), [listedNonAdmin, listedNonAdmin, unlistedAdmin].sort());
-        assert.strictEqual(staffEvents('session.sign_in').length, 0, 'refusals are not published');
+        assert.strictEqual((await staffEvents('session.sign_in')).length, 0, 'refusals are not published');
     });
 
     await check('staff sign in: host-only, HttpOnly, Secure, SameSite=Strict, short-lived session cookie', async () => {
@@ -132,10 +132,10 @@ const DAY = 86_400_000;
         const maxAge = Number((r.setCookie.match(/Max-Age=(\d+)/) || [])[1]);
         assert.ok(maxAge > 0 && maxAge <= 3600, `max-age ${maxAge}`);
         s = r.cookie;
-        const row = t.db.prepare('SELECT * FROM staff_sessions').get();
+        const row = await t.db.prepare('SELECT * FROM staff_sessions').get();
         assert.notStrictEqual(row.id_hash, s.split('=')[1], 'only a hash of the session id is stored');
-        assert.strictEqual(auditRows('session.sign_in').length, 1);
-        assert.strictEqual(staffEvents('session.sign_in').length, 1);
+        assert.strictEqual((await auditRows('session.sign_in')).length, 1);
+        assert.strictEqual((await staffEvents('session.sign_in')).length, 1);
     });
 
     await check('pages: staff only, server-rendered, no script, noindex, no-store, strict CSP', async () => {
@@ -175,9 +175,9 @@ const DAY = 86_400_000;
         assert.strictEqual((await post(`/cashouts/${co1}/approve`, s, { ...form, _csrf: csrf }, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
         assert.strictEqual((await post('/freeze', s, { on: '1', reason: 'csrf test' })).status, 403);
         assert.strictEqual((await post('/auth/logout', s, {})).status, 403);
-        assert.strictEqual(t.db.prepare('SELECT status FROM cashouts WHERE id = ?').get(co1).status, 'requested');
-        assert.strictEqual(t.db.prepare('SELECT freeze FROM settings').get().freeze, 0);
-        assert.ok(auditRows('request.csrf', 'refused').length >= 5);
+        assert.strictEqual((await t.db.prepare('SELECT status FROM cashouts WHERE id = ?').get(co1)).status, 'requested');
+        assert.strictEqual((await t.db.prepare('SELECT "freeze" FROM settings').get()).freeze, 0);
+        assert.ok((await auditRows('request.csrf', 'refused')).length >= 5);
         assert.strictEqual((await get('/cashouts', s)).status, 200, 'the session survived');
     });
 
@@ -194,10 +194,10 @@ const DAY = 86_400_000;
         const early = await post(`/cashouts/${co1}/approve`, s, { _csrf: csrf, action_key: key, payout_reference: 'PP-1', payout_provider: 'paypal', confirm: 'yes' });
         assert.strictEqual(early.status, 409);
         assert.ok(early.text.includes('billing.escrow_active'));
-        assert.strictEqual(t.db.prepare('SELECT status FROM cashouts WHERE id = ?').get(co1).status, 'requested');
-        assert.strictEqual(auditRows('cashout.approve').length, 0);
-        assert.strictEqual(auditRows('cashout.approve', 'refused').length, 3);
-        assert.strictEqual(staffEvents('cashout.approve').length, 0);
+        assert.strictEqual((await t.db.prepare('SELECT status FROM cashouts WHERE id = ?').get(co1)).status, 'requested');
+        assert.strictEqual((await auditRows('cashout.approve')).length, 0);
+        assert.strictEqual((await auditRows('cashout.approve', 'refused')).length, 3);
+        assert.strictEqual((await staffEvents('cashout.approve')).length, 0);
     });
 
     let co2;
@@ -216,25 +216,25 @@ const DAY = 86_400_000;
         const again = await post(`/cashouts/${co1}/approve`, s, form);
         assert.strictEqual(again.status, 303);
         assert.strictEqual(again.headers.get('location'), `/cashouts/${co1}?done=already_paid`);
-        const c = t.db.prepare('SELECT * FROM cashouts WHERE id = ?').get(co1);
+        const c = await t.db.prepare('SELECT * FROM cashouts WHERE id = ?').get(co1);
         assert.strictEqual(c.status, 'paid');
         assert.strictEqual(c.payout_reference, 'PAYOUT-7Q2');
         assert.strictEqual(JSON.parse(c.decided_by).principal, staff);
-        const rows = auditRows('cashout.approve');
+        const rows = await auditRows('cashout.approve');
         assert.strictEqual(rows.length, 1);
         assert.strictEqual(rows[0].actor_subject, staff);
         assert.strictEqual(rows[0].target_id, co1);
         assert.ok(rows[0].request_id && rows[0].ip_hash && !rows[0].ip_hash.includes('127.0.0.1'));
         assert.strictEqual(JSON.parse(rows[0].detail).payout_reference, 'PAYOUT-7Q2');
-        const ev = staffEvents('cashout.approve');
+        const ev = await staffEvents('cashout.approve');
         assert.strictEqual(ev.length, 1);
         assert.deepStrictEqual(ev[0].actor, { type: 'user', id: staff });
         assert.strictEqual(ev[0].visibility, 'internal');
         assert.deepStrictEqual(ev[0].payload.target, { type: 'cashout', id: co1 });
-        assert.strictEqual(t.db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE json_extract(event, '$.event_type') = 'billing.cashout.paid'").get().n, 1);
+        assert.strictEqual((await t.db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE json_extract(event, '$.event_type') = 'billing.cashout.paid'").get()).n, 1);
         const shown = await get(`/cashouts/${co1}?done=approved`, s);
         assert.ok(shown.text.includes('Payout recorded') && shown.text.includes('PAYOUT-7Q2'));
-        t.assertReconciled('after a console approval');
+        await t.assertReconciled('after a console approval');
     });
 
     await check('deny needs a reason; it returns the amount to payable and is audited once', async () => {
@@ -247,15 +247,15 @@ const DAY = 86_400_000;
         const r = await post(`/cashouts/${co2}/deny`, s, { _csrf: csrf, action_key: key, reason: 'payout address bounced' });
         assert.strictEqual(r.status, 303, r.text);
         assert.strictEqual((await post(`/cashouts/${co2}/deny`, s, { _csrf: csrf, action_key: key, reason: 'payout address bounced' })).headers.get('location'), `/cashouts/${co2}?done=already_denied`);
-        assert.strictEqual(t.db.prepare('SELECT status FROM cashouts WHERE id = ?').get(co2).status, 'denied');
+        assert.strictEqual((await t.db.prepare('SELECT status FROM cashouts WHERE id = ?').get(co2)).status, 'denied');
         assert.strictEqual((await t.balances(creator.id)).payable, before + 700);
-        const rows = auditRows('cashout.deny');
+        const rows = await auditRows('cashout.deny');
         assert.strictEqual(rows.length, 1);
         assert.strictEqual(rows[0].reason, 'payout address bounced');
-        assert.strictEqual(staffEvents('cashout.deny').length, 1);
+        assert.strictEqual((await staffEvents('cashout.deny')).length, 1);
         const approveDenied = await post(`/cashouts/${co2}/approve`, s, { _csrf: csrf, action_key: keyOf(page, `/cashouts/${co2}/approve`), payout_reference: 'X-1', payout_provider: 'paypal', confirm: 'yes' });
         assert.strictEqual(approveDenied.status, 409, 'a denied cashout cannot be paid');
-        t.assertReconciled('after a console denial');
+        await t.assertReconciled('after a console denial');
     });
 
     await check('freeze toggles with a reason, refuses money actions while on, and is audited', async () => {
@@ -264,7 +264,7 @@ const DAY = 86_400_000;
         assert.strictEqual((await post('/freeze', s, { _csrf: csrf, on: '1', reason: '' })).status, 422);
         const on = await post('/freeze', s, { _csrf: csrf, on: '1', reason: 'cutover rehearsal' });
         assert.strictEqual(on.status, 303);
-        assert.strictEqual(t.db.prepare('SELECT freeze FROM settings').get().freeze, 1);
+        assert.strictEqual((await t.db.prepare('SELECT "freeze" FROM settings').get()).freeze, 1);
         assert.strictEqual((await post('/freeze', s, { _csrf: csrf, on: '1', reason: 'again' })).status, 409, 'no double toggle');
         const co3 = await newCashout(500).catch(() => null);
         assert.strictEqual(co3, null, 'the API refuses writes while frozen');
@@ -278,14 +278,14 @@ const DAY = 86_400_000;
         const off = await post('/freeze', s, { _csrf: csrf, on: '0', reason: 'rehearsal done' });
         assert.strictEqual(off.status, 303);
         assert.match(off.headers.get('location'), /done=unfrozen&processed=1/);
-        assert.strictEqual(t.db.prepare('SELECT freeze FROM settings').get().freeze, 0);
-        assert.strictEqual(auditRows('economy.freeze').length, 1);
-        assert.strictEqual(auditRows('economy.freeze')[0].reason, 'cutover rehearsal');
-        assert.strictEqual(auditRows('economy.unfreeze').length, 1);
-        assert.strictEqual(auditRows('economy.freeze', 'refused').length, 2);
-        assert.strictEqual(staffEvents('economy.freeze').length, 1);
-        assert.strictEqual(staffEvents('economy.unfreeze').length, 1);
-        assert.strictEqual(JSON.parse(t.db.prepare('SELECT frozen_by FROM settings').get().frozen_by || 'null'), null);
+        assert.strictEqual((await t.db.prepare('SELECT "freeze" FROM settings').get()).freeze, 0);
+        assert.strictEqual((await auditRows('economy.freeze')).length, 1);
+        assert.strictEqual((await auditRows('economy.freeze'))[0].reason, 'cutover rehearsal');
+        assert.strictEqual((await auditRows('economy.unfreeze')).length, 1);
+        assert.strictEqual((await auditRows('economy.freeze', 'refused')).length, 2);
+        assert.strictEqual((await staffEvents('economy.freeze')).length, 1);
+        assert.strictEqual((await staffEvents('economy.unfreeze')).length, 1);
+        assert.strictEqual(JSON.parse((await t.db.prepare('SELECT frozen_by FROM settings').get()).frozen_by || 'null'), null);
     });
 
     await check('a money action is refused while frozen (same guard as the API)', async () => {
@@ -296,7 +296,7 @@ const DAY = 86_400_000;
         const r = await post(`/cashouts/${co4}/deny`, s, { _csrf: csrf, action_key: keyOf(page, `/cashouts/${co4}/deny`), reason: 'while frozen' });
         assert.strictEqual(r.status, 503);
         assert.ok(r.text.includes('billing.frozen'));
-        assert.strictEqual(t.db.prepare('SELECT status FROM cashouts WHERE id = ?').get(co4).status, 'requested');
+        assert.strictEqual((await t.db.prepare('SELECT status FROM cashouts WHERE id = ?').get(co4)).status, 'requested');
         await post('/freeze', s, { _csrf: csrf, on: '0', reason: 'guard test done' });
     });
 
@@ -311,8 +311,8 @@ const DAY = 86_400_000;
         assert.ok(run.text.includes('journal.zero_sum'));
         assert.ok((await get('/reconciliation', s)).text.includes(id));
         assert.ok((await get('/', s)).text.includes(`/reconciliation/${id}`), 'the dashboard shows the last run');
-        assert.strictEqual(auditRows('reconciliation.run').length, 1);
-        assert.strictEqual(auditRows('reconciliation.run')[0].target_id, id);
+        assert.strictEqual((await auditRows('reconciliation.run')).length, 1);
+        assert.strictEqual((await auditRows('reconciliation.run'))[0].target_id, id);
     });
 
     await check('receipts needing review are listed without payloads; the console shows no secrets', async () => {
@@ -328,16 +328,16 @@ const DAY = 86_400_000;
         const csrf = csrfOf(page);
         const re = await post(`/receipts/${rejected.json.event}/reprocess`, s, { _csrf: csrf });
         assert.strictEqual(re.status, 303, re.text);
-        assert.strictEqual(auditRows('provider_event.reprocess').length, 1);
+        assert.strictEqual((await auditRows('provider_event.reprocess')).length, 1);
         assert.strictEqual((await post('/receipts/99999/reprocess', s, { _csrf: csrf })).status, 404);
-        assert.strictEqual(auditRows('provider_event.reprocess', 'refused').length, 1);
+        assert.strictEqual((await auditRows('provider_event.reprocess', 'refused')).length, 1);
 
         const secrets = [marker, 'payer-private@example.com', 'Donor Name', 'pc-secret', SESSION_SECRET, s.split('=')[1], '"payload"'];
         for (const p of ['/', '/receipts', '/cashouts', `/cashouts/${co1}`, '/reconciliation', '/freeze', '/audit', '/import-holds']) {
             const body = (await get(p, s)).text;
             for (const x of secrets) assert.ok(!body.includes(x), `${p} shows ${x}`);
         }
-        const runId = t.db.prepare('SELECT id FROM reconciliation_runs ORDER BY finished_at DESC LIMIT 1').get().id;
+        const runId = (await t.db.prepare('SELECT id FROM reconciliation_runs ORDER BY finished_at DESC LIMIT 1').get()).id;
         const csrf2 = csrfOf(await get('/reconciliation', s));
         const rid = (await post('/reconciliation', s, { _csrf: csrf2 })).headers.get('location');
         const rep = (await get(rid, s)).text;
@@ -345,8 +345,8 @@ const DAY = 86_400_000;
     });
 
     await check('the audit log is append-only and shown to staff', async () => {
-        assert.throws(() => t.db.prepare("UPDATE staff_audit SET reason = 'x'").run(), /append-only/);
-        assert.throws(() => t.db.prepare('DELETE FROM staff_audit').run(), /append-only/);
+        await assert.rejects(t.db.prepare("UPDATE staff_audit SET reason = 'x'").run(), /append-only/);
+        await assert.rejects(t.db.prepare('DELETE FROM staff_audit').run(), /append-only/);
         const page = await get('/audit', s);
         assert.ok(page.text.includes('cashout.approve') && page.text.includes('economy.freeze'));
     });
@@ -368,7 +368,7 @@ const DAY = 86_400_000;
         assert.strictEqual(r.status, 303);
         assert.ok(r.cookies.some((c) => c.startsWith('__Host-ovb_staff=;') && c.includes('Max-Age=0')));
         assert.strictEqual((await get('/cashouts', s)).status, 401);
-        assert.strictEqual(auditRows('session.sign_out').length, 1);
+        assert.strictEqual((await auditRows('session.sign_out')).length, 1);
         assert.ok(network.revoked.length >= 3, 'every Network refresh token handed to Billing was revoked, never kept');
     });
 

@@ -36,7 +36,12 @@ async function boot(opts = {}) {
     const logs = [];
     const log = { log: (...a) => logs.push(a.join(' ')), warn: (...a) => logs.push(a.join(' ')), error: (...a) => logs.push(a.join(' ')) };
     // opts.limitsNow: the per-person limiter's clock (default the wall clock).
-    const app = createApp({ config, now: () => Date.now() + clock.offset, log, limitsNow: opts.limitsNow });
+    // A migrated database of its own (./db.js: PGlite, or the containers under npm run test:pg).
+    const db = opts.db || await require('./db').testDb();
+    // npm run test:pg: the per-person limits count in the Valkey container (a prefix of this app's own), as in production.
+    const valkey = process.env.BILLING_TEST_STORE === 'pg' && process.env.OV_TEST_VALKEY_URL
+        ? require('openvibe-sdk/valkey').createValkey({ url: process.env.OV_TEST_VALKEY_URL, prefix: `ov:billing-test:${crypto.randomBytes(6).toString('hex')}:` }) : null;
+    const app = await createApp({ config, db, now: () => Date.now() + clock.offset, log, limitsNow: opts.limitsNow, valkey });
     await app.locals.keys.load();
     const server = await new Promise((resolve) => { const s = http.createServer(app); s.listen(0, '127.0.0.1', () => resolve(s)); });
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -75,9 +80,9 @@ async function boot(opts = {}) {
     }
 
     /** Reconciliation must pass (journal balanced, caches right, events settled once). */
-    function assertReconciled(label = '') {
+    async function assertReconciled(label = '') {
         const { reconcile } = require('../../server/reconcile');
-        const r = reconcile(ctx, { store: false });
+        const r = await reconcile(ctx, { store: false });
         const failed = r.checks.filter((c) => !c.ok);
         assert.deepStrictEqual(failed, [], `reconciliation failed ${label}: ${JSON.stringify(failed)}`);
         return r;
@@ -97,7 +102,8 @@ async function boot(opts = {}) {
             await new Promise((r) => server.close(r));
             if (!opts.network) await network.close();
             if (stripe) await stripe.close();
-            try { ctx.db.close(); } catch { /* */ }
+            if (valkey) await valkey.close().catch(() => {});
+            await ctx.db.close().catch(() => {});
             fs.rmSync(dir, { recursive: true, force: true });
         },
     };

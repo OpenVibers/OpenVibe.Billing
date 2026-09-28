@@ -31,7 +31,7 @@ const DAY = 86_400_000;
         assert.strictEqual(rev.amount, 150);
         assert.strictEqual(r.json.entitlement.active, true);
         assert.ok(Math.abs(Date.parse(r.json.entitlement.expires_at) - (Date.now() + 31 * DAY)) < 60_000);
-        t.assertReconciled('after credit sub');
+        await t.assertReconciled('after credit sub');
     });
 
     await check('an early renewal credits the share again and extends the entitlement', async () => {
@@ -42,7 +42,7 @@ const DAY = 86_400_000;
         assert.strictEqual((await t.balances(streamer.id)).payable, 698);
         const after = Date.parse(r.json.entitlement.expires_at);
         assert.strictEqual(after - before, 31 * DAY);
-        t.assertReconciled('after renewal');
+        await t.assertReconciled('after renewal');
     });
 
     await check('insufficient credit refuses a subscription and changes nothing', async () => {
@@ -74,7 +74,7 @@ const DAY = 86_400_000;
         assert.strictEqual(e.json.active, false);
         assert.strictEqual(e.json.subscription.status, 'expired');
         t.clock.offset = 0;
-        t.assertReconciled('after sweeps');
+        await t.assertReconciled('after sweeps');
     });
 
     await check('cancel keeps access until the period ends, then the sweep ends it', async () => {

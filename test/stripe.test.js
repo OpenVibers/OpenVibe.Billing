@@ -67,7 +67,7 @@ const { boot, check, done } = require('./helpers/app');
         const e = await t.call('GET', `/api/v1/entitlements/${buyer.id}?streamer=${streamer.id}`);
         assert.strictEqual(e.json.active, true);
         assert.strictEqual(Date.parse(e.json.expires_at), (end1 + 30 * 86400) * 1000);
-        t.assertReconciled('after stripe invoices');
+        await t.assertReconciled('after stripe invoices');
     });
 
     await check('a refunded renewal is a reversal: the period is revoked, the share stays (review)', async () => {
@@ -80,7 +80,7 @@ const { boot, check, done } = require('./helpers/app');
         const e = await t.call('GET', `/api/v1/entitlements/${buyer.id}?streamer=${streamer.id}`);
         assert.strictEqual(e.json.active, true, 'the first paid period still holds');
         assert.ok(Date.parse(e.json.expires_at) < Date.now() + 31 * 86_400_000);
-        t.assertReconciled('after stripe refund');
+        await t.assertReconciled('after stripe refund');
     });
 
     await check('a partial refund then a dispute on the purchase trace to the original', async () => {
@@ -97,7 +97,7 @@ const { boot, check, done } = require('./helpers/app');
         assert.strictEqual((await t.balances(buyer.id)).credit, 0);
         const orig = (await t.call('GET', `/api/v1/transactions/${tx.reverses_txn}`)).json;
         assert.strictEqual(orig.reversed_by.length, 2);
-        t.assertReconciled('after dispute');
+        await t.assertReconciled('after dispute');
     });
 
     await check('cancel is sent to Stripe (cancel_at_period_end) before Billing records it', async () => {

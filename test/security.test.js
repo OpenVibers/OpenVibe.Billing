@@ -64,7 +64,7 @@ const { boot, check, done } = require('./helpers/app');
         const r = await tipTo('openvibe', { amountUsdCents: 250, appExternalRef: `pcdon:${attackerLiveId}:0` });
         assert.strictEqual(r.json.result.effect, 'settled', JSON.stringify(r.json));
         assert.strictEqual((await t.balances(attacker.id)).payable, 250);
-        t.assertReconciled('after site pcdon');
+        await t.assertReconciled('after site pcdon');
     });
 
     await check('without POWERCHAT_SITE_USERNAME site-routed refs are held, never credited', async () => {

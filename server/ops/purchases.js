@@ -11,28 +11,28 @@
  *   - an explicit `bits` when its value is covered by the payment;
  *   - otherwise what the payment buys under the price tiers (never the package on faith).
  */
-const { post, getTxn, BillingError, present } = require('../ledger');
+const { post, getTxn, BillingError, present, money } = require('../ledger');
 const { enqueue } = require('../outbox');
 const { A, MAX_RECEIPT_CENTS, receiptEntries, fail, positiveInt } = require('./common');
 const intents = require('./intents');
 
-function settle(ctx, input) {
+async function settle(ctx, input) {
     const { db, rates } = ctx;
-    return db.transaction(() => {
+    return await money(db, async () => {
         const receiptRef = input.receiptRef;
         if (!receiptRef) fail(422, 'billing.invalid_input', 'a provider receipt reference is required');
-        const dup = db.prepare('SELECT id FROM transactions WHERE receipt_ref = ?').get(receiptRef);
-        if (dup) return { txn: getTxn(db, dup.id), replay: true, duplicateReceipt: true };
+        const dup = await db.prepare('SELECT id FROM transactions WHERE receipt_ref = ?').get(receiptRef);
+        if (dup) return { txn: await getTxn(db, dup.id), replay: true, duplicateReceipt: true };
 
         const paidCents = positiveInt(input.paidCents, 'amount_cents', MAX_RECEIPT_CENTS);
         let intent = null;
         if (input.intentId) {
-            intent = intents.find(db, input.intentId);
+            intent = await intents.find(db, input.intentId);
             if (!intent) fail(404, 'billing.intent_not_found', `no payment intent ${input.intentId}`);
             if (intent.kind !== 'purchase') fail(422, 'billing.intent_mismatch', `intent ${intent.id} is a ${intent.kind}, not a purchase`);
             if (intent.provider !== input.provider) fail(422, 'billing.intent_mismatch', `intent ${intent.id} belongs to ${intent.provider}, not ${input.provider}`);
             if (input.subject && input.subject !== intent.subject) fail(422, 'billing.intent_mismatch', 'the intent belongs to another subject');
-            if (intent.status === 'settled' && intent.settled_txn) return { txn: getTxn(db, intent.settled_txn), replay: true };
+            if (intent.status === 'settled' && intent.settled_txn) return { txn: await getTxn(db, intent.settled_txn), replay: true };
             intents.refuseIfSettledInLive(intent);
         }
         const subject = intent ? intent.subject : input.subject;
@@ -50,7 +50,7 @@ function settle(ctx, input) {
         if (bits < 1) fail(422, 'billing.amount_too_small', `a payment of ${paidCents} cents buys no Vibes`);
         if (bits > rates.maxBits) fail(422, 'billing.invalid_amount', `bits exceed the maximum of ${rates.maxBits}`);
 
-        const { txn } = post(ctx, {
+        const { txn } = await post(ctx, {
             type: 'purchase',
             idempotencyKey: input.idempotencyKey,
             entries: receiptEntries(rates, { provider: input.provider, paidCents, bits, target: A.credit(subject) }),
@@ -65,10 +65,10 @@ function settle(ctx, input) {
                 pricing: basis, intent_id: intent ? intent.id : null, rates: rates.snapshot(), ...(input.metadata || {}),
             },
         });
-        if (intent) intents.markSettled(ctx, intent.id, txn.id);
-        enqueue(ctx, { event_type: 'billing.transaction.settled', subject: { type: 'transaction', id: txn.id }, payload: summary(txn), traceId: input.traceId });
+        if (intent) await intents.markSettled(ctx, intent.id, txn.id);
+        await enqueue(ctx, { event_type: 'billing.transaction.settled', subject: { type: 'transaction', id: txn.id }, payload: summary(txn), traceId: input.traceId });
         return { txn, replay: false };
-    })();
+    });
 }
 
 function summary(txn) {
