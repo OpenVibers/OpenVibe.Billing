@@ -129,6 +129,31 @@ The capabilities and the service manifest are released in openvibe-contracts (v0
 [docs/service-manifest-proposal.json](docs/service-manifest-proposal.json). Grants are matched with
 contracts' own `capabilities.grants()` (exact id or a `.*` family such as `billing.*`).
 
+### Per-person limits
+
+The money-creating routes also limit how often one person can use them: `server/api/actor-limits.js`,
+openvibe-sdk/limits, roadmap WS-R task 4. Every caller is a first-party service acting for many people,
+so nothing is counted per service: a request counts against the person its body names (the buyer, the
+payer, the creator, the subscriber), whichever service sends it; a refund counts against the payer of the
+transfer it gives back. The limit runs after the capability and freeze checks (a request refused while
+frozen is not counted) and before the idempotency store and the ledger, so a refusal stores nothing and
+the same `Idempotency-Key` works after `Retry-After`. Past a limit: `429` problem+json `rate_limited`, one log line and
+`billing_rate_limited_total{limit,window}`. `BILLING_LIMITS=off` turns them all off (a rollback lever).
+
+| Route | Per person, a minute / an hour |
+|---|---|
+| `POST /api/v1/intents` (checkout) | 5 / 30 |
+| `POST /api/v1/transfers` (per payer) | 60 / 1200 |
+| `POST /api/v1/transfers/:id/refund` (per payer of the transfer) | 20 / 200 |
+| `POST /api/v1/cashouts` (payout request) | 3 / 10 |
+| `POST /api/v1/recycle` | 10 / 60 |
+| `POST /api/v1/subscriptions` (per subscriber) | 10 / 60 |
+| `GET /api/v1/transactions?subject=` (history) | `BILLING_LIMITS_MINUTE` / `BILLING_LIMITS_HOUR` (120 / 3000) |
+
+Never limited: the provider webhooks (`/webhooks/*`), capturing an approved order, cashout approve and
+deny, subscription cancel, the freeze, every admin route, the staff console, balance and entitlement
+reads, `/api/health`, `/api/ready`, `/release.json` and `/metrics`. `test/actor-limits.test.js`.
+
 ## Staff console
 
 Server-rendered pages at the root of `https://billing.openvibe.network` for the people who decide

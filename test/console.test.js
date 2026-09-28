@@ -18,7 +18,9 @@ const DAY = 86_400_000;
     const staff = network.addUser();          // admin + listed
     const listedNonAdmin = network.addUser(); // listed, but Network role 'user'
     const unlistedAdmin = network.addUser();  // Network admin, not Billing staff
-    const t = await boot({ network, env: { BASE_URL: 'https://billing.test', BILLING_STAFF_SUBJECTS: `${staff}, ${listedNonAdmin}, not-a-subject`, BILLING_SESSION_SECRET: SESSION_SECRET } });
+    // BILLING_LIMITS=off: this file opens several payouts for one creator within a second to fill the staff
+    // queue, past the per-person cashout limit (3 a minute); test/actor-limits.test.js covers the limits.
+    const t = await boot({ network, env: { BASE_URL: 'https://billing.test', BILLING_STAFF_SUBJECTS: `${staff}, ${listedNonAdmin}, not-a-subject`, BILLING_SESSION_SECRET: SESSION_SECRET, BILLING_LIMITS: 'off' } });
     const fan = t.user(21);
     const creator = t.user(22);
     console.log('staff console');

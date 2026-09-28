@@ -10,7 +10,8 @@
  *   /webhooks/<provider>                  provider receipts (see api/webhooks.js)
  *   /, /auth/*, /cashouts, …               staff console (Network SSO, server-rendered; see console/index.js)
  *
- * createApp({ config, db, keys, identity, adapters, now, fetchImpl, log }) — everything injectable.
+ * createApp({ config, db, keys, identity, adapters, now, fetchImpl, log, limitsNow }) — everything injectable
+ * (limitsNow: the per-person limiter's clock, tests; default the wall clock).
  */
 const path = require('path');
 const express = require('express');
@@ -23,6 +24,7 @@ const { createRates } = require('./rates');
 const { createKeyProvider, createIdentity } = require('./network');
 const { createAuth } = require('./api/auth');
 const { v1Router } = require('./api/v1');
+const { createActorLimits } = require('./api/actor-limits');
 const { webhooksRouter } = require('./api/webhooks');
 const { consoleRouter } = require('./console');
 const providers = require('./providers');
@@ -79,7 +81,9 @@ function createApp(opts = {}) {
     app.get('/api/ready', readiness.handler);
 
     app.use('/webhooks', webhooksRouter({ ctx, adapters }));
-    app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters }));
+    // Per-person limits on the money-creating routes (api/actor-limits.js); the webhooks above never are.
+    const limits = createActorLimits({ config, db, now: opts.limitsNow || (() => Date.now()), registry: metrics.registry, log });
+    app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters, limits }));
 
     // The billing policy is public and indexable; the staff console and the API are not.
     app.get('/robots.txt', (req, res) => res.type('text/plain').send('User-agent: *\nAllow: /policy\nDisallow: /\n'));

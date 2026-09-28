@@ -83,6 +83,14 @@ function loadConfig(env = process.env) {
             publicKey: env.OV_NETWORK_PUBLIC_KEY ? env.OV_NETWORK_PUBLIC_KEY.replace(/\\n/g, '\n') : null,
         },
         audience: env.BILLING_AUDIENCE || 'openvibe.billing',
+        // Per-person limits on /api/v1's money-creating routes (server/api/actor-limits.js, roadmap WS-R
+        // task 4). minute/hour: a person's history reads; the money routes set tighter numbers there.
+        // BILLING_LIMITS=off counts nobody (a rollback lever).
+        actorLimits: {
+            enabled: String(env.BILLING_LIMITS || 'on').toLowerCase() !== 'off',
+            minute: Math.max(1, int(env.BILLING_LIMITS_MINUTE, 120)),
+            hour: Math.max(1, int(env.BILLING_LIMITS_HOUR, 3000)),
+        },
         oauth: {
             clientId: env.OV_OAUTH_CLIENT_ID || 'billing',
             clientSecret: env.OV_OAUTH_CLIENT_SECRET || '',

@@ -35,7 +35,8 @@ async function boot(opts = {}) {
     const clock = { offset: 0 };
     const logs = [];
     const log = { log: (...a) => logs.push(a.join(' ')), warn: (...a) => logs.push(a.join(' ')), error: (...a) => logs.push(a.join(' ')) };
-    const app = createApp({ config, now: () => Date.now() + clock.offset, log });
+    // opts.limitsNow: the per-person limiter's clock (default the wall clock).
+    const app = createApp({ config, now: () => Date.now() + clock.offset, log, limitsNow: opts.limitsNow });
     await app.locals.keys.load();
     const server = await new Promise((resolve) => { const s = http.createServer(app); s.listen(0, '127.0.0.1', () => resolve(s)); });
     const base = `http://127.0.0.1:${server.address().port}`;

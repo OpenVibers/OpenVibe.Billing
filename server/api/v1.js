@@ -14,6 +14,7 @@ const { getTxn, present: presentTxn, balance, BillingError } = require('../ledge
 const { A, userSubject, positiveInt, isFrozen, fail } = require('../ops/common');
 const { idempotent } = require('./idempotency');
 const { actorOf } = require('./auth');
+const { personOf } = require('./actor-limits');
 const purchases = require('../ops/purchases');
 const transfers = require('../ops/transfers');
 const cashouts = require('../ops/cashouts');
@@ -35,16 +36,21 @@ const CAP = {
     admin: 'billing.ledger.admin',
 };
 
-function v1Router({ ctx, auth, adapters }) {
+function v1Router({ ctx, auth, adapters, limits }) {
     const r = express.Router();
     const { db } = ctx;
     const idem = idempotent(db, ctx.now);
     const notFrozen = (req, res, next) => (isFrozen(db)
         ? http.sendProblem(res, 503, 'billing.frozen', { detail: 'the economy is frozen: writes are refused, reads are served', ctx: req.ov })
         : next());
-    /** A mutating route: capability → freeze → idempotency → handler. */
-    const write = (cap, handler) => [auth.needs(cap), notFrozen, idem, wrap(handler)];
-    const read = (cap, handler) => [auth.needs(cap), wrap(handler)];
+    /**
+     * A mutating route: capability → freeze → per-person limit (when given) → idempotency → handler.
+     * A limit refusal reaches neither the idempotency store nor the ledger; a frozen refusal is not counted.
+     */
+    const write = (cap, handler, limit) => [auth.needs(cap), notFrozen, ...(limit ? [limit] : []), idem, wrap(handler)];
+    const read = (cap, handler, limit) => [auth.needs(cap), ...(limit ? [limit] : []), wrap(handler)];
+    // Who a money route is counted against (api/actor-limits.js): the person the body names.
+    const person = (field) => (req) => personOf(req.body && req.body[field]);
     const txnOut = (t, extra = {}) => ({ transaction: presentTxn(t), ...extra });
     const pathSubject = (v) => userSubject(String(v), 'subject');
 
@@ -83,7 +89,7 @@ function v1Router({ ctx, auth, adapters }) {
             }
         }
         res.status(201).json({ intent: intents.present(intents.find(db, intent.id)), checkout_url: checkoutUrl });
-    }));
+    }, limits.budget('billing.intent.create', person('subject'))));
     r.get('/intents/:id', ...read(CAP.intent, (req, res) => {
         const i = intents.find(db, req.params.id);
         if (!i) fail(404, 'billing.intent_not_found', `no intent ${req.params.id}`);
@@ -119,12 +125,12 @@ function v1Router({ ctx, auth, adapters }) {
             message: b.message, idempotencyKey: req.idempotencyKey, actor: actorOf(req), traceId: req.ov.traceId,
         });
         res.status(201).json(txnOut(out.txn, { balance: { credit: balance(db, A.credit(out.txn.from_subject)) } }));
-    }));
+    }, limits.budget('billing.transfer.create', person('from'))));
     r.post('/transfers/:id/refund', ...write(CAP.transfer, (req, res) => {
         const b = req.body || {};
         const out = transfers.refund(ctx, { txnId: req.params.id, amount: b.amount, reason: b.reason, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.status(201).json(txnOut(out.txn));
-    }));
+    }, limits.budget('billing.transfer.refund', limits.payerOf)));
 
     // ── Recycle: creator payable → own spendable credit ──────
     r.post('/recycle', ...write(CAP.cashoutRequest, (req, res) => {
@@ -132,14 +138,14 @@ function v1Router({ ctx, auth, adapters }) {
         const subject = userSubject(b.subject);
         const out = cashouts.recycle(ctx, { subject, amount: b.amount, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.status(201).json(txnOut(out.txn, { balance: balanceOf(subject) }));
-    }));
+    }, limits.budget('billing.recycle', person('subject'))));
 
     // ── Cashouts ─────────────────────────────────────────────
     r.post('/cashouts', ...write(CAP.cashoutRequest, (req, res) => {
         const b = req.body || {};
         const out = cashouts.request(ctx, { subject: userSubject(b.subject), amount: b.amount, payout_method: b.payout_method, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.status(201).json({ cashout: cashouts.present(out.cashout) });
-    }));
+    }, limits.budget('billing.cashout.request', person('subject'))));
     r.get('/cashouts', ...read(CAP.cashoutManage, (req, res) => {
         const list = cashouts.list(db, { status: req.query.status, subject: req.query.subject, limit: Number(req.query.limit) || 100 });
         res.json({ cashouts: list.map(cashouts.present) });
@@ -179,7 +185,7 @@ function v1Router({ ctx, auth, adapters }) {
             priceCents: b.price_cents, autoRenew: b.auto_renew, receipt, idempotencyKey: req.idempotencyKey, actor: actorOf(req),
         });
         res.status(201).json({ subscription: subscriptions.present(out.subscription), entitlement: out.entitlement, transaction: presentTxn(out.txn) });
-    }));
+    }, limits.budget('billing.subscription.create', person('subscriber'))));
     r.get('/subscriptions', ...read([CAP.entitlement, CAP.subscription], (req, res) => {
         const list = subscriptions.list(db, {
             subscriber: req.query.subscriber ? pathSubject(req.query.subscriber) : null,
@@ -230,7 +236,7 @@ function v1Router({ ctx, auth, adapters }) {
         const page = rows.slice(0, limit);
         const next = rows.length > limit ? Buffer.from(JSON.stringify([page[page.length - 1].created_at, page[page.length - 1].id])).toString('base64url') : null;
         res.json({ transactions: page.map((x) => presentTxn(getTxn(db, x.id))), next_cursor: next });
-    }));
+    }, limits.history));
     r.get('/transactions/:id', ...read(CAP.balance, (req, res) => {
         const t = getTxn(db, req.params.id);
         if (!t) fail(404, 'billing.transaction_not_found', `no transaction ${req.params.id}`);
