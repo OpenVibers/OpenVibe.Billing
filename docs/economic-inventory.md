@@ -47,7 +47,7 @@ are non-zero.
 1. **Non-atomic donate.** `donate()` deducts, credits and records in three separate statements with no
    transaction (`vibes.js:111-128`); `deductVibes` is read-then-write (`database.js:5393-5399`), so two
    concurrent donations can both pass the check. A crash between the deduct and the credit loses money.
-   *Billing:* every operation is one SQLite transaction with the funds check inside it.
+   *Billing:* every operation is one PostgreSQL transaction with the funds check inside it.
 2. **Best-effort, mutable ledger.** The ledger row is written after the balances move and failures are
    swallowed (`payments.js:262-268`, `powerchat-checkout.js:337-343`); rows are later UPDATEd
    (`vibes.js:204`, `:218`); subscription payments and streamer shares write no ledger row at all

@@ -19,11 +19,10 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/env node /opt/openvibe.billing/server/index.js
 Restart=always
 RestartSec=5
-# /var/lib/openvibe-billing keeps the SQLite ledger the service moved from (read-only after the switch: the rollback
-# for 7 days; scripts/migrate-to-postgres.js reads it); the code tree stays read-only.
+# /var/lib/openvibe-billing holds the Live snapshot the cutover runbook copies in for the import
+# (docs/live-cutover.md); the code tree stays read-only.
 StateDirectory=openvibe-billing
 StateDirectoryMode=0700
-Environment=BILLING_DB_PATH=/var/lib/openvibe-billing/billing.db
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

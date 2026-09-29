@@ -78,8 +78,7 @@ node scripts/import-live.js --live-db <snapshot> --accounts-only   # only PowerC
 ```
 
 Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
-[deploy/systemd/openvibe-billing.service](deploy/systemd/openvibe-billing.service) (state in
-`/var/lib/openvibe-billing`), vhost [deploy/nginx/billing.openvibe.network.conf](deploy/nginx/billing.openvibe.network.conf).
+[deploy/systemd/openvibe-billing.service](deploy/systemd/openvibe-billing.service), vhost [deploy/nginx/billing.openvibe.network.conf](deploy/nginx/billing.openvibe.network.conf).
 
 ## Design
 
@@ -285,7 +284,7 @@ Reversing a subscription payment revokes the periods it granted.
 - **Payouts** are decided in the staff console (or with `billing.cashout.manage` on the API): pay at the
   provider, then approve with its payout reference once the escrow has ended.
 - **Metrics**: `curl -s http://127.0.0.1:4600/metrics` on the host.
-- **Backups**: `sqlite3 /var/lib/openvibe-billing/billing.db ".backup billing-$(date +%F).db"`.
+- **Backups**: `pg_dump ov_billing > billing-$(date +%F).sql` (the host's data role, ADR-035).
 - **Mapping of Live's tables** to Billing's (including payouts, refunds and plans, which have no table
   of their own on Live): [docs/live-mapping.md](docs/live-mapping.md).
 
@@ -328,10 +327,8 @@ Production deploys with `sudo ovhost deploy billing` on the host (strategy `git-
 fast-forward `/opt/openvibe.billing`, install on a lockfile change, restart, wait for `/api/ready`).
 The unit is `openvibe-billing.service` on `127.0.0.1:4600`, the env file `/etc/openvibe/billing.env`. The ledger is
 `ov_billing` on the host's data role (`sudo /opt/openvibe.host/roles/data/add-service.sh billing` writes its settings);
-the release migrates it at boot. The one-time move from SQLite is `scripts/migrate-to-postgres.js` (openvibe-sdk
-`runSqliteMigration`, with a `--pglite` rehearsal mode; it refuses to empty a PostgreSQL journal that already has
-transactions), run while the service is stopped and frozen; the old `/var/lib/openvibe-billing/billing.db` stays
-read-only for 7 days as the rollback. nginx serves `billing.openvibe.network` from
+the release applies `migrations/` at boot as the owner (`DATABASE_DIRECT_URL`), and every read and write is async
+through `openvibe-sdk/db`. nginx serves `billing.openvibe.network` from
 [deploy/nginx/billing.openvibe.network.conf](deploy/nginx/billing.openvibe.network.conf) (console, `/policy`,
 `/webhooks/*`, `/api/health`). Freeze the economy before any risky change (below).
 Rollback: ovhost puts the previous sha back by itself when `/api/ready` does not answer 2xx after the

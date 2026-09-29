@@ -15,7 +15,6 @@
  * identity.subject.resolve). The report is printed and stored in import_runs; a reconciliation run
  * follows every real import. Safe to re-run: a second run over the same snapshot changes nothing.
  */
-const path = require('path');
 const Database = require('better-sqlite3');
 const { loadConfig } = require('../server/config');
 const { openDb } = require('../server/db');
@@ -32,7 +31,6 @@ async function main() {
     const livePath = opt('live-db');
     if (!livePath) { console.error('usage: import-live.js --live-db <snapshot path> [--dry-run] [--json]'); process.exit(2); }
     const config = loadConfig();
-    if (path.resolve(livePath) === path.resolve(config.dbPath)) throw new Error('--live-db points at the Billing database');
     const live = new Database(livePath, { readonly: true, fileMustExist: true });
     const db = await openDb(config);
     const ctx = { db, config, rates: createRates(config.rates), now: () => Date.now(), log: console };

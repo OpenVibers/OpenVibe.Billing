@@ -128,8 +128,8 @@ Shell helpers used below (on the host):
 
 ```bash
 # billing '<command>' runs one command with Billing's environment, as Billing's service user (ubuntu)
-# so the database files keep their owner — the same way the shadow imports were run.
-billing() { sudo bash -c "set -a; . /etc/openvibe/billing.env; set +a; export NODE_ENV=production BILLING_DB_PATH=/var/lib/openvibe-billing/billing.db; cd /opt/openvibe.billing && sudo -E -u ubuntu $1"; }
+# so the Live snapshot files keep their owner — the same way the shadow imports were run.
+billing() { sudo bash -c "set -a; . /etc/openvibe/billing.env; set +a; export NODE_ENV=production; cd /opt/openvibe.billing && sudo -E -u ubuntu $1"; }
 LIVE_DB=/opt/openvibe.live/data/live.db     # production runs Live's legacy layout (a git checkout); there is no shared/
 # /var/backups/openvibe is root-only (0700), so Billing's user cannot read a snapshot there: the import reads
 # its copy from Billing's own state directory, and a second copy stays in /var/backups/openvibe for rollback.
@@ -152,8 +152,8 @@ Live owner calls are made from the browser console on openvibe.live, signed in a
    A `paid` row is an anomaly to fix first; a `pending` one is carried into Billing as an intent and
    settles there if it is ever paid (canonical, un-minted links do not expire).
 3. **Back up and freeze Billing** so it holds PowerChat deliveries until the final import is in:
-   `billing "sqlite3 /var/lib/openvibe-billing/billing.db '.backup /var/lib/openvibe-billing/billing-pre-cutover.db'"`
-   (kept for rollback), then `billing "node scripts/freeze.js on 'Live cutover'"` → `frozen: true`.
+   take a PostgreSQL snapshot of `ov_billing` (`pg_dump`, kept in `/var/lib/openvibe-billing` for rollback),
+   then `billing "node scripts/freeze.js on 'Live cutover'"` → `frozen: true`.
    Then make Billing the authority for EXTERNAL tips: add `BILLING_AUTHORITY=billing` to
    `/etc/openvibe/billing.env` and `sudo systemctl restart openvibe-billing`. The freeze is kept in the
    database, so it survives the restart. `curl -s http://127.0.0.1:4600/api/health` →
@@ -238,8 +238,8 @@ which money moved where.
   `TIPS_CHAT_ADAPTER=none` in tips.env and restart Tips; re-point PowerChat to Live; unfreeze Live.
   The billing.env `BILLING_AUTHORITY` goes too, with the Billing restore below. The stragglers Billing
   settled are still pending orders on Live and are backfilled by Live's reconciler from PowerChat's
-  paid-messages feed — so Billing must forget them: stop `openvibe-billing`, restore `billing-pre-cutover.db` from step 3 over `billing.db` (remove the
-  `-wal`/`-shm` files), freeze it (`billing "node scripts/freeze.js on 'rollback'"`), start it again.
+  paid-messages feed — so Billing must forget them: stop `openvibe-billing`, restore the step-3 PostgreSQL
+  snapshot over `ov_billing`, freeze it (`billing "node scripts/freeze.js on 'rollback'"`), start it again.
   Otherwise a later attempt would count those payments twice (Live's credit arrives through the import,
   Billing's own settlement stays).
 - **After step 9** (people have moved money in Billing): ADR-012's rollback — freeze Billing and Live,
