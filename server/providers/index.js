@@ -66,7 +66,7 @@ async function applyPlan(ctx, plan, row) {
     const settled = (r) => (r.replay ? { effect: 'duplicate_receipt', txn_id: r.txn && r.txn.id } : { effect: 'settled', txn_id: r.txn.id });
     switch (plan.effect) {
         case 'none': return { effect: 'none', reason: plan.reason, review: plan.review || plan.hold || undefined };
-        case 'update': plan.apply(ctx); return { effect: 'updated', reason: plan.reason };
+        case 'update': await plan.apply(ctx); return { effect: 'updated', reason: plan.reason };
         case 'purchase': return settled(await purchases.settle(ctx, withEvent(plan.args)));
         case 'subscription': return settled(await subscriptions.pay(ctx, withEvent(plan.args)));
         case 'tip': return settled(await transfers.fromReceipt(ctx, withEvent(plan.args)));
