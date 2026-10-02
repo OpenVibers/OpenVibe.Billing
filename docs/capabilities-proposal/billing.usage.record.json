@@ -1,0 +1,19 @@
+{
+  "id": "billing.usage.record",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Record a platform.usage-sample@1 reading without moving money. The reading's idempotency_key deduplicates retries. Listing all readings requires billing.ledger.admin.",
+  "permissions": [
+    "billing:usage"
+  ],
+  "resourceConstraints": [
+    "none"
+  ],
+  "quotaClass": "ledger-write",
+  "events": [],
+  "implementedBy": [
+    "POST /api/v1/usage"
+  ]
+}

@@ -48,7 +48,7 @@ webhooks land here and nowhere else.
 - OpenVibe.Network (JWKS for service tokens; SSO with PKCE for the staff console; `identity.subject.resolve` for the Live import)
 - OpenVibe.Events (the outbox relay, only when `EVENTS_URL` is set)
 - the payment providers whose secrets are configured (none in production today)
-- `openvibe-contracts` v0.76.0, `openvibe-sdk` v0.21.2 (service tokens, per-person limits, `openvibe-sdk/db`), `openvibe-shared` v1.28.0, pinned by release tarball
+- `openvibe-contracts` v0.84.0, `openvibe-sdk` v0.21.2 (service tokens, per-person limits, `openvibe-sdk/db`), `openvibe-shared` v1.28.0, pinned by release tarball
 - **PostgreSQL 18 and Valkey 9** (OpenVibe.Host `roles/data/`, ADR-035): every read and write is async through
   `openvibe-sdk/db`; Valkey holds the per-person limit counters (optional: without `VALKEY_URL` they count in the process)
 
@@ -57,7 +57,8 @@ webhooks land here and nowhere else.
 Implemented here (the service manifest's `capabilities`, audience `openvibe.billing`; routes under
 [API](#api)): `billing.intent.create`, `billing.transfer.create`, `billing.balance.read`,
 `billing.cashout.request`, `billing.cashout.manage`, `billing.subscription.manage`,
-`billing.entitlement.check` and `billing.ledger.admin`. Callers today are Live (after the cutover),
+`billing.entitlement.check`, `billing.ledger.admin` and `billing.usage.record` (usage readings; released in
+Contracts v0.85.0). Callers today are Live (after the cutover),
 Tips (`billing.intent.create`, `billing.transfer.create`) and VIP (`billing.intent.create`,
 `billing.subscription.manage`, `billing.entitlement.check`).
 
@@ -150,6 +151,8 @@ are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "typ
 | `GET /api/v1/entitlements/:subject[?streamer=]` | `billing.entitlement.check` | `{active, expires_at, subscription}` — needs nothing but Billing |
 | `GET /api/v1/balances/:subject` | `billing.balance.read` | `{credit, payable, pending_payouts, payable_value_cents}` |
 | `GET /api/v1/transactions?subject=&cursor=&limit=`, `GET …/:id` | `billing.balance.read` | history (cursor paging), one transaction with `reversed_by` |
+| `POST /api/v1/usage` | `billing.usage.record` | store a `platform.usage-sample@1` reading (charges nothing; accepted while frozen); idempotent by the reading's `idempotency_key`: same reading → 200 with the stored row (`Idempotent-Replayed: true`), a different one → 409 `billing.usage_key_reused`; no `Idempotency-Key` header |
+| `GET /api/v1/usage?project=&subject=&service=&from=&to=&limit=&cursor=` | `billing.ledger.admin` | readings newest first, `from` ≤ `at` < `to`, cursor paging (`limit` ≤ 500) |
 | `GET\|POST /api/v1/admin/freeze` | `billing.ledger.admin` | read / set `{on, reason?}`; unfreeze drains queued webhooks |
 | `GET /api/v1/admin/reconcile` | `billing.ledger.admin` | run + store a reconciliation |
 | `GET /api/v1/admin/reconciliations[?limit&failed=1]`, `GET …/:id` (`latest`) | `billing.ledger.admin` | stored runs (scheduled and on demand) with their trigger; one full report |
@@ -160,11 +163,15 @@ are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "typ
 | `POST /webhooks/<provider>` | provider signature | `powerchat`, `stripe`, `paypal`, `ccbill` (GET too), `nowpayments` |
 | `GET /metrics` | direct loopback caller | Prometheus text (openvibe-shared/metrics): HTTP golden signals, process, `release_info`, and `billing_*` gauges — freeze, authority, receipts by state, oldest pending receipt, EXTERNAL receipts, outbox backlog, cashouts, the latest reconciliation. 404 to anything a proxy relayed; nginx answers 404 on the public host |
 
-The capabilities and the service manifest are released in openvibe-contracts (v0.8.0;
-`billing.staff.action` since v0.17.0); the drafts they came from stay in
-[docs/capabilities-proposal/](docs/capabilities-proposal/) and
-[docs/service-manifest-proposal.json](docs/service-manifest-proposal.json). Grants are matched with
-contracts' own `capabilities.grants()` (exact id or a `.*` family such as `billing.*`).
+The existing capabilities and service manifest are released in openvibe-contracts (v0.8.0;
+`billing.staff.action` since v0.17.0). `billing.usage.record` is released in Contracts v0.85.0: input is
+`platform.usage-sample@1`; output is `billing.usage-record-result@1` =
+`{ record: { id, idempotency_key, project|null, subject|null, service, at, received_at, principal, reading } }`,
+201 when stored and 200 with `Idempotent-Replayed: true` on a replay; `GET /api/v1/usage` needs
+`billing.ledger.admin` and returns `{ records, next_cursor }`. Network grants `billing.usage.record`
+(audience `openvibe.billing`) to each producer service in `server/identity/principals.js`, and no service
+holds it yet: the first producer gets the grant in the same change that wires its calls. Grants are matched
+with contracts' own `capabilities.grants()` (exact id or a `.*` family such as `billing.*`).
 
 ### Per-person limits
 
