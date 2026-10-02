@@ -113,6 +113,8 @@ async function userAccessToken(t) {
         assert.strictEqual(denied.status, 403);
         assert.strictEqual(denied.json.code, 'capability.denied');
         assert.strictEqual((await post(reading(), { cap: ['billing.ledger.admin'] })).status, 403, 'admin reads readings, does not record them');
+        assert.strictEqual((await get('')).status, 403, 'recording access cannot list other projects or subjects');
+        assert.strictEqual((await get(`project=${PRJ}`)).status, 403, 'a query filter does not authorize a reading');
         assert.strictEqual((await get('', { cap: ['billing.ledger.admin'] })).status, 200);
         assert.strictEqual((await get('', { cap: ['billing.balance.read'] })).status, 403);
     });
@@ -131,7 +133,7 @@ async function userAccessToken(t) {
     // ── Listing: filters and paging, on a fresh database ──
     const u = await boot();
     const uPost = (body) => u.call('POST', '/api/v1/usage', { body, cap: REC, key: null });
-    const uGet = async (qs) => { const r = await u.call('GET', `/api/v1/usage?${qs}`, { cap: REC }); assert.strictEqual(r.status, 200, r.text); return r.json; };
+    const uGet = async (qs) => { const r = await u.call('GET', `/api/v1/usage?${qs}`, { cap: ['billing.ledger.admin'] }); assert.strictEqual(r.status, 200, r.text); return r.json; };
     const seed = [
         reading({ project: PRJ, subject: 'user:a', service: 'media', at: '2026-09-01T00:00:00Z' }),
         reading({ project: PRJ, subject: 'user:b', service: 'media', at: '2026-09-02T00:00:00Z' }),
@@ -167,7 +169,7 @@ async function userAccessToken(t) {
         assert.strictEqual(pages, 3);
         assert.deepStrictEqual(seen, [k(4), k(3), k(2), k(1), k(0)]);
         for (const qs of ['cursor=nope', 'limit=0', 'from=yesterday', 'to=2026-13-40']) {
-            const r = await u.call('GET', `/api/v1/usage?${qs}`, { cap: REC });
+            const r = await u.call('GET', `/api/v1/usage?${qs}`, { cap: ['billing.ledger.admin'] });
             assert.strictEqual(r.status, 422, `${qs} → ${r.status} ${r.text}`);
         }
     });
