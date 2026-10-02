@@ -48,7 +48,7 @@ webhooks land here and nowhere else.
 - OpenVibe.Network (JWKS for service tokens; SSO with PKCE for the staff console; `identity.subject.resolve` for the Live import)
 - OpenVibe.Events (the outbox relay, only when `EVENTS_URL` is set)
 - the payment providers whose secrets are configured (none in production today)
-- `openvibe-contracts` v0.76.0, `openvibe-sdk` v0.21.2 (service tokens, per-person limits, `openvibe-sdk/db`), `openvibe-shared` v1.28.0, pinned by release tarball
+- `openvibe-contracts` v0.84.0, `openvibe-sdk` v0.21.2 (service tokens, per-person limits, `openvibe-sdk/db`), `openvibe-shared` v1.28.0, pinned by release tarball
 - **PostgreSQL 18 and Valkey 9** (OpenVibe.Host `roles/data/`, ADR-035): every read and write is async through
   `openvibe-sdk/db`; Valkey holds the per-person limit counters (optional: without `VALKEY_URL` they count in the process)
 
@@ -57,7 +57,8 @@ webhooks land here and nowhere else.
 Implemented here (the service manifest's `capabilities`, audience `openvibe.billing`; routes under
 [API](#api)): `billing.intent.create`, `billing.transfer.create`, `billing.balance.read`,
 `billing.cashout.request`, `billing.cashout.manage`, `billing.subscription.manage`,
-`billing.entitlement.check` and `billing.ledger.admin`. Callers today are Live (after the cutover),
+`billing.entitlement.check`, `billing.ledger.admin` and `billing.usage.record` (usage readings; not yet in
+the contracts' capability manifests). Callers today are Live (after the cutover),
 Tips (`billing.intent.create`, `billing.transfer.create`) and VIP (`billing.intent.create`,
 `billing.subscription.manage`, `billing.entitlement.check`).
 
@@ -150,6 +151,8 @@ are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "typ
 | `GET /api/v1/entitlements/:subject[?streamer=]` | `billing.entitlement.check` | `{active, expires_at, subscription}` — needs nothing but Billing |
 | `GET /api/v1/balances/:subject` | `billing.balance.read` | `{credit, payable, pending_payouts, payable_value_cents}` |
 | `GET /api/v1/transactions?subject=&cursor=&limit=`, `GET …/:id` | `billing.balance.read` | history (cursor paging), one transaction with `reversed_by` |
+| `POST /api/v1/usage` | `billing.usage.record` | store a `platform.usage-sample@1` reading (charges nothing; accepted while frozen); idempotent by the reading's `idempotency_key`: same reading → 200 with the stored row (`Idempotent-Replayed: true`), a different one → 409 `billing.usage_key_reused`; no `Idempotency-Key` header |
+| `GET /api/v1/usage?project=&subject=&service=&from=&to=&limit=&cursor=` | `billing.usage.record` or `billing.ledger.admin` | readings newest first, `from` ≤ `at` < `to`, cursor paging (`limit` ≤ 500) |
 | `GET\|POST /api/v1/admin/freeze` | `billing.ledger.admin` | read / set `{on, reason?}`; unfreeze drains queued webhooks |
 | `GET /api/v1/admin/reconcile` | `billing.ledger.admin` | run + store a reconciliation |
 | `GET /api/v1/admin/reconciliations[?limit&failed=1]`, `GET …/:id` (`latest`) | `billing.ledger.admin` | stored runs (scheduled and on demand) with their trigger; one full report |
