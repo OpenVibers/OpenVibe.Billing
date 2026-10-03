@@ -25,6 +25,7 @@ const admin = require('../ops/admin');
 const providers = require('../providers');
 const { reconcile } = require('../reconcile');
 const external = require('../ops/external');
+const usage = require('../ops/usage');
 
 const CAP = {
     intent: 'billing.intent.create',
@@ -35,6 +36,7 @@ const CAP = {
     subscription: 'billing.subscription.manage',
     entitlement: 'billing.entitlement.check',
     admin: 'billing.ledger.admin',
+    usage: 'billing.usage.record',
 };
 
 function v1Router({ ctx, auth, adapters, limits }) {
@@ -244,6 +246,16 @@ function v1Router({ ctx, auth, adapters, limits }) {
         const reversals = (await db.prepare('SELECT id FROM transactions WHERE reverses_txn = ? ORDER BY created_at').all(t.id)).map((x) => x.id);
         res.json({ transaction: presentTxn(t), reversed_by: reversals });
     }));
+
+    // ── Usage readings (platform.usage-sample@1; ops/usage.js) ──
+    // Stored and reported, never charged. Not a money movement, so accepted while frozen; idempotent by the
+    // reading's own idempotency_key (no Idempotency-Key header): a replay is 200 with the stored row, a new one 201.
+    r.post('/usage', auth.needs(CAP.usage), wrap(async (req, res) => {
+        const out = await usage.record(ctx, req.body, { principal: req.principal.sub });
+        if (out.replayed) res.setHeader('Idempotent-Replayed', 'true');
+        res.status(out.replayed ? 200 : 201).json({ record: out.record });
+    }));
+    r.get('/usage', ...read([CAP.usage, CAP.admin], async (req, res) => res.json(await usage.list(db, req.query))));
 
     // ── Admin (billing.ledger.admin) ─────────────────────────
     r.get('/admin/freeze', ...read(CAP.admin, async (req, res) => res.json(await admin.freezeState(db))));
