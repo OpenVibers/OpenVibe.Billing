@@ -21,7 +21,8 @@
     "billing.cashout.manage",
     "billing.subscription.manage",
     "billing.entitlement.check",
-    "billing.ledger.admin"
+    "billing.ledger.admin",
+    "billing.usage.record"
   ],
   "eventsProduced": [
     "billing.transaction.settled",
