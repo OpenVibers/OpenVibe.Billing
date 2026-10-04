@@ -74,7 +74,7 @@ async function list(db, q = {}) {
     if (q.cursor) {
         let cur;
         try { cur = JSON.parse(Buffer.from(String(q.cursor), 'base64url').toString('utf8')); } catch { /* below */ }
-        if (!Array.isArray(cur) || cur.length !== 2 || !Number.isFinite(Date.parse(cur[0])) || !/^\d{1,19}$/.test(String(cur[1]))) fail(422, 'billing.invalid_input', 'bad cursor');
+        if (!Array.isArray(cur) || cur.length !== 2 || !Number.isFinite(Date.parse(cur[0])) || !/^\d{1,18}$/.test(String(cur[1]))) fail(422, 'billing.invalid_input', 'bad cursor');
         where.push('(at < @c_at::timestamptz OR (at = @c_at::timestamptz AND id < @c_id::bigint))');
         args.c_at = cur[0]; args.c_id = String(cur[1]);
     }

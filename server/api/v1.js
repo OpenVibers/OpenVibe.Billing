@@ -255,7 +255,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
         if (out.replayed) res.setHeader('Idempotent-Replayed', 'true');
         res.status(out.replayed ? 200 : 201).json({ record: out.record });
     }));
-    r.get('/usage', ...read([CAP.usage, CAP.admin], async (req, res) => res.json(await usage.list(db, req.query))));
+    r.get('/usage', ...read(CAP.admin, async (req, res) => res.json(await usage.list(db, req.query))));
 
     // ── Admin (billing.ledger.admin) ─────────────────────────
     r.get('/admin/freeze', ...read(CAP.admin, async (req, res) => res.json(await admin.freezeState(db))));
