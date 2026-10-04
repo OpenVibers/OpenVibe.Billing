@@ -17,9 +17,9 @@
  * entitled to a streamer while a non-revoked row covers now. It needs nothing from Live.
  *
  * A credit renewal the subscriber cannot pay leaves the subscription past_due for
- * BILLING_RENEWAL_GRACE_DAYS (0 = end it at once): no period covers the grace, so the entitlement
- * is not active, and the sweep retries the same charge under the same key until it is paid or
- * grace_until passes.
+ * BILLING_RENEWAL_GRACE_DAYS (3 by default; 0 = end it at once): no period covers the grace, so the
+ * entitlement is not active, and the sweep retries the same charge under the same key until it is
+ * paid or grace_until passes.
  */
 const { post, getTxn, requireFunds, iso, prefixedId, money } = require('../ledger');
 const { enqueue } = require('../outbox');

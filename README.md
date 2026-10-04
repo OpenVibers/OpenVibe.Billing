@@ -350,11 +350,11 @@ there — a share already recycled or cashed out goes to `chargeback_loss`, flag
   `POST /api/v1/admin/sweep`): a credit subscription whose period ended is charged once from the subscriber's
   credit (never the promo allowance) under `renew:<sub>:<period end>` — `…:<k>` after `k` charges under that
   period's earlier keys were refunded or charged back — so a retried, replayed or concurrent sweep charges and
-  credits the creator share once. A renewal the credit cannot pay ends the subscription at once
-  (`renewal_insufficient_credit`) unless `BILLING_RENEWAL_GRACE_DAYS` > 0 (default 0): then it is `past_due`
-  until the period end + the grace (`grace_until`; no access meanwhile, event reason `renewal_failed`), every
-  later sweep retries the same key (a top-up is picked up; a cancel ends it), and past `grace_until` it expires
-  (`grace_ended`). Turning the grace on: [docs/renewal-grace-cutover.md](docs/renewal-grace-cutover.md).
+  credits the creator share once. A renewal the credit cannot pay leaves the subscription `past_due`
+  for `BILLING_RENEWAL_GRACE_DAYS` days past the period end (default **3**; set `0` to end it at once
+  with `renewal_insufficient_credit`): no access meanwhile (event reason `renewal_failed`), every
+  later sweep retries the same key (a top-up is picked up; a cancel ends it), and past `grace_until` it
+  expires (`grace_ended`). Turning the grace on (or off): [docs/renewal-grace-cutover.md](docs/renewal-grace-cutover.md).
 - **Freeze** before any risky change: the console's Freeze page, `POST /api/v1/admin/freeze {"on": true, "reason": "…"}`, or on the
   host `node scripts/freeze.js on "<reason>"` (same switch; after `off` the running service processes the
   held webhooks on its next retry tick).
