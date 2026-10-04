@@ -10,7 +10,7 @@
 const { post, getTxn, iso, money } = require('../ledger');
 const { enqueue } = require('../outbox');
 const { entry, fail, positiveInt, text } = require('./common');
-const { ACCOUNT_KINDS, CURRENCIES } = require('../db');
+const { ACCOUNT_KINDS, PROMO_KINDS, CURRENCIES } = require('../db');
 const { summary } = require('./purchases');
 
 async function freezeState(db) {
@@ -37,6 +37,10 @@ async function adjust(ctx, input) {
     const from = account(input.from, 'from');
     const to = account(input.to, 'to');
     if (from.currency !== to.currency) fail(422, 'billing.invalid_input', 'an adjustment moves value within one currency');
+    // Free allowance never becomes credit or money: a promo account is corrected only against the other promo kind.
+    if (PROMO_KINDS.includes(from.kind) !== PROMO_KINDS.includes(to.kind)) {
+        fail(422, 'billing.promo_isolated', 'promo_credit and promo_reserve adjust only against each other; free allowance never becomes credit or money');
+    }
     const amount = positiveInt(input.amount, 'amount', 1_000_000_000);
     const reason = text(input.reason, 'reason', 500);
     if (!reason) fail(422, 'billing.invalid_input', 'an adjustment needs a reason');

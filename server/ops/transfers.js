@@ -18,6 +18,8 @@ const { summary } = require('./purchases');
 
 const KINDS = ['tip', 'donation', 'paid_interaction'];
 
+// ADR-012 / plan T5: promo credits (A.promo, ops/promo.js) are a non-transferable allowance. create() moves bought
+// Vibes only (A.credit(from)); never add A.promo as a source here, and never as a target of refund().
 async function create(ctx, input) {
     const { db, rates } = ctx;
     const amount = positiveInt(input.amount, 'amount', rates.maxBits);
