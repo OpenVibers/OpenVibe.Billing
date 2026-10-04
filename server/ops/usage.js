@@ -9,8 +9,11 @@
  *
  * Idempotent by the reading's own idempotency_key (the contract's dedupe key, stable across retries, unique across
  * every caller): the first reading under a key is stored; the same reading again returns the stored row (replay);
- * a different reading under the same key is refused (409 billing.usage_key_reused) and the stored one is kept.
- * "The same" is the canonical JSON (sorted keys), so key order and whitespace don't matter.
+ * a reading whose money fields differ under the same key is refused (409 billing.usage_key_reused) and the stored one
+ * is kept. Only the money fields (MONEY_FIELDS) are compared: `at` as an instant, quantity as a number, absent = null.
+ * Placement and correlation fields (node, cell, region, route_epoch, trace_id, source, id, ...) never make a 409: a
+ * producer re-sending second n of a job from another node is a replay, and the first stored reading wins.
+ * reading_hash (sha256 of the canonical JSON) is still written, for information only.
  */
 const crypto = require('crypto');
 const { validate } = require('openvibe-contracts');
@@ -21,6 +24,20 @@ const CONTRACT = 'platform.usage-sample@1';
 const MAX_PAGE = 500;
 
 const hashOf = (reading) => crypto.createHash('sha256').update(stable(reading)).digest('hex');
+
+/** The fields that decide what a reading costs: two readings under one key that agree on these are the same reading. */
+const MONEY_FIELDS = ['service', 'project', 'subject', 'resource', 'provider', 'operation', 'quantity', 'unit', 'at'];
+
+function moneyFieldsEqual(a, b) {
+    return MONEY_FIELDS.every((f) => {
+        const x = a[f] ?? null;
+        const y = b[f] ?? null;
+        if (x === null || y === null) return x === y;
+        if (f === 'at') return Date.parse(x) === Date.parse(y);
+        if (f === 'quantity') return Number(x) === Number(y);
+        return x === y;
+    });
+}
 
 function present(row) {
     return {
@@ -54,8 +71,9 @@ async function record(ctx, reading, { principal }) {
             JSON.stringify(reading), hash, principal, new Date(ctx.now()).toISOString());
     if (row) return { record: present(row), replayed: false };
     const prev = await db.prepare('SELECT * FROM usage_records WHERE idempotency_key = ?').get(reading.idempotency_key);
-    if (prev.reading_hash !== hash) {
-        fail(409, 'billing.usage_key_reused', `a different reading is already stored under idempotency_key ${reading.idempotency_key}`);
+    const stored = typeof prev.reading === 'string' ? JSON.parse(prev.reading) : prev.reading;
+    if (!moneyFieldsEqual(stored, reading)) {
+        fail(409, 'billing.usage_key_reused', `a reading with different money fields is already stored under idempotency_key ${reading.idempotency_key}`);
     }
     return { record: present(prev), replayed: true };
 }
@@ -94,4 +112,4 @@ async function list(db, q = {}) {
     return { records: page.map(present), next_cursor: next };
 }
 
-module.exports = { record, list, present, CONTRACT };
+module.exports = { record, list, present, moneyFieldsEqual, MONEY_FIELDS, CONTRACT };

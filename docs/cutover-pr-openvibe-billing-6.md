@@ -118,8 +118,14 @@ on the harness says `{"ok": true}`. This section is the rehearsal.
    ```
    A valid `platform.usage-sample@1` body returns 201 with `record` populated;
    the same body again returns 200 with `Idempotent-Replayed: true` and the
-   stored row; a body with a different reading under the same key returns 409
-   `billing.usage_key_reused`. `GET /api/v1/usage?project=...` lists the
+   stored row; a body under the same key whose money fields differ (`service`,
+   `project`, `subject`, `resource`, `provider`, `operation`, `quantity`,
+   `unit`, `at` — `at` compared as an instant, absent = null) returns 409
+   `billing.usage_key_reused`. Only those fields are compared: a body that
+   differs only in `node`, `cell`, `region`, `route_epoch`, `trace_id`,
+   `source`, `cost_estimate`, `free_allowance_used` or `vibes_charged` is a
+   200 replay of the first stored row (`reading_hash` is informational).
+   `GET /api/v1/usage?project=...` lists the
    row newest-first. Reject 422 for an invalid reading; reject 401 without a
    token; reject 403 with a token that lacks `billing.usage.record`.
 7. Write the green marker:
