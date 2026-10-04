@@ -111,6 +111,9 @@ function loadConfig(env = process.env) {
             minCashoutBits: int(env.BILLING_MIN_CASHOUT_BITS, 500),
             escrowDays: num(env.BILLING_ESCROW_DAYS, 14),
             stripeGraceDays: num(env.BILLING_STRIPE_GRACE_DAYS, 3),
+            // A failed credit renewal stays past_due (retried by the sweep) this many days past the period end;
+            // 0 = end it at once (renewal_insufficient_credit).
+            renewalGraceDays: Math.max(0, num(env.BILLING_RENEWAL_GRACE_DAYS, 0)),
         },
 
         // Provider adapters: each is enabled only when its secrets are set.
