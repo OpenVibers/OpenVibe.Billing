@@ -200,7 +200,7 @@ are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "typ
 | `POST /api/v1/subscriptions` | `billing.subscription.manage` | start/renew a period `{subscriber, streamer, source: credit, auto_renew?}` (share credited every period); `source: receipt` also needs `billing.ledger.admin` |
 | `POST /api/v1/subscriptions/:id/cancel` | `billing.subscription.manage` | cancel at period end; Stripe is cancelled at Stripe first |
 | `GET /api/v1/subscriptions[?subscriber&streamer&status]`, `GET …/:id` | `billing.entitlement.check` | read |
-| `GET /api/v1/entitlements/:subject[?streamer=]` | `billing.entitlement.check` | `{active, expires_at, subscription}` — needs nothing but Billing |
+| `GET /api/v1/entitlements/:subject[?streamer=]` | `billing.entitlement.check` | `{active, expires_at, grace_until, subscription}` — needs nothing but Billing; `grace_until` is set only while the subscription is `past_due` (never active) |
 | `GET /api/v1/balances/:subject` | `billing.balance.read` | `{credit, payable, pending_payouts, promo_bits, payable_value_cents}` (`promo_bits`: unused free allowance, never transferable) |
 | `GET /api/v1/transactions?subject=&cursor=&limit=`, `GET …/:id` | `billing.balance.read` | history (cursor paging), one transaction with `reversed_by` |
 | `POST /api/v1/usage` | `billing.usage.record` | store a `platform.usage-sample@1` reading (charges nothing here: the rating sweep does, see Rates; accepted while frozen); idempotent by the reading's `idempotency_key`: same money fields (`service`, `project`, `subject`, `resource`, `provider`, `operation`, `quantity`, `unit`, `at`; `at` as an instant, absent = null) → 200 with the first stored row, unchanged (`Idempotent-Replayed: true`), different money fields → 409 `billing.usage_key_reused`; placement and correlation fields (`node`, `cell`, `region`, `route_epoch`, `trace_id`, `source`, `cost_estimate`, `free_allowance_used`, `vibes_charged`) never cause a 409; no `Idempotency-Key` header |
@@ -338,6 +338,15 @@ Reversing a subscription payment revokes the periods it granted.
   pruned, failed ones are kept. Results: the console, `GET /api/v1/admin/reconciliations`, and `/metrics`
   (`billing_reconciliation_ok`, `…_failed_checks`, `…_last_run_timestamp_seconds`); a failed scheduled run
   is also logged.
+- **Renewals** run in the hourly subscription sweep (`BILLING_SWEEP_INTERVAL_MS`, not while frozen; on demand
+  `POST /api/v1/admin/sweep`): a credit subscription whose period ended is charged once from the subscriber's
+  credit (never the promo allowance) under `renew:<sub>:<period end>` — `…:<k>` after `k` charges under that
+  period's earlier keys were refunded or charged back — so a retried, replayed or concurrent sweep charges and
+  credits the creator share once. A renewal the credit cannot pay ends the subscription at once
+  (`renewal_insufficient_credit`) unless `BILLING_RENEWAL_GRACE_DAYS` > 0 (default 0): then it is `past_due`
+  until the period end + the grace (`grace_until`; no access meanwhile, event reason `renewal_failed`), every
+  later sweep retries the same key (a top-up is picked up; a cancel ends it), and past `grace_until` it expires
+  (`grace_ended`). Turning the grace on: [docs/renewal-grace-cutover.md](docs/renewal-grace-cutover.md).
 - **Freeze** before any risky change: the console's Freeze page, `POST /api/v1/admin/freeze {"on": true, "reason": "…"}`, or on the
   host `node scripts/freeze.js on "<reason>"` (same switch; after `off` the running service processes the
   held webhooks on its next retry tick).
@@ -356,7 +365,8 @@ Reversing a subscription payment revokes the periods it granted.
 random ports. What they prove: the journal balances per currency and refuses edits
 (`ledger.test.js`); a receipt settles once whatever retries carry it, and reversals claw back only what
 can be (`webhooks.test.js`, `providers.test.js`, `stripe.test.js`); subscriptions and entitlements
-(`subscriptions.test.js`); EXTERNAL receipts are announced once and only under `billing`
+(`subscriptions.test.js`); a renewal is one charge per period, a failed one is retried on its key in the
+grace and then ended, a promo allowance never pays it (`renewal-grace.test.js`); EXTERNAL receipts are announced once and only under `billing`
 (`external.test.js`); the import reconciles (`import.test.js`); freeze, reconciliation and review
 (`operations.test.js`); the cutover sequence (`cutover.test.js`); the staff console and its staff map
 (`console.test.js`, `staff-map.test.js`); the public policy (`policy.test.js`); the vhost keeps `/api/v1`
