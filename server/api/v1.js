@@ -26,6 +26,7 @@ const providers = require('../providers');
 const { reconcile } = require('../reconcile');
 const external = require('../ops/external');
 const usage = require('../ops/usage');
+const promo = require('../ops/promo');
 
 const CAP = {
     intent: 'billing.intent.create',
@@ -217,8 +218,9 @@ function v1Router({ ctx, auth, adapters, limits }) {
         const credit = await balance(db, A.credit(subject));
         const payable = await balance(db, A.payable(subject));
         const pending = await balance(db, A.pending(subject));
+        const promoBits = await promo.remaining(ctx, subject);
         return {
-            subject: { type: 'user', id: subject }, currency: 'vibes-bits', credit, payable, pending_payouts: pending,
+            subject: { type: 'user', id: subject }, currency: 'vibes-bits', credit, payable, pending_payouts: pending, promo_bits: promoBits,
             payable_value_cents: ctx.rates.valueCents(payable), bits_per_usd: ctx.rates.bitsPerUsd,
         };
     }
@@ -306,6 +308,11 @@ function v1Router({ ctx, auth, adapters, limits }) {
         const b = req.body || {};
         const out = await admin.adjust(ctx, { from: b.from, to: b.to, amount: b.amount, reason: b.reason, relatesTo: b.relates_to, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.status(201).json(txnOut(out.txn));
+    }));
+    r.post('/admin/promo/grant', ...write(CAP.admin, async (req, res) => {
+        const b = req.body || {};
+        const out = await promo.grant(ctx, { subject: b.subject, service: b.service, bits: b.bits, period: b.period, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
+        res.status(201).json({ allowance: out.allowance, ...txnOut(out.txn) });
     }));
     r.get('/admin/provider-events', ...read(CAP.admin, async (req, res) => {
         const pending = req.query.pending === '1' || req.query.pending === 'true';

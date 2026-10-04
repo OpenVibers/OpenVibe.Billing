@@ -16,6 +16,9 @@ const MAX_RECEIPT_CENTS = 100_000_000;
 /** Account addresses. owner is a subject id, a provider slug, 'hold:live:<id>' or null (platform). */
 const A = {
     credit: (s) => ({ kind: 'user_credit', owner: s, currency: BITS }),
+    // Free allowance (ops/promo.js): never spendable as credit, never MONEY; it moves only to and from promoReserve.
+    promo: (s) => ({ kind: 'promo_credit', owner: s, currency: BITS }),
+    promoReserve: () => ({ kind: 'promo_reserve', owner: null, currency: BITS }),
     payable: (s) => ({ kind: 'creator_payable', owner: s, currency: BITS }),
     pending: (s) => ({ kind: 'payouts_pending', owner: s, currency: BITS }),
     clearing: (provider) => ({ kind: 'provider_clearing', owner: provider, currency: CENTS }),

@@ -18,7 +18,9 @@ const path = require('path');
 const { createDb } = require('openvibe-sdk/db');
 
 const ACCOUNT_KINDS = ['user_credit', 'creator_payable', 'provider_clearing', 'platform_revenue', 'payouts_pending',
-    'refunds', 'import_adjustment', 'chargeback_loss', 'fx_conversion'];
+    'refunds', 'import_adjustment', 'chargeback_loss', 'fx_conversion', 'promo_credit', 'promo_reserve'];
+// The promo ledger's kinds (migrations/0003): their entries never share a transaction with any other kind.
+const PROMO_KINDS = ['promo_credit', 'promo_reserve'];
 const CURRENCIES = ['vibes-bits', 'usd-cents'];
 const TXN_TYPES = ['purchase', 'donation', 'subscription', 'subscription_share', 'cashout_request', 'cashout_paid',
     'cashout_denied', 'recycle', 'refund', 'chargeback', 'adjustment', 'import'];
@@ -48,4 +50,4 @@ async function openDb(config, { log = console, registry } = {}) {
     return createDb({ url: config.db.url, service: 'billing', registry, log });
 }
 
-module.exports = { openDb, MIGRATIONS, ACCOUNT_KINDS, CURRENCIES, TXN_TYPES };
+module.exports = { openDb, MIGRATIONS, ACCOUNT_KINDS, PROMO_KINDS, CURRENCIES, TXN_TYPES };

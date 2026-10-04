@@ -23,16 +23,31 @@ webhooks land here and nowhere else.
 |---|---|
 | CREDIT (Vibes bought, spendable, never withdrawable by the buyer) | `user_credit:<subject>` (vibes-bits) |
 | MONEY (creator payable, payouts, receipts, platform revenue) | `creator_payable:<subject>`, `payouts_pending:<subject>`, `provider_clearing:<provider>`, `platform_revenue`, `refunds`, `chargeback_loss` |
+| PROMO (free service allowance, plan T5 ledger 2: never spendable as CREDIT, never MONEY) | `promo_credit:<subject>` (vibes-bits), issued from and returned to `promo_reserve` (platform, vibes-bits); windows in `promo_allowances`. **Counterparty: a dedicated `promo_reserve`, not `platform_revenue`**: free allowance is a marketing cost, not income, so debiting revenue would understate earnings and blur the one account that reports what the platform made; a reserve of its own always equals −Σ `promo_credit` and is checked in isolation |
 | ENTITLEMENT (channel subscriptions) | `subscriptions` + `entitlements` (one row per paid period) |
 | EXTERNAL (tips on a streamer's own PowerChat) | stored receipt (`external_receipts`), no journal entry; announced as `billing.receipt.external` once Billing is the authority; a direct-route subscription grants its entitlement only |
 | LOYALTY, COSMETIC, GAME-STATE, LEGACY | not here (rule 5–8) |
 
+**Three ledgers, one journal.** Bought Vibes (`user_credit`), creator money (`creator_payable` and its payouts)
+and free promo allowance (`promo_credit`) are separate account kinds that never mix. Credit becomes money only
+through a transfer (`transfers.create`: `user_credit` → `creator_payable`); money leaves only through a cashout
+(`creator_payable` → `payouts_pending`). Promo has no such path: it is granted by an admin
+(`POST /api/v1/admin/promo/grant`: `promo_reserve` → `promo_credit`) and only drawn down by usage
+(`ops/promo.js` `consume()`, keyed by the caller's idempotency key) or lapses when its window ends, both back to
+`promo_reserve`. Transfers read `user_credit` only and cashouts `creator_payable` only, so a subject holding only
+promo is refused with `billing.insufficient_funds`; an admin adjustment that pairs a promo account with any other
+kind is refused (`billing.promo_isolated`), and reconciliation's `promo.isolated` check fails on any transaction
+that mixes them. `promo_allowances` is the policy and window record (`granted_bits`, `used_bits`, `expired_bits`
+per subject, service, period and window); the `promo_credit` balance is the authoritative remainder, and every
+promo write changes both in one transaction.
+
 ## Owns
 
 - the journal (`accounts`, `transactions`, `ledger_entries`, `account_balances`), provider receipts
-  (`provider_events`, `external_receipts`), intents, subscriptions and entitlements, cashouts, the
-  freeze, reconciliation runs, import runs and the staff audit log, in Billing's own PostgreSQL database
-  (`ov_billing` on the host's data role, ADR-035; schema in [migrations/](migrations/))
+  (`provider_events`, `external_receipts`), intents, subscriptions and entitlements, cashouts, usage readings
+  (`usage_records`), promo allowances (`promo_allowances`), the freeze, reconciliation runs, import runs and the
+  staff audit log, in Billing's own PostgreSQL database (`ov_billing` on the host's data role, ADR-035;
+  schema in [migrations/](migrations/))
 - provider webhooks (PowerChat, Stripe, PayPal, CCBill, NOWPayments): they land here and nowhere else
 - the `billing.*` events and the public billing policy page (`/policy`, every number from the rates)
 
@@ -149,7 +164,7 @@ are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "typ
 | `POST /api/v1/subscriptions/:id/cancel` | `billing.subscription.manage` | cancel at period end; Stripe is cancelled at Stripe first |
 | `GET /api/v1/subscriptions[?subscriber&streamer&status]`, `GET …/:id` | `billing.entitlement.check` | read |
 | `GET /api/v1/entitlements/:subject[?streamer=]` | `billing.entitlement.check` | `{active, expires_at, subscription}` — needs nothing but Billing |
-| `GET /api/v1/balances/:subject` | `billing.balance.read` | `{credit, payable, pending_payouts, payable_value_cents}` |
+| `GET /api/v1/balances/:subject` | `billing.balance.read` | `{credit, payable, pending_payouts, promo_bits, payable_value_cents}` (`promo_bits`: unused free allowance, never transferable) |
 | `GET /api/v1/transactions?subject=&cursor=&limit=`, `GET …/:id` | `billing.balance.read` | history (cursor paging), one transaction with `reversed_by` |
 | `POST /api/v1/usage` | `billing.usage.record` | store a `platform.usage-sample@1` reading (charges nothing; accepted while frozen); idempotent by the reading's `idempotency_key`: same reading → 200 with the stored row (`Idempotent-Replayed: true`), a different one → 409 `billing.usage_key_reused`; no `Idempotency-Key` header |
 | `GET /api/v1/usage?project=&subject=&service=&from=&to=&limit=&cursor=` | `billing.ledger.admin` | readings newest first, `from` ≤ `at` < `to`, cursor paging (`limit` ≤ 500) |
@@ -157,7 +172,8 @@ are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "typ
 | `GET /api/v1/admin/reconcile` | `billing.ledger.admin` | run + store a reconciliation |
 | `GET /api/v1/admin/reconciliations[?limit&failed=1]`, `GET …/:id` (`latest`) | `billing.ledger.admin` | stored runs (scheduled and on demand) with their trigger; one full report |
 | `GET\|POST /api/v1/admin/provider-accounts` | `billing.ledger.admin` | list / map `{provider, username, account_id?, subject}` a provider account to its creator (allowed while frozen) |
-| `POST /api/v1/admin/adjustments` | `billing.ledger.admin` | `{from: account, to: account, amount, reason, relates_to?}` (same currency) |
+| `POST /api/v1/admin/adjustments` | `billing.ledger.admin` | `{from: account, to: account, amount, reason, relates_to?}` (same currency; a promo account only against the other promo kind) |
+| `POST /api/v1/admin/promo/grant` | `billing.ledger.admin` | `{subject, bits, service? ('*'), period? (day \| month \| none; month)}` → 201 `{allowance, transaction}`: tops up the current window (a second grant in it adds); idempotent by `Idempotency-Key` |
 | `GET /api/v1/admin/provider-events[?pending=1]`, `POST …/:id/reprocess` | `billing.ledger.admin` | receipts; retry an unprocessed/rejected one |
 | `POST /api/v1/admin/sweep`, `GET /api/v1/admin/import-holds` | `billing.ledger.admin` | renewal sweep now; unmapped import users |
 | `POST /webhooks/<provider>` | provider signature | `powerchat`, `stripe`, `paypal`, `ccbill` (GET too), `nowpayments` |

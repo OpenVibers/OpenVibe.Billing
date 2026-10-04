@@ -104,6 +104,10 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
     check('receipts.external', !extOffenders.length, extOffenders.length ? { offenders: extOffenders }
         : { receipts: (await db.prepare('SELECT COUNT(*) AS n FROM external_receipts').get()).n });
 
+    const promoMixed = await db.prepare(`SELECT e.txn_id FROM ledger_entries e JOIN accounts a ON a.id = e.account_id GROUP BY e.txn_id
+        HAVING bool_or(a.kind IN ('promo_credit', 'promo_reserve')) AND bool_or(a.kind NOT IN ('promo_credit', 'promo_reserve')) LIMIT 100`).all();
+    check('promo.isolated', !promoMixed.length, promoMixed.length ? { offenders: promoMixed } : null);
+
     const frozen = await isFrozen(db);
     const staleMin = (ctx.config && ctx.config.reconcile && ctx.config.reconcile.staleReceiptMin) || 60;
     const stale = frozen ? [] : await db.prepare('SELECT id, provider, provider_event_id, type, received_at, attempts, last_error FROM provider_events WHERE processed_at IS NULL AND received_at < ? ORDER BY id LIMIT 100')
@@ -112,7 +116,7 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
 
     const warnings = {
         negative_balances: await db.prepare(`SELECT a.kind, a.owner_subject AS owner, a.currency, b.balance FROM accounts a JOIN account_balances b ON b.account_id = a.id
-            WHERE a.kind IN ('user_credit', 'creator_payable', 'payouts_pending') AND b.balance < 0`).all(),
+            WHERE a.kind IN ('user_credit', 'creator_payable', 'payouts_pending', 'promo_credit') AND b.balance < 0`).all(),
         unprocessed_events: await db.prepare('SELECT id, provider, provider_event_id, type, received_at, attempts, last_error FROM provider_events WHERE processed_at IS NULL ORDER BY id').all(),
         rejected_events: (await db.prepare("SELECT id, provider, provider_event_id, type, result FROM provider_events WHERE json_extract(result, '$.effect') = 'rejected'").all())
             .map((r) => ({ ...r, result: JSON.parse(r.result) })),
