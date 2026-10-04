@@ -27,6 +27,7 @@ const { reconcile } = require('../reconcile');
 const external = require('../ops/external');
 const usage = require('../ops/usage');
 const promo = require('../ops/promo');
+const rating = require('../ops/rating');
 
 const CAP = {
     intent: 'billing.intent.create',
@@ -250,7 +251,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
     }));
 
     // ── Usage readings (platform.usage-sample@1; ops/usage.js) ──
-    // Stored and reported, never charged. Not a money movement, so accepted while frozen; idempotent by the
+    // Stored and reported; never charged here (the rating sweep, ops/rating.js, charges later). Not a money movement, so accepted while frozen; idempotent by the
     // reading's own idempotency_key (no Idempotency-Key header): a replay is 200 with the stored row, a new one 201.
     r.post('/usage', auth.needs(CAP.usage), wrap(async (req, res) => {
         const out = await usage.record(ctx, req.body, { principal: req.principal.sub });
@@ -313,6 +314,21 @@ function v1Router({ ctx, auth, adapters, limits }) {
         const b = req.body || {};
         const out = await promo.grant(ctx, { subject: b.subject, service: b.service, bits: b.bits, period: b.period, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.status(201).json({ allowance: out.allowance, ...txnOut(out.txn) });
+    }));
+    // Usage rating (ops/rating.js): one pass now, the same as the background sweep; rating is idempotent per reading.
+    r.post('/admin/rate', auth.needs(CAP.admin), notFrozen, wrap(async (req, res) => {
+        const b = req.body || {};
+        res.json(await rating.sweep(ctx, { batch: b.batch }));
+    }));
+    // Hard budgets on what a subject's metered usage may draw from their Vibes per window.
+    r.get('/admin/budgets', ...read(CAP.admin, async (req, res) => {
+        const subject = pathSubject(req.query.subject);
+        const rows = await db.prepare('SELECT * FROM usage_budgets WHERE subject = ? ORDER BY service, window_start DESC').all(subject);
+        res.json({ budgets: rows.map(rating.presentBudget) });
+    }));
+    r.post('/admin/budgets', ...write(CAP.admin, async (req, res) => {
+        const b = req.body || {};
+        res.status(201).json({ budget: await rating.setBudget(ctx, { subject: b.subject, service: b.service, period: b.period, budget_bits: b.budget_bits }) });
     }));
     r.get('/admin/provider-events', ...read(CAP.admin, async (req, res) => {
         const pending = req.query.pending === '1' || req.query.pending === 'true';

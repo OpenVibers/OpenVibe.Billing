@@ -11,6 +11,7 @@
     "reconcile": "node scripts/reconcile.js",
     "freeze": "node scripts/freeze.js",
     "import-live": "node scripts/import-live.js",
+    "load-rate-cards": "node scripts/load-rate-cards.js",
     "test:pg": "BILLING_TEST_STORE=pg node test/run.js"
   },
   "keywords": [

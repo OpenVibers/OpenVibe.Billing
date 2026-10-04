@@ -137,6 +137,43 @@ Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
   review and announced when reprocessed after mapping. Under `live` it is recorded, not announced —
   Live's own webhook announces it, so a tip is never celebrated twice.
 
+## Rates (usage rating)
+
+Billing turns stored usage readings (`POST /api/v1/usage`) into charges in a **background sweep**
+([server/ops/rating.js](server/ops/rating.js)), never inside `POST /api/v1/usage`: a producer never drives a
+synchronous debit. A reading without `vibes_charged` in `GET /api/v1/usage` is simply not rated yet.
+
+- **Two gates, both closed by default.** The sweep runs only when `BILLING_RATING_INTERVAL_MS` is set (default
+  `0` = off; `BILLING_RATING_BATCH` readings per pass, 500), and **nothing is charged without a rate card**.
+  Rate cards are loaded **only by review**: `OV_RATE_CARDS` (a JSON array of `platform.rate-card@1`, inline or
+  a file path) + `node scripts/load-rate-cards.js [--dry-run]` (`npm run load-rate-cards`). Every card is
+  validated against the contract first and one bad card loads nothing; no request and no AI writes a card.
+- **Card match.** A reading's `provider` and `resource` are the card's `provider` and `metric`; the card's
+  region (none = every region) and effective dates (`effective_from` ≤ the reading's UTC day <
+  `effective_until`) must fit. Its `unit` must be the one the metric names (the metric itself or its leading
+  word: `GiB` for `gib-delivered`, `requests` for `request`); no unit is converted.
+- **The charge.** `quantity / unit_size × unit_price_usd × bits_per_usd`, computed exactly and rounded up once
+  to whole vibes-bits. The subject's promo allowance (`promo_credit`, step 5) covers it first; the rest is
+  **one `usage` transaction per reading**, `user_credit:<subject>` → `platform_revenue` (vibes-bits), idempotency
+  key `usage:<reading idempotency_key>`. The allowance draw is a promo `adjustment` (`promo_credit` →
+  `promo_reserve`) in the same database transaction, so promo bits never reach `platform_revenue` or creator
+  earnings. The reading records `vibes_charged` (bits), `promo_bits`, `free_allowance_used` (in the reading's
+  own unit), `rated_at` and `txn_id` (the `usage` transaction, or the promo draw when nothing was charged). A
+  card's own `free_allowance` (the provider's free tier) is stored with the card, not applied per person.
+- **Hard budgets** (`usage_budgets`, `POST /api/v1/admin/budgets`): per subject + service (`'*'` = every
+  service) + window (`day`, `month`, `none`). A charge that would take an open budget's `spent_bits` past
+  `budget_bits` is **refused whole** (`billing.budget_exceeded`): nothing is charged, no allowance drawn, the
+  reading stays unrated. `spent_bits` grows in the same transaction as the ledger post. A window that ends opens
+  the next with the same budget. **With no budget row only the spendable balance limits the charge**
+  (`billing.insufficient_funds`). `budget_bits: 0` stops all further charges.
+- **Unrated, never partly charged.** The funds check, the budget check, the allowance draw, the post and the
+  "rated" mark are one serializable transaction that claims the reading's row (`FOR UPDATE SKIP LOCKED`), so
+  two sweeps, or a sweep and `POST /api/v1/admin/rate`, never charge or draw twice. `rating_error` says why a
+  reading waits: `billing.insufficient_funds` / `billing.budget_exceeded` are tried again after
+  `BILLING_RATING_RETRY_MS` (1 h); `billing.no_rate_card` / `billing.unit_mismatch` wait until a matching card
+  is loaded (the loader makes them due again); `billing.no_subject` (no `user:usr_…` subject, e.g. an app's
+  job) is never charged. Nothing is rated while the economy is frozen.
+
 ## API
 
 All `/api/v1` calls need a service token from OpenVibe.Network (audience `openvibe.billing`) and are
@@ -166,7 +203,7 @@ are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "typ
 | `GET /api/v1/entitlements/:subject[?streamer=]` | `billing.entitlement.check` | `{active, expires_at, subscription}` — needs nothing but Billing |
 | `GET /api/v1/balances/:subject` | `billing.balance.read` | `{credit, payable, pending_payouts, promo_bits, payable_value_cents}` (`promo_bits`: unused free allowance, never transferable) |
 | `GET /api/v1/transactions?subject=&cursor=&limit=`, `GET …/:id` | `billing.balance.read` | history (cursor paging), one transaction with `reversed_by` |
-| `POST /api/v1/usage` | `billing.usage.record` | store a `platform.usage-sample@1` reading (charges nothing; accepted while frozen); idempotent by the reading's `idempotency_key`: same reading → 200 with the stored row (`Idempotent-Replayed: true`), a different one → 409 `billing.usage_key_reused`; no `Idempotency-Key` header |
+| `POST /api/v1/usage` | `billing.usage.record` | store a `platform.usage-sample@1` reading (charges nothing here: the rating sweep does, see Rates; accepted while frozen); idempotent by the reading's `idempotency_key`: same reading → 200 with the stored row (`Idempotent-Replayed: true`), a different one → 409 `billing.usage_key_reused`; no `Idempotency-Key` header |
 | `GET /api/v1/usage?project=&subject=&service=&from=&to=&limit=&cursor=` | `billing.ledger.admin` | readings newest first, `from` ≤ `at` < `to`, cursor paging (`limit` ≤ 500) |
 | `GET\|POST /api/v1/admin/freeze` | `billing.ledger.admin` | read / set `{on, reason?}`; unfreeze drains queued webhooks |
 | `GET /api/v1/admin/reconcile` | `billing.ledger.admin` | run + store a reconciliation |
@@ -174,6 +211,8 @@ are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "typ
 | `GET\|POST /api/v1/admin/provider-accounts` | `billing.ledger.admin` | list / map `{provider, username, account_id?, subject}` a provider account to its creator (allowed while frozen) |
 | `POST /api/v1/admin/adjustments` | `billing.ledger.admin` | `{from: account, to: account, amount, reason, relates_to?}` (same currency; a promo account only against the other promo kind) |
 | `POST /api/v1/admin/promo/grant` | `billing.ledger.admin` | `{subject, bits, service? ('*'), period? (day \| month \| none; month)}` → 201 `{allowance, transaction}`: tops up the current window (a second grant in it adds); idempotent by `Idempotency-Key` |
+| `POST /api/v1/admin/rate` | `billing.ledger.admin` | one rating pass now `{batch?}` → `{rated, skipped, busy, failed}` (refused while frozen; no `Idempotency-Key` needed: rating is idempotent per reading) |
+| `GET /api/v1/admin/budgets?subject=`, `POST /api/v1/admin/budgets` | `billing.ledger.admin` | hard usage budgets; set `{subject, service? ('*'), period? (day \| month \| none; month), budget_bits}` for the window open now (keeps what it has spent) |
 | `GET /api/v1/admin/provider-events[?pending=1]`, `POST …/:id/reprocess` | `billing.ledger.admin` | receipts; retry an unprocessed/rejected one |
 | `POST /api/v1/admin/sweep`, `GET /api/v1/admin/import-holds` | `billing.ledger.admin` | renewal sweep now; unmapped import users |
 | `POST /webhooks/<provider>` | provider signature | `powerchat`, `stripe`, `paypal`, `ccbill` (GET too), `nowpayments` |

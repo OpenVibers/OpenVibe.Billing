@@ -160,6 +160,16 @@ function loadConfig(env = process.env) {
             // runs older than reconcileKeepDays are pruned, failed ones are kept.
             reconcileIntervalMs: int(env.BILLING_RECONCILE_INTERVAL_MS, 60 * 60 * 1000),
             reconcileKeepDays: int(env.BILLING_RECONCILE_KEEP_DAYS, 30),
+            // Usage rating (ops/rating.js): off by default (0); BILLING_RATING_BATCH readings per pass.
+            ratingIntervalMs: int(env.BILLING_RATING_INTERVAL_MS, 0),
+            ratingBatch: Math.max(1, Math.min(5000, int(env.BILLING_RATING_BATCH, 500))),
+        },
+        rating: {
+            // Reviewed rate cards (platform.rate-card@1): a JSON array, inline or a file path; loaded only by
+            // scripts/load-rate-cards.js, never by the service itself.
+            cards: env.OV_RATE_CARDS || '',
+            // A reading the balance or a hard budget refused is tried again this long after.
+            retryMs: Math.max(60_000, int(env.BILLING_RATING_RETRY_MS, 60 * 60 * 1000)),
         },
         reconcile: {
             // A provider receipt still unprocessed this long after it arrived (economy not frozen)
