@@ -10,7 +10,8 @@ const { boot, fund, check, done } = require('./helpers/app');
 const DAY = 86_400_000;
 
 (async () => {
-    const t = await boot();
+    // The grace is on by default now; this file asserts the pre-grace behavior, so pin it to 0.
+    const t = await boot({ env: { BILLING_RENEWAL_GRACE_DAYS: '0' } });
     const fan = t.user(31);
     const streamer = t.user(32);
     console.log('subscriptions');

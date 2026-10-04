@@ -1,11 +1,13 @@
-# Cutover runbook — renewal grace (OpenVibe.Billing, plan T5 step 11, s2)
+# Cutover runbook — renewal grace (OpenVibe.Billing, plan T5 step 11, s2 + s5)
 
 A credit renewal the subscriber cannot pay used to end the subscription at once (`expired`, reason
 `renewal_insufficient_credit`). With this change it can instead move to **`past_due`** for
 `BILLING_RENEWAL_GRACE_DAYS` past the period end: the hourly sweep retries the same charge under the **same
 idempotency key** until it is paid (`active` again, reason `renewed`, one charge, one creator share) or
-`grace_until` passes (`expired`, reason `grace_ended`). **The grace ships off** (`BILLING_RENEWAL_GRACE_DAYS`
-defaults to `0`), so the deploy changes no behavior: no row becomes `past_due` until the grace is turned on.
+`grace_until` passes (`expired`, reason `grace_ended`). **The grace shipped off in s2** (`BILLING_RENEWAL_GRACE_DAYS`
+defaulted to `0`, so that deploy changed no behavior); **s5 turns it on** — the default is now `3`, so a failed
+renewal is `past_due` for three days, retried on the same key, and only then expires. Setting the env back to `0`
+restores immediate expiry (see Rollback).
 
 Also in this change, whatever the grace: the renewal key is `renew:<sub>:<period end>` as before, and becomes
 `renew:<sub>:<period end>:<k>` only after `k` charges under that period's earlier keys were refunded or charged back
@@ -69,7 +71,7 @@ runbook:
 SELECT pg_get_constraintdef(oid) FROM pg_constraint
  WHERE conrelid = 'subscriptions'::regclass AND conname = 'subscriptions_status_check';
 SELECT id, name, phase FROM ov_migrations WHERE id = '0005';         -- 0005 | renewal_grace | expand
-SELECT COUNT(*) FROM subscriptions WHERE status = 'past_due';        -- 0 (the grace is off)
+SELECT COUNT(*) FROM subscriptions WHERE status = 'past_due';        -- 0 before the flip; failed renewals list here after s5
 ```
 
 and compare `node scripts/reconcile.js` before and after: the same account, transaction and entry counts, every
@@ -83,28 +85,34 @@ After the deploy, on production (read-only):
    `migrations: applied 0005_renewal_grace (expand, NNms)`; `ov_migrations` has the `0005` row.
 2. `\d subscriptions` lists `grace_until`, `renewal_failed_at` (nullable text) and `renewal_attempts`
    (`bigint NOT NULL DEFAULT 0`), and `subscriptions_due_idx`.
-3. `SELECT count(*) FROM subscriptions WHERE status = 'past_due'` is **0**: the grace is still off
-   (`BILLING_RENEWAL_GRACE_DAYS` unset or `0` in `/etc/openvibe/billing.env`), so the deploy changed no
-   behavior. An unpaid renewal still ends at once (`expired`, reason `renewal_insufficient_credit`).
+3. `SELECT count(*) FROM subscriptions WHERE status = 'past_due'` — before s5 it is **0** (the grace is off,
+   `BILLING_RENEWAL_GRACE_DAYS` unset or `0`, so an unpaid renewal still ends at once with
+   `renewal_insufficient_credit`); after s5's flip it holds exactly the renewals inside their 3-day grace.
+   The flip itself changes no row: a subscription only enters `past_due` when the sweep next tries and
+   fails to renew its ended period. `SELECT id, status, grace_until, renewal_attempts FROM subscriptions
+   WHERE status = 'past_due'` lists them.
 4. `node scripts/reconcile.js` shows the same totals as before the deploy, every check ok.
 
 ## Order
 
 1. **Contracts** — v0.94.2 (`past_due`, `renewal_failed`, `grace_ended`, `grace_until`) is released (s1).
 2. **Backup** — the snapshot above, and confirm it.
-3. **Billing, grace 0** — merge and deploy this change through its pipeline. Leave `BILLING_RENEWAL_GRACE_DAYS`
-   unset (= 0). Verify with the checks above. Renewals behave as before.
+3. **Billing, grace 0 (s2)** — merge and deploy this change through its pipeline. Before the s5 flip the env was
+   left unset (then = 0). Verify with the checks above. Renewals behave as before.
 4. **VIP consumes `past_due`** — VIP (plan s4) treats `subscription.status: past_due` as not entitled, reads
    `grace_until` for its "renew your membership" notice and records each period's charge. Do not go further until
    VIP with that change is deployed.
-5. **Turn the grace on** — plan s5 sets the default to 3; on a host before that, set
-   `BILLING_RENEWAL_GRACE_DAYS=3` in `/etc/openvibe/billing.env` and restart through the deploy pipeline. Check
-   after the next sweep: the log line `subscription sweep: … past due …` and, for a failed renewal,
-   `SELECT id, status, grace_until, renewal_attempts FROM subscriptions WHERE status = 'past_due'`.
+5. **Turn the grace on — done (plan s5)** — the default is now `3`. No env change is needed: with
+   `BILLING_RENEWAL_GRACE_DAYS` unset in `/etc/openvibe/billing.env`, deploy this change through the pipeline
+   (VIP s4, which reads `past_due` and `grace_until`, must already be deployed). Check after the next sweep: the
+   log line `subscription sweep: … past due …` and, for a failed renewal,
+   `SELECT id, status, grace_until, renewal_attempts FROM subscriptions WHERE status = 'past_due'`. A host that
+   sets the env explicitly (e.g. `BILLING_RENEWAL_GRACE_DAYS=0`) keeps that value — remove it to take the default.
 
 ## Rollback
 
-- **Turn the grace off:** set `BILLING_RENEWAL_GRACE_DAYS=0` (or unset it) and restart. The next sweep retries each
+- **Turn the grace off:** set `BILLING_RENEWAL_GRACE_DAYS=0` in `/etc/openvibe/billing.env` and restart (do
+  **not** merely unset it — unset now means the default 3). The next sweep retries each
   `past_due` subscription once more on its key — a subscriber who topped up renews, with one charge — and ends
   the rest (`expired`, reason `grace_ended`). Nothing else changes. This is the way back for behavior; no
   schema restore is needed.

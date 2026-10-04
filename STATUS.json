@@ -16,7 +16,7 @@
     "provider receipts stored before processing, settled once (PowerChat, Stripe, PayPal, CCBill, NOWPayments adapters)",
     "intents, transfers, refunds, recycle, cashouts with escrow",
     "subscriptions and entitlements",
-    "renewal grace: a failed credit renewal is past_due and retried on its key until grace_until (BILLING_RENEWAL_GRACE_DAYS, off by default)",
+    "renewal grace: a failed credit renewal is past_due for BILLING_RENEWAL_GRACE_DAYS (default 3) and retried on its key until grace_until, then expires with grace_ended; set 0 for immediate expiry",
     "staff refund of a credit-paid subscription period (POST /api/v1/subscriptions/:id/refund) and reconciliation of every paid period against its charge (subscriptions.period_charged)",
     "EXTERNAL PowerChat receipts (billing.receipt.external under BILLING_AUTHORITY=billing)",
     "economy freeze",
