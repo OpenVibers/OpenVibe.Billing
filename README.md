@@ -318,7 +318,12 @@ transaction as their effect. Adjustments are not in the console; they stay on th
 Only PowerChat is expected to be enabled in production. A reversal of a purchase claws back the
 buyer's remaining credit; credit already given to someone stays with them — their payable is never
 touched — and the unrecovered value goes to `chargeback_loss`, flagged `review: required`.
-Reversing a subscription payment revokes the periods it granted.
+Reversing a subscription payment revokes the periods it granted. A credit renewal runs in the hourly
+sweep (one charge per period, key `renew:<sub id>:<period end>`); with `BILLING_RENEWAL_GRACE_DAYS` set,
+a renewal the credit cannot cover moves the subscription to `past_due` (`billing.entitlement.changed`
+reason `renewal_failed`, with `grace_until` and `renewal_period_end`) and is retried each sweep until the
+window passes unpaid, when it expires (reason `grace_ended`). Off by default: a failed renewal expires at
+once (`renewal_insufficient_credit`).
 
 ## Operations
 

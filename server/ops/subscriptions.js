@@ -200,15 +200,16 @@ async function cancel(ctx, { id, actor }, adapters) {
     return { subscription: await find(db, id), provider_sync: providerSync, replay: false };
 }
 
-async function setStatus(ctx, id, status, reason) {
+async function setStatus(ctx, id, status, reason, extra) {
     const { db } = ctx;
     const sub = await find(db, id);
     if (!sub || sub.status === status) return sub;
-    await db.prepare('UPDATE subscriptions SET status = ?, auto_renew = CASE WHEN ? = \'active\' THEN auto_renew ELSE 0 END, updated_at = ? WHERE id = ?')
+    // past_due keeps auto_renew: the grace retries the same period; every other end state clears it.
+    await db.prepare('UPDATE subscriptions SET status = ?, auto_renew = CASE WHEN ? IN (\'active\', \'past_due\') THEN auto_renew ELSE 0 END, updated_at = ? WHERE id = ?')
         .run(status, status, iso(ctx.now()), id);
     await enqueue(ctx, {
         event_type: 'billing.entitlement.changed', subject: { type: 'entitlement', id: `${sub.subscriber}:${KIND}:${sub.streamer}` },
-        payload: { ...await entitlement(db, sub.subscriber, sub.streamer, ctx.now()), reason: reason || status },
+        payload: { ...await entitlement(db, sub.subscriber, sub.streamer, ctx.now()), reason: reason || status, ...(extra || {}) },
     });
     return await find(db, id);
 }
@@ -237,17 +238,21 @@ async function revokeForTxn(ctx, txnId, reason) {
 }
 
 /**
- * Renewal sweep (hourly job). For every active subscription whose period ended:
+ * Renewal sweep (hourly job). For every active or past_due subscription whose period ended:
  *   - Stripe: Stripe renews itself (invoice.paid); expire only after the grace window;
  *   - cancel-at-period-end / no auto-renew: end it;
- *   - otherwise renew from the subscriber's credit (deterministic key per period), or end it
- *     when the credit does not cover the price.
+ *   - otherwise renew from the subscriber's credit (deterministic key per period). A renewal the
+ *     credit cannot cover moves the subscription to past_due (reason renewal_failed, grace_until
+ *     current_period_end + rates.renewalGraceDays) and keeps retrying the same key per sweep; once
+ *     the grace window passes unpaid it expires (reason grace_ended). With renewalGraceDays 0 (the
+ *     default) a failed renewal expires at once, as before.
  */
 async function sweep(ctx, { limit = 200 } = {}) {
     const { db, rates } = ctx;
-    const out = { renewed: [], expired: [], canceled: [], skipped: 0 };
+    const out = { renewed: [], past_due: [], expired: [], canceled: [], skipped: 0 };
     const now = ctx.now();
-    const due = (await db.prepare("SELECT * FROM subscriptions WHERE status = 'active' AND current_period_end IS NOT NULL AND current_period_end <= ? ORDER BY current_period_end LIMIT ?")
+    const graceMs = Math.max(0, Number(rates.renewalGraceDays) || 0) * 86_400_000;
+    const due = (await db.prepare("SELECT * FROM subscriptions WHERE status IN ('active', 'past_due') AND current_period_end IS NOT NULL AND current_period_end <= ? ORDER BY current_period_end LIMIT ?")
         .all(iso(now), limit)).map(parse);
     for (const sub of due) {
         const end = Date.parse(sub.current_period_end);
@@ -268,7 +273,18 @@ async function sweep(ctx, { limit = 200 } = {}) {
             out.renewed.push(sub.id);
         } catch (e) {
             if (e.code !== 'billing.insufficient_funds') throw e;
-            await setStatus(ctx, sub.id, 'expired', 'renewal_insufficient_credit'); out.expired.push(sub.id);
+            const graceUntil = end + graceMs;
+            if (graceMs > 0 && now < graceUntil) {
+                if (sub.status !== 'past_due') {
+                    await setStatus(ctx, sub.id, 'past_due', 'renewal_failed', { grace_until: iso(graceUntil), renewal_period_end: sub.current_period_end });
+                    out.past_due.push(sub.id);
+                } else out.skipped++;
+            } else if (sub.status === 'past_due') {
+                await setStatus(ctx, sub.id, 'expired', 'grace_ended', { renewal_period_end: sub.current_period_end });
+                out.expired.push(sub.id);
+            } else {
+                await setStatus(ctx, sub.id, 'expired', 'renewal_insufficient_credit'); out.expired.push(sub.id);
+            }
         }
     }
     return out;

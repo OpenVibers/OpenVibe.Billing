@@ -35,7 +35,7 @@ const { runScheduled } = require('./reconcile');
         every(config.jobs.sweepIntervalMs, async () => {
             if (await isFrozen(ctx.db)) return;
             const out = await subscriptions.sweep(ctx);
-            if (out.renewed.length || out.expired.length || out.canceled.length) console.log(`[Billing] subscription sweep: ${out.renewed.length} renewed, ${out.expired.length} expired, ${out.canceled.length} canceled`);
+            if (out.renewed.length || out.past_due.length || out.expired.length || out.canceled.length) console.log(`[Billing] subscription sweep: ${out.renewed.length} renewed, ${out.past_due.length} past_due, ${out.expired.length} expired, ${out.canceled.length} canceled`);
         });
         if (config.jobs.reconcileIntervalMs > 0) {
             const reconcileNow = async () => await runScheduled(ctx, { keepDays: config.jobs.reconcileKeepDays });

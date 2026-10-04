@@ -111,6 +111,9 @@ function loadConfig(env = process.env) {
             minCashoutBits: int(env.BILLING_MIN_CASHOUT_BITS, 500),
             escrowDays: num(env.BILLING_ESCROW_DAYS, 14),
             stripeGraceDays: num(env.BILLING_STRIPE_GRACE_DAYS, 3),
+            // Credit-renewal grace (plan T5 step 11): a failed renewal moves the subscription to past_due and
+            // is retried until current_period_end + these days, then expires. 0 = off (expire at once).
+            renewalGraceDays: num(env.BILLING_RENEWAL_GRACE_DAYS, 0),
         },
 
         // Provider adapters: each is enabled only when its secrets are set.
