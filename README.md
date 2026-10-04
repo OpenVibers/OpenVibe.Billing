@@ -48,7 +48,7 @@ webhooks land here and nowhere else.
 - OpenVibe.Network (JWKS for service tokens; SSO with PKCE for the staff console; `identity.subject.resolve` for the Live import)
 - OpenVibe.Events (the outbox relay, only when `EVENTS_URL` is set)
 - the payment providers whose secrets are configured (none in production today)
-- `openvibe-contracts` v0.84.0, `openvibe-sdk` v0.21.2 (service tokens, per-person limits, `openvibe-sdk/db`), `openvibe-shared` v1.28.0, pinned by release tarball
+- `openvibe-contracts` v0.85.0, `openvibe-sdk` v0.21.2 (service tokens, per-person limits, `openvibe-sdk/db`), `openvibe-shared` v2.5.0, pinned by release tarball
 - **PostgreSQL 18 and Valkey 9** (OpenVibe.Host `roles/data/`, ADR-035): every read and write is async through
   `openvibe-sdk/db`; Valkey holds the per-person limit counters (optional: without `VALKEY_URL` they count in the process)
 

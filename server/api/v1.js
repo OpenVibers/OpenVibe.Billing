@@ -2,7 +2,8 @@
 
 /**
  * /api/v1 — the operations API. Service tokens only (audience openvibe.billing); Live is the
- * first client. Every mutating call needs an Idempotency-Key and is refused with 503
+ * first client. Every mutating call needs an Idempotency-Key — except POST /api/v1/usage,
+ * which is keyed by the reading's own idempotency_key — and is refused with 503
  * billing.frozen while the economy is frozen (reads keep working).
  *
  * Amounts are integers: bits for Vibes (vibes-bits), cents for money (usd-cents). People are

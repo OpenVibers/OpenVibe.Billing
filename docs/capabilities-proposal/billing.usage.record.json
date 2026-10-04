@@ -15,5 +15,7 @@
   "events": [],
   "implementedBy": [
     "POST /api/v1/usage"
-  ]
+  ],
+  "inputSchema": "platform.usage-sample@1",
+  "outputSchema": "billing.usage-record-result@1"
 }
