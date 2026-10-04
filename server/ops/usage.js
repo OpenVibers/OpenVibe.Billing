@@ -4,7 +4,8 @@
  * Usage readings (platform.usage-sample@1, plan T5 lane F): a service reports what was used — by which project and
  * subject, on which provider, how much, and, once rated, the free allowance it consumed and the Vibes charged — and
  * Billing keeps it. Storing a reading charges nothing and moves no balance: `vibes_charged` records a charge already
- * made in the ledger, it is never a request to make one.
+ * made in the ledger, it is never a request to make one. Billing rates stored readings later, in its own background sweep
+ * (ops/rating.js); the reading's own free_allowance_used/vibes_charged are kept as sent and never drive a charge.
  *
  * Idempotent by the reading's own idempotency_key (the contract's dedupe key, stable across retries, unique across
  * every caller): the first reading under a key is stored; the same reading again returns the stored row (replay);
@@ -26,6 +27,12 @@ function present(row) {
         id: String(row.id), idempotency_key: row.idempotency_key, project: row.project, subject: row.subject, service: row.service,
         at: row.at, received_at: row.received_at, principal: row.principal,
         reading: typeof row.reading === 'string' ? JSON.parse(row.reading) : row.reading,
+        // Billing's own rating (ops/rating.js): vibes_charged is absent until the reading is rated.
+        ...(row.rated_at ? {
+            rated_at: new Date(row.rated_at).toISOString(), vibes_charged: Number(row.vibes_charged), promo_bits: Number(row.promo_bits),
+            free_allowance_used: Number(row.free_allowance_used), txn_id: row.txn_id || null,
+        } : {}),
+        ...(row.rating_error ? { rating_error: row.rating_error } : {}),
     };
 }
 

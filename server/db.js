@@ -23,7 +23,7 @@ const ACCOUNT_KINDS = ['user_credit', 'creator_payable', 'provider_clearing', 'p
 const PROMO_KINDS = ['promo_credit', 'promo_reserve'];
 const CURRENCIES = ['vibes-bits', 'usd-cents'];
 const TXN_TYPES = ['purchase', 'donation', 'subscription', 'subscription_share', 'cashout_request', 'cashout_paid',
-    'cashout_denied', 'recycle', 'refund', 'chargeback', 'adjustment', 'import'];
+    'cashout_denied', 'recycle', 'refund', 'chargeback', 'adjustment', 'import', 'usage'];
 
 
 const MIGRATIONS = path.join(__dirname, '..', 'migrations');

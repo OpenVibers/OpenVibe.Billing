@@ -8,13 +8,15 @@
  * retried every minute; the subscription renewal sweep runs hourly; reconciliation runs hourly
  * (BILLING_RECONCILE_INTERVAL_MS, 0 = off) and is stored in reconciliation_runs (API
  * /api/v1/admin/reconciliations, the console, /metrics); the outbox relay publishes to
- * OpenVibe.Events when EVENTS_URL is set. While the economy is frozen only the relay and the
+ * OpenVibe.Events when EVENTS_URL is set. Usage rating (ops/rating.js) runs only when
+ * BILLING_RATING_INTERVAL_MS is set (default 0 = off). While the economy is frozen only the relay and the
  * reconciliation (it only reads the books) run.
  */
 const { loadConfig } = require('./config');
 const { createApp } = require('./app');
 const providers = require('./providers');
 const subscriptions = require('./ops/subscriptions');
+const rating = require('./ops/rating');
 const { createRelay } = require('./outbox');
 const { isFrozen } = require('./ops/common');
 const { runScheduled } = require('./reconcile');
@@ -42,6 +44,12 @@ const { runScheduled } = require('./reconcile');
             const first = setTimeout(async () => { try { await reconcileNow(); } catch (e) { console.warn('[Billing] job:', e.message); } }, 60_000);
             first.unref();
             timers.push(first);
+        }
+        if (config.jobs.ratingIntervalMs > 0) {
+            every(config.jobs.ratingIntervalMs, async () => {
+                const out = await rating.sweep(ctx);
+                if (out.rated || out.skipped || out.failed) console.log(`[Billing] rating: ${out.rated} rated, ${out.skipped} left unrated, ${out.failed} failed`);
+            });
         }
         relay.start();
     }
