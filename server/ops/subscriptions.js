@@ -321,12 +321,13 @@ async function sweep(ctx, { limit = 200 } = {}) {
             await setStatus(ctx, sub.id, 'expired', 'grace_ended', ended); out.expired.push(sub.id); continue;
         }
         try {
-            await pay(ctx, {
+            const paid = await pay(ctx, {
                 subscriber: sub.subscriber, streamer: sub.streamer, source: 'credit', priceCents: sub.price_cents || rates.subPriceCents,
                 autoRenew: true, renewal: true, idempotencyKey: await renewalKey(db, sub),
                 actor: { principal: 'svc:billing', job: 'renewal-sweep' },
             });
-            out.renewed.push(sub.id);
+            // A replay means a concurrent sweep already renewed this period: it reports it, this one skips it.
+            if (paid.replay) out.skipped++; else out.renewed.push(sub.id);
         } catch (e) {
             if (e.code !== 'billing.insufficient_funds') throw e;
             const graceUntil = sub.grace_until || iso(end + graceMs);
