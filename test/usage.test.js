@@ -103,6 +103,29 @@ async function userAccessToken(t) {
         assert.strictEqual(rows[0].reading.quantity, 1.5);
     });
 
+    await check('a replay compares the money fields only: placement/correlation changes are 200 and change nothing; money changes are 409', async () => {
+        const body = reading({ node: 'node-1', region: 'us-west', route_epoch: 7, trace_id: '0af7651916cd43dd8448eb211c80319c' });
+        const first = await post(body);
+        assert.strictEqual(first.status, 201, first.text);
+        const stored = async () => (await t.db.prepare('SELECT * FROM usage_records WHERE idempotency_key = ?').all(body.idempotency_key));
+        for (const over of [{ trace_id: '4bf92f3577b34da6a3ce929d0e0e4736' }, { route_epoch: 8 }, { node: 'node-2' }, { region: 'eu-west' }, { source: 'media.retry' },
+            { at: '2026-09-30T10:00:00.000Z' }, { at: '2026-09-30T12:00:00+02:00' }]) {
+            const r = await post({ ...body, ...over });
+            assert.strictEqual(r.status, 200, `${JSON.stringify(over)} → ${r.status} ${r.text}`);
+            assert.strictEqual(r.headers.get('idempotent-replayed'), 'true');
+            assert.deepStrictEqual(r.json.record, first.json.record, JSON.stringify(over));
+        }
+        for (const over of [{ quantity: 2 }, { subject: 'user:usr_01JAB2C3D4E5F6G7H8J9K0MNPR' }, { project: PRJ2 }, { at: '2026-09-30T10:00:01Z' }, { unit: 'MiB' },
+            { service: 'bot' }, { resource: 'object-2' }, { provider: 'other' }, { operation: 'upload' }, { project: undefined }]) {
+            const r = await post({ ...body, ...over });
+            assert.strictEqual(r.status, 409, `${JSON.stringify(over)} → ${r.status} ${r.text}`);
+            assert.strictEqual(r.json.code, 'billing.usage_key_reused');
+        }
+        const rows = await stored();
+        assert.strictEqual(rows.length, 1);
+        assert.deepStrictEqual(rows[0].reading, body, 'the first stored reading wins');
+    });
+
     await check('service tokens with billing.usage.record only: no token 401, a user token 401, another capability 403', async () => {
         assert.strictEqual((await post(reading(), { token: null })).status, 401);
         const user = await userAccessToken(t);

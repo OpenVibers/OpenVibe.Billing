@@ -284,6 +284,24 @@ let n = 0;
         await t.assertReconciled('end');
     });
 
+    await check('a reading replayed three times (new trace_id) and swept twice is charged once: one usage txn under usage:<key>', async () => {
+        const gina = t.user(7);
+        await fund(t, gina.id, 1000);
+        const body = reading(gina, { trace_id: '0af7651916cd43dd8448eb211c80319c' });
+        const rec = await store(body);
+        for (let i = 0; i < 3; i++) {
+            const r = await t.call('POST', '/api/v1/usage', { body: { ...body, trace_id: `${i}bf92f3577b34da6a3ce929d0e0e4736` }, cap: REC, key: null, sub: 'svc:media' });
+            assert.strictEqual(r.status, 200, r.text);
+            assert.strictEqual(r.json.record.id, rec.id);
+        }
+        await sweep();
+        await sweep();
+        assert.strictEqual(await usageTxns(rec.idempotency_key), 1);
+        assert.strictEqual((await t.db.prepare("SELECT COUNT(*) AS n FROM transactions WHERE type = 'usage' AND idempotency_key LIKE ?").get(`usage:${rec.idempotency_key}%`)).n, 1);
+        assert.strictEqual(await credit(gina), 970);
+        await t.assertReconciled('after replays');
+    });
+
     await t.close();
     done();
 })();
