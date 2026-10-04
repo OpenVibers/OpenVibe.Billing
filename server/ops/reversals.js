@@ -13,10 +13,12 @@
  *   donation      (site-routed tip) the creator's payable stays; loss booked, flagged for review.
  *
  * Partial reversals are supported; the cumulative reversed amount never exceeds what was paid.
+ *
+ * A subscription period paid from credit has no receipt: staff refund it whole (refundCreditPeriod).
  */
 const { post, getTxn, balance, money } = require('../ledger');
 const { enqueue } = require('../outbox');
-const { A, entry, fail } = require('./common');
+const { A, entry, fail, text } = require('./common');
 const { summary } = require('./purchases');
 const intents = require('./intents');
 
@@ -103,4 +105,77 @@ async function reverseReceipt(ctx, input) {
     });
 }
 
-module.exports = { reverseReceipt, reversedCents };
+/**
+ * Refund one subscription period paid from credit (staff, POST /subscriptions/:id/refund), whole period only.
+ * input: { subscriptionId, transactionId? | periodEnd?, reason, idempotencyKey, actor }
+ *
+ * The entries undo the payment: user_credit:<subscriber> +cost, platform_revenue −(cost − share), and the creator's
+ * share comes back out of creator_payable:<streamer> as far as the payable still holds it; a share already cashed
+ * out (or moved on) is booked to chargeback_loss through fx and the refund is flagged for review, as for purchases.
+ * A credit period is paid from user_credit only, so a promo allowance is never refunded into credit or earnings.
+ * The period is revoked (revokeForTxn shortens or ends the subscription). Idempotent on the key; a period already
+ * refunded or charged back is a no-op whatever the key, so a second call never refunds twice.
+ */
+async function refundCreditPeriod(ctx, input) {
+    const { db, rates } = ctx;
+    const reason = text(input.reason, 'reason', 300);
+    if (!reason) fail(422, 'billing.invalid_input', 'a refund needs a reason');
+    return await money(db, async () => {
+        const existing = await db.prepare('SELECT id FROM transactions WHERE idempotency_key = ?').get(input.idempotencyKey);
+        if (existing) return { txn: await getTxn(db, existing.id), replay: true };
+        const sub = await db.prepare('SELECT * FROM subscriptions WHERE id = ?').get(input.subscriptionId);
+        if (!sub) fail(404, 'billing.subscription_not_found', `no subscription ${input.subscriptionId}`);
+        let txnId = input.transactionId || null;
+        if (!txnId) {
+            const end = Date.parse(input.periodEnd);
+            if (!Number.isFinite(end)) fail(422, 'billing.invalid_input', 'name the period: transaction_id (the payment) or period_end');
+            const ent = (await db.prepare('SELECT source_txn, ends_at FROM entitlements WHERE subscription_id = ? ORDER BY ends_at DESC').all(sub.id))
+                .find((e) => Date.parse(e.ends_at) === end);
+            if (!ent || !ent.source_txn) fail(404, 'billing.period_not_found', `${sub.id} has no paid period ending ${input.periodEnd}`);
+            txnId = ent.source_txn;
+        }
+        const orig = await getTxn(db, txnId);
+        const granted = orig && await db.prepare('SELECT 1 AS x FROM entitlements WHERE source_txn = ? AND subscription_id = ? LIMIT 1').get(orig.id, sub.id);
+        if (!orig || orig.type !== 'subscription' || !granted) fail(404, 'billing.period_not_found', `${txnId} did not pay a period of ${sub.id}`);
+        if (orig.metadata.source !== 'credit') fail(422, 'billing.not_refundable', 'only periods paid from credit are refunded here; a provider receipt is reversed by its provider event');
+        const prior = await db.prepare("SELECT id FROM transactions WHERE reverses_txn = ? AND type IN ('refund', 'chargeback') ORDER BY created_at LIMIT 1").get(orig.id);
+        if (prior) return { txn: null, replay: false, noop: 'already_reversed', reversedBy: prior.id };
+
+        const subscriber = orig.from_subject;
+        const streamer = orig.to_subject;
+        const cost = Number(orig.metadata.cost_bits) || 0;
+        const share = Number(orig.metadata.share_bits) || 0;
+        const clawed = Math.max(0, Math.min(await balance(db, A.payable(streamer)), share));
+        const unrecovered = share - clawed;
+        const lossCents = rates.valueCents(unrecovered);
+        const entries = [
+            entry(A.credit(subscriber), cost), entry(A.revenue('vibes-bits'), -(cost - share)), entry(A.payable(streamer), -clawed),
+            entry(A.fxBits(), -unrecovered), entry(A.fxCents(), lossCents), entry(A.loss(), -lossCents),
+        ];
+        const review = unrecovered > 0;
+        const { txn } = await post(ctx, {
+            type: 'refund',
+            idempotencyKey: input.idempotencyKey,
+            reversesTxn: orig.id,
+            entries,
+            test: orig.test,
+            actor: input.actor,
+            fromSubject: streamer,
+            toSubject: subscriber,
+            metadata: {
+                source: 'credit', reason, subscription_id: sub.id, period_start: orig.metadata.period_start || null, period_end: orig.metadata.period_end || null,
+                bits_refunded: cost, share_bits: share, share_clawed_back_bits: clawed, unrecovered_share_bits: unrecovered, loss_cents: lossCents,
+                ...(review ? { review: 'required' } : {}), rates: rates.snapshot(),
+            },
+        });
+        const revoked = await require('./subscriptions').revokeForTxn(ctx, orig.id, 'refund');
+        if (orig.metadata.intent_id) await intents.setStatus(ctx, orig.metadata.intent_id, 'refunded');
+        await enqueue(ctx, {
+            event_type: 'billing.transaction.reversed', subject: { type: 'transaction', id: txn.id },
+            payload: { ...summary(txn), reverses_txn: orig.id, review: review ? 'required' : null, entitlements_revoked: revoked },
+        });
+        return { txn, replay: false, review };
+    });
+}
+
+module.exports = { reverseReceipt, reversedCents, refundCreditPeriod };

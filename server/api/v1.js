@@ -20,6 +20,7 @@ const purchases = require('../ops/purchases');
 const transfers = require('../ops/transfers');
 const cashouts = require('../ops/cashouts');
 const subscriptions = require('../ops/subscriptions');
+const { refundCreditPeriod } = require('../ops/reversals');
 const intents = require('../ops/intents');
 const admin = require('../ops/admin');
 const providers = require('../providers');
@@ -207,6 +208,17 @@ function v1Router({ ctx, auth, adapters, limits }) {
     r.post('/subscriptions/:id/cancel', ...write(CAP.subscription, async (req, res) => {
         const out = await subscriptions.cancel(ctx, { id: req.params.id, actor: actorOf(req) }, adapters);
         res.json({ subscription: subscriptions.present(out.subscription), provider_sync: out.provider_sync });
+    }));
+    // Staff refund of one period paid from credit (ops/reversals.js); a provider receipt is reversed by its provider event.
+    r.post('/subscriptions/:id/refund', ...write(CAP.admin, async (req, res) => {
+        const b = req.body || {};
+        const out = await refundCreditPeriod(ctx, {
+            subscriptionId: req.params.id, transactionId: b.transaction_id, periodEnd: b.period_end, reason: b.reason, idempotencyKey: req.idempotencyKey, actor: actorOf(req),
+        });
+        const s = await subscriptions.find(db, req.params.id);
+        const state = { subscription: subscriptions.present(s), entitlement: await subscriptions.entitlement(db, s.subscriber, s.streamer, ctx.now()) };
+        if (out.noop) return res.json({ transaction: null, noop: out.noop, reversed_by: out.reversedBy, ...state });
+        res.status(201).json(txnOut(out.txn, state));
     }));
     r.get('/entitlements/:subject', ...read(CAP.entitlement, async (req, res) => {
         const subject = pathSubject(req.params.subject);

@@ -22,6 +22,10 @@
  *   receipts.stale          no provider receipt waits unprocessed longer than
  *                           BILLING_RECONCILE_STALE_RECEIPT_MIN while the economy is open (a provider,
  *                           Network or code failure is holding money the ledger does not show)
+ *   subscriptions.period_charged
+ *                           every period still granted rests on an unreversed subscription transaction (a
+ *                           period imported from Live, with no Billing payment, is counted, not failed), and
+ *                           every period revoked for a refund or chargeback has the reversal of its payment
  * Warnings (reported, do not fail): negative user balances, unprocessed/rejected events, events and
  * transactions flagged for review (chargebacks on donated credit, unattributed site tips, EXTERNAL
  * tips on unmapped accounts), import holds. Totals exclude test transactions (ADR-012 rule 9).
@@ -107,6 +111,19 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
     const promoMixed = await db.prepare(`SELECT e.txn_id FROM ledger_entries e JOIN accounts a ON a.id = e.account_id GROUP BY e.txn_id
         HAVING bool_or(a.kind IN ('promo_credit', 'promo_reserve')) AND bool_or(a.kind NOT IN ('promo_credit', 'promo_reserve')) LIMIT 100`).all();
     check('promo.isolated', !promoMixed.length, promoMixed.length ? { offenders: promoMixed } : null);
+
+    const periods = await db.prepare(`SELECT e.id, e.subscription_id, e.ends_at, e.source_txn, e.revoked_reason, t.type AS txn_type, s.legacy_live_id,
+            (SELECT COUNT(*) FROM transactions r WHERE r.reverses_txn = e.source_txn AND r.type IN ('refund', 'chargeback')) AS reversals
+        FROM entitlements e LEFT JOIN transactions t ON t.id = e.source_txn LEFT JOIN subscriptions s ON s.id = e.subscription_id
+        WHERE e.revoked_at IS NULL OR e.revoked_reason IN ('refund', 'chargeback')`).all();
+    const imported = periods.filter((p) => !p.source_txn && !p.revoked_reason && p.legacy_live_id);
+    const periodBad = periods.filter((p) => !imported.includes(p)).map((p) => {
+        const problem = p.revoked_reason ? (Number(p.reversals) ? null : `revoked for a ${p.revoked_reason} its payment has no reversal for`)
+            : !p.source_txn ? 'granted with no payment' : p.txn_type !== 'subscription' ? `paid by a ${p.txn_type || 'missing'} transaction`
+                : Number(p.reversals) ? 'still granted though its payment was reversed' : null;
+        return problem && { entitlement: p.id, subscription_id: p.subscription_id, ends_at: p.ends_at, source_txn: p.source_txn, problem };
+    }).filter(Boolean);
+    check('subscriptions.period_charged', !periodBad.length, periodBad.length ? { offenders: periodBad.slice(0, 100) } : { periods: periods.length, imported_from_live: imported.length });
 
     const frozen = await isFrozen(db);
     const staleMin = (ctx.config && ctx.config.reconcile && ctx.config.reconcile.staleReceiptMin) || 60;

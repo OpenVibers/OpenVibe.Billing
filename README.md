@@ -199,6 +199,7 @@ are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "typ
 | `POST /api/v1/cashouts/:id/deny` | `billing.cashout.manage` | reversal back to payable `{reason?}` |
 | `POST /api/v1/subscriptions` | `billing.subscription.manage` | start/renew a period `{subscriber, streamer, source: credit, auto_renew?}` (share credited every period); `source: receipt` also needs `billing.ledger.admin` |
 | `POST /api/v1/subscriptions/:id/cancel` | `billing.subscription.manage` | cancel at period end; Stripe is cancelled at Stripe first |
+| `POST /api/v1/subscriptions/:id/refund` | `billing.ledger.admin` | staff refund of one whole period paid from credit `{transaction_id \| period_end, reason}` → 201 `{transaction, subscription, entitlement}`; the period is revoked (the subscription is shortened, or ends with its last period); a period already refunded or charged back → 200 `{transaction: null, noop: "already_reversed", reversed_by}`; a receipt-paid period → 422 `billing.not_refundable` (its provider reverses it) |
 | `GET /api/v1/subscriptions[?subscriber&streamer&status]`, `GET …/:id` | `billing.entitlement.check` | read |
 | `GET /api/v1/entitlements/:subject[?streamer=]` | `billing.entitlement.check` | `{active, expires_at, grace_until, subscription}` — needs nothing but Billing; `grace_until` is set only while the subscription is `past_due` (never active) |
 | `GET /api/v1/balances/:subject` | `billing.balance.read` | `{credit, payable, pending_payouts, promo_bits, payable_value_cents}` (`promo_bits`: unused free allowance, never transferable) |
@@ -318,7 +319,11 @@ transaction as their effect. Adjustments are not in the console; they stay on th
 Only PowerChat is expected to be enabled in production. A reversal of a purchase claws back the
 buyer's remaining credit; credit already given to someone stays with them — their payable is never
 touched — and the unrecovered value goes to `chargeback_loss`, flagged `review: required`.
-Reversing a subscription payment revokes the periods it granted.
+Reversing a subscription payment revokes the periods it granted. A period paid from credit has no receipt:
+staff refund it whole (`POST /api/v1/subscriptions/:id/refund`, one `refund` transaction reversing the period's
+payment): the subscriber gets the credit back (never the promo allowance, which pays no period), platform
+revenue gives back its part, and the creator share comes back out of `creator_payable` as far as it is still
+there — a share already recycled or cashed out goes to `chargeback_loss`, flagged `review: required`.
 
 ## Operations
 
@@ -331,7 +336,10 @@ Reversing a subscription payment revokes the periods it granted.
   receipt names its provider and moved exactly the receipt's cents through that provider's clearing
   account (`receipts.ledger`), EXTERNAL receipts are never in the journal and each announced one has one
   outbox event (`receipts.external`), and no receipt waits unprocessed longer than
-  `BILLING_RECONCILE_STALE_RECEIPT_MIN` (60) while the economy is open (`receipts.stale`). It also lists
+  `BILLING_RECONCILE_STALE_RECEIPT_MIN` (60) while the economy is open (`receipts.stale`) — and every paid
+  period against its charge: a granted period rests on an unreversed subscription transaction (periods imported
+  from Live are counted, not failed) and a period revoked for a refund or chargeback has its payment's reversal
+  (`subscriptions.period_charged`). It also lists
   negative balances, unprocessed/rejected events, items for review and import holds; totals exclude test
   transactions. Every run is stored in `reconciliation_runs` with its trigger (`scheduled`, `api`,
   `console`, `script`, `import`); passing scheduled runs older than `BILLING_RECONCILE_KEEP_DAYS` (30) are
@@ -366,7 +374,9 @@ random ports. What they prove: the journal balances per currency and refuses edi
 (`ledger.test.js`); a receipt settles once whatever retries carry it, and reversals claw back only what
 can be (`webhooks.test.js`, `providers.test.js`, `stripe.test.js`); subscriptions and entitlements
 (`subscriptions.test.js`); a renewal is one charge per period, a failed one is retried on its key in the
-grace and then ended, a promo allowance never pays it (`renewal-grace.test.js`); EXTERNAL receipts are announced once and only under `billing`
+grace and then ended, a promo allowance never pays it (`renewal-grace.test.js`); a credit-paid period is refunded
+whole and once, the creator share clawed back or booked as loss, and every paid period has its charge record
+(`subscription-refund.test.js`); EXTERNAL receipts are announced once and only under `billing`
 (`external.test.js`); the import reconciles (`import.test.js`); freeze, reconciliation and review
 (`operations.test.js`); the cutover sequence (`cutover.test.js`); the staff console and its staff map
 (`console.test.js`, `staff-map.test.js`); the public policy (`policy.test.js`); the vhost keeps `/api/v1`
