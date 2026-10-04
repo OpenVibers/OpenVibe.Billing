@@ -23,6 +23,7 @@
     "GET /api/v1/admin/provider-events",
     "POST /api/v1/admin/provider-events/:id/reprocess",
     "POST /api/v1/admin/sweep",
-    "GET /api/v1/admin/import-holds"
+    "GET /api/v1/admin/import-holds",
+    "GET /api/v1/usage"
   ]
 }
