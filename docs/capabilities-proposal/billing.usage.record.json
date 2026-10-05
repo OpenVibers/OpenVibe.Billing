@@ -4,7 +4,7 @@
   "owner": "billing",
   "status": "active",
   "visibility": "internal",
-  "description": "Record a platform.usage-sample@1 reading without moving money. The reading's idempotency_key deduplicates retries. Listing all readings requires billing.ledger.admin.",
+  "description": "The only money input to Billing: record a platform.usage-sample@1 reading without moving money. The reading's idempotency_key deduplicates retries. Listing all readings requires billing.ledger.admin.",
   "permissions": [
     "billing:usage"
   ],
