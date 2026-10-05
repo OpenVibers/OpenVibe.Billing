@@ -20,6 +20,7 @@ const rating = require('./ops/rating');
 const { createRelay } = require('./outbox');
 const { isFrozen } = require('./ops/common');
 const { runScheduled } = require('./reconcile');
+const { gracefulStop } = require('openvibe-sdk/service');
 
 (async () => {
     const config = loadConfig();
@@ -62,16 +63,25 @@ const { runScheduled } = require('./reconcile');
     });
     server.keepAliveTimeout = 65_000;
 
-    function shutdown(signal) {
-        console.log(`[Billing] ${signal} — closing`);
-        timers.forEach((t) => { clearInterval(t); clearTimeout(t); });
-        relay.stop();
-        keys.stop();
-        server.close(() => { if (app.locals.valkey) app.locals.valkey.close().catch(() => {}); ctx.db.close().catch(() => {}).finally(() => process.exit(0)); });
-        setTimeout(() => process.exit(0), 5000).unref();
-    }
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
-    process.on('SIGINT', () => shutdown('SIGINT'));
+    // SIGTERM/SIGINT (openvibe-sdk/service): the kit installs the handlers, stops the job timers, the outbox
+    // relay and the Network key refresh, drains the HTTP server (requests in flight get Connection: close),
+    // then closes Valkey and the database. Past 5 s the process exits 0 (deadlineExitCode), matching the
+    // manifest's lifecycle.shutdown (deadlineSeconds 5); a second signal is a no-op.
+    gracefulStop({
+        name: 'Billing',
+        server,
+        deadlineMs: 5000,
+        deadlineExitCode: 0,
+        stop: [
+            () => { for (const t of timers) { clearInterval(t); clearTimeout(t); } },
+            () => relay.stop(),
+            () => keys.stop(),
+        ],
+        close: [
+            () => app.locals.valkey && app.locals.valkey.close().catch(() => {}),
+            () => ctx.db.close(),
+        ],
+    });
 })().catch((err) => {
     console.error('[Billing] failed to start:', err);
     process.exit(1);

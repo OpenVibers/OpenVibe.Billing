@@ -27,6 +27,7 @@
     "outbox events billing.*",
     "per-person limits (openvibe-sdk/limits)",
     "usage readings (billing.usage.record)",
+    "usage rating: a rate card -> the subject's promo allowance -> one usage transaction per reading, under hard budgets (BILLING_RATING_INTERVAL_MS off by default; nothing charged without a loaded card, key usage:<reading key>)",
     "promo allowance ledger"
   ]
 }
