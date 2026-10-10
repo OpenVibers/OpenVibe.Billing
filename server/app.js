@@ -89,7 +89,7 @@ async function createApp(opts = {}) {
         service: 'billing', release: release.release,
         checks: [
             { name: 'db', required: true, check: async () => (await db.prepare('SELECT 1 AS ok FROM settings WHERE id = 1').get()).ok === 1 || 'settings row missing' },
-            { name: 'network_jwks', required: true, check: () => Boolean(keys.get()) || 'Network public key not loaded' },
+            { name: 'network_jwks', required: true, check: () => keys.loaded() || 'Network public key not loaded' },
             { name: 'money_writes', required: false, check: async () => (await isFrozen(db) ? 'frozen' : true) },
             { name: 'events_outbox', required: false, check: async () => await outbox.status() },
             { name: 'valkey', required: false, check: async () => (valkey ? await valkey.ready() : { skipped: 'VALKEY_URL not set: per-person limits count in this process only' }) },
