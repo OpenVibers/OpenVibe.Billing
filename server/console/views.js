@@ -49,7 +49,7 @@ label{display:grid;gap:4px;font-size:14px}label.check{display:flex;gap:8px;align
 input[type=text],select,textarea{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);width:100%}
 textarea{min-height:70px}
 button{font:inherit;padding:7px 14px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
-button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.danger{border-color:var(--bad);color:var(--bad)}
+button.primary{background:var(--accent-strong, var(--accent, #3472d8));border-color:var(--accent-strong, var(--accent, #3472d8));color:var(--on-accent-strong, var(--on-accent, #fff))}button.danger{border-color:var(--bad);color:var(--bad)}
 button.link{border:0;background:none;padding:0;color:var(--accent);text-decoration:underline}
 fieldset{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0}fieldset[disabled]{opacity:.6}
 legend{padding:0 6px;font-weight:600}
