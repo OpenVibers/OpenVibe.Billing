@@ -142,7 +142,7 @@ const { boot, fund, check, done } = require('./helpers/app');
         assert.deepStrictEqual([b.payable, b.pending_payouts], [250, 1000]);
         await t.assertReconciled('after cashout request');
         // The event stream gets the payout TYPE only, never the creator's address (a PayPal email).
-        const outboxText = JSON.stringify(await t.db.prepare("SELECT event FROM outbox WHERE event ILIKE '%billing.cashout.%'").all());
+        const outboxText = JSON.stringify(await t.db.prepare("SELECT envelope AS event FROM service_outbox WHERE envelope::text ILIKE '%billing.cashout.%'").all());
         assert.ok(outboxText.includes('billing.cashout.requested'), 'the requested event is queued');
         assert.ok(!outboxText.includes('s@example.com'), 'no payout address in any cashout event');
         assert.strictEqual(cashout.payout_method.address, 's@example.com', 'the API itself still returns it to the caller');

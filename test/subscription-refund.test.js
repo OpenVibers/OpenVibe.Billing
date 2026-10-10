@@ -29,7 +29,7 @@ const DAY = 86_400_000;
     const ent = async (u) => (await t.call('GET', `/api/v1/entitlements/${u.id}?streamer=${streamer.id}`)).json;
     const revenueBits = async () => (await t.db.prepare(`SELECT COALESCE(SUM(e.amount), 0)::bigint AS n FROM ledger_entries e JOIN accounts a ON a.id = e.account_id
         WHERE a.kind = 'platform_revenue' AND a.currency = 'vibes-bits'`).get()).n;
-    const reversedEvents = async () => (await t.db.prepare('SELECT event FROM outbox ORDER BY seq').all()).map((r) => JSON.parse(r.event))
+    const reversedEvents = async () => (await t.db.prepare('SELECT envelope AS event FROM service_outbox ORDER BY id').all()).map((r) => (typeof r.event === 'string' ? JSON.parse(r.event) : r.event))
         .filter((e) => e.event_type === 'billing.transaction.reversed');
     const periodCheck = async () => (await reconcile(t.ctx, { store: false })).checks.find((c) => c.id === 'subscriptions.period_charged');
 

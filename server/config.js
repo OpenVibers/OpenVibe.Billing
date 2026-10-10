@@ -150,7 +150,7 @@ function loadConfig(env = process.env) {
             },
         },
 
-        // Durable events: the outbox relay runs only when EVENTS_URL is set.
+        // Durable events: the SDK relay runs when EVENTS_URL and the OAuth client secret are set.
         events: {
             url: trim(env.EVENTS_URL || ''),
             intervalMs: int(env.EVENTS_RELAY_INTERVAL_MS, 2000),

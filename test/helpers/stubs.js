@@ -123,8 +123,10 @@ async function startEvents() {
         if (req.url === '/api/v1/events' && req.method === 'POST') {
             tokens.push(req.headers.authorization);
             const body = JSON.parse(raw);
-            batches.push(body);
-            return send(res, 201, { results: (body.events || []).map((e, i) => ({ event_id: e.event_id, seq: i + 1, duplicate: false })) });
+            batches.push(body.events ? body : { events: [body] });
+            return send(res, 201, body.events
+                ? { results: body.events.map((e, i) => ({ event_id: e.event_id, seq: i + 1, duplicate: false })) }
+                : { event_id: body.event_id, seq: 1, duplicate: false });
         }
         send(res, 404, {});
     });

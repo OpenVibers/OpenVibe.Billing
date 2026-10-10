@@ -25,7 +25,7 @@
     "staff console: cashouts, review queue, reconciliation, freeze, audit log",
     "public billing policy page",
     "Live shadow import",
-    "outbox events billing.*",
+    "openvibe-sdk/events outbox in service_outbox for billing.* events (legacy outbox retained for rollback)",
     "per-person limits (openvibe-sdk/limits)",
     "usage readings (billing.usage.record)",
     "usage rating: a rate card -> the subject's promo allowance -> one usage transaction per reading, under hard budgets (BILLING_RATING_INTERVAL_MS off by default; nothing charged without a loaded card, key usage:<reading key>)",

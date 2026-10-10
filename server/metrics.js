@@ -24,7 +24,7 @@ const { createRegistry } = require('openvibe-shared/metrics');
 const { isFrozen } = require('./ops/common');
 const { latest } = require('./reconcile');
 
-function createMetrics({ db, config, now = () => Date.now() }) {
+function createMetrics({ db, config, now = () => Date.now(), outbox }) {
     const registry = createRegistry();
     const one = async (sql, ...a) => (await db.prepare(sql).get(...a)).n;
 
@@ -54,8 +54,9 @@ function createMetrics({ db, config, now = () => Date.now() }) {
         name: 'billing_external_receipts', help: 'EXTERNAL receipts (tips on a streamer\'s own provider account) by announcement status', labelNames: ['status'],
         collect: async () => (await Promise.all(['announced', 'not_announced'].map(async (status) => ({ labels: { status }, value: await one('SELECT COUNT(*) AS n FROM external_receipts WHERE status = ?', status) })))),
     });
-    registry.gauge({ name: 'billing_outbox_pending', help: 'Outbox events not yet relayed to OpenVibe.Events', collect: async () => await one('SELECT COUNT(*) AS n FROM outbox WHERE sent_at IS NULL') });
-    registry.gauge({ name: 'billing_outbox_failing', help: 'Unsent outbox events whose last relay attempt failed', collect: async () => await one('SELECT COUNT(*) AS n FROM outbox WHERE sent_at IS NULL AND last_error IS NOT NULL') });
+    registry.gauge({ name: 'billing_outbox_pending', help: 'Outbox events not yet relayed to OpenVibe.Events', collect: async () => (await outbox.status()).pending });
+    registry.gauge({ name: 'billing_outbox_failing', help: 'Pending outbox events whose last relay attempt failed', collect: async () => await one('SELECT COUNT(*) AS n FROM service_outbox WHERE sent_at IS NULL AND rejected_at IS NULL AND last_error IS NOT NULL') });
+    registry.gauge({ name: 'billing_outbox_rejected', help: 'Events permanently rejected by OpenVibe.Events', collect: async () => (await outbox.status()).rejected });
     registry.gauge({
         name: 'billing_cashouts', help: 'Cashouts by status', labelNames: ['status'],
         collect: async () => (await Promise.all(['requested', 'paid', 'denied'].map(async (status) => ({ labels: { status }, value: await one('SELECT COUNT(*) AS n FROM cashouts WHERE status = ?', status) })))),

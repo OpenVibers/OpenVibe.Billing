@@ -100,9 +100,10 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
 
     const extBooked = await db.prepare('SELECT x.receipt_ref, t.id AS txn_id FROM external_receipts x JOIN transactions t ON t.receipt_ref = x.receipt_ref').all();
     const extUnsent = await db.prepare(`SELECT x.receipt_ref, x.event_id FROM external_receipts x
-        WHERE x.status = 'announced' AND (x.event_id IS NULL OR NOT EXISTS (SELECT 1 FROM outbox o WHERE o.event_id = x.event_id))`).all();
-    const extTwice = await db.prepare(`SELECT json_extract(event, '$.subject.id') AS receipt_ref, COUNT(*) AS events FROM outbox
-        WHERE json_extract(event, '$.event_type') = 'billing.receipt.external' GROUP BY 1 HAVING COUNT(*) > 1`).all();
+        WHERE x.status = 'announced' AND (x.event_id IS NULL OR NOT EXISTS (SELECT 1 FROM service_outbox o WHERE o.event_id = x.event_id)
+            AND NOT EXISTS (SELECT 1 FROM outbox legacy WHERE legacy.event_id = x.event_id AND legacy.sent_at IS NOT NULL))`).all();
+    const extTwice = await db.prepare(`SELECT (envelope #>> '{subject,id}') AS receipt_ref, COUNT(*) AS events FROM service_outbox
+        WHERE (envelope #>> '{event_type}') = 'billing.receipt.external' GROUP BY 1 HAVING COUNT(*) > 1`).all();
     const extOffenders = [...extBooked.map((r) => ({ ...r, problem: 'booked in the journal' })), ...extUnsent.map((r) => ({ ...r, problem: 'announced without an outbox event' })),
         ...extTwice.map((r) => ({ ...r, problem: 'announced more than once' }))];
     check('receipts.external', !extOffenders.length, extOffenders.length ? { offenders: extOffenders }

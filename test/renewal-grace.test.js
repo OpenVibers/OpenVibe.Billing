@@ -30,7 +30,7 @@ const DAY = 86_400_000;
     };
     const row = async (id) => await subs.find(t.db, id);
     const renewals = async (id) => (await t.db.prepare("SELECT idempotency_key FROM transactions WHERE type = 'subscription' AND idempotency_key LIKE ? ORDER BY created_at").all(`renew:${id}:%`)).map((r) => r.idempotency_key);
-    const changed = async (u) => (await t.db.prepare('SELECT event FROM outbox ORDER BY seq').all()).map((r) => JSON.parse(r.event))
+    const changed = async (u) => (await t.db.prepare('SELECT envelope AS event FROM service_outbox ORDER BY id').all()).map((r) => (typeof r.event === 'string' ? JSON.parse(r.event) : r.event))
         .filter((e) => e.event_type === 'billing.entitlement.changed' && e.subject.id.startsWith(`${u.id}:`)).map((e) => e.payload);
     const ent = async (u) => (await t.call('GET', `/api/v1/entitlements/${u.id}?streamer=${streamer.id}`)).json;
     const payable = async () => (await t.balances(streamer.id)).payable;

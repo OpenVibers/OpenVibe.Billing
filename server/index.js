@@ -17,7 +17,6 @@ const { createApp } = require('./app');
 const providers = require('./providers');
 const subscriptions = require('./ops/subscriptions');
 const rating = require('./ops/rating');
-const { createRelay } = require('./outbox');
 const { isFrozen } = require('./ops/common');
 const { runScheduled } = require('./reconcile');
 const { gracefulStop } = require('openvibe-sdk/service');
@@ -29,7 +28,7 @@ const { gracefulStop } = require('openvibe-sdk/service');
     keys.start();
 
     const timers = [];
-    const relay = createRelay({ db: ctx.db, config });
+    const relay = ctx.outbox;
     if (config.jobs.enabled) {
         const every = (ms, fn) => { const t = setInterval(() => { Promise.resolve().then(fn).catch((e) => console.warn('[Billing] job:', e.message)); }, ms); t.unref(); timers.push(t); };
         every(config.jobs.webhookRetryMs, async () => await providers.processPending(ctx, adapters));
@@ -58,7 +57,7 @@ const { gracefulStop } = require('openvibe-sdk/service');
     const server = app.listen(config.port, config.host, async () => {
         const enabled = Object.values(adapters).filter((a) => a.enabled).map((a) => a.name);
         console.log(`[Billing] ${config.nodeEnv} on http://${config.host}:${config.port} → ${config.baseUrl} (PostgreSQL)`);
-        console.log(`[Billing] providers enabled: ${enabled.length ? enabled.join(', ') : 'none'}; economy ${await isFrozen(ctx.db) ? 'FROZEN' : 'open'}; events relay ${config.events.url ? `→ ${config.events.url}` : 'off (outbox accumulates)'}`);
+        console.log(`[Billing] providers enabled: ${enabled.length ? enabled.join(', ') : 'none'}; economy ${await isFrozen(ctx.db) ? 'FROZEN' : 'open'}; events relay ${(await relay.status()).enabled ? `→ ${config.events.url}` : 'off (outbox accumulates)'}`);
         console.log(`[Billing] money authority: ${config.authority}${config.authority === 'live' ? ' (shadow: EXTERNAL tips are recorded, not announced)' : ' (EXTERNAL tips are announced as billing.receipt.external)'}`);
     });
     server.keepAliveTimeout = 65_000;

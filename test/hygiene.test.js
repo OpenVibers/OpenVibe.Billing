@@ -199,11 +199,11 @@ const donation = (data, streamer = 'openvibe') => ({ type: 'donation.completed',
         // Marking the intent settled comes after the journal posting, in the same transaction: failing
         // it must take the posting, the outbox event and the processed mark down with it.
         intents.markSettled = async (...a) => { if (fails-- > 0) throw new Error('disk full'); return await real(...a); };
-        const events = (await t.db.prepare('SELECT COUNT(*) AS n FROM outbox').get()).n;
+        const events = (await t.db.prepare('SELECT COUNT(*) AS n FROM service_outbox').get()).n;
         let r;
         try { r = await t.powerchat(donation({ eventId: 'don-crash', amountUsdCents: 150, appExternalRef: i.checkout_ref })); }
         finally { intents.markSettled = real; }
-        assert.strictEqual((await t.db.prepare('SELECT COUNT(*) AS n FROM outbox').get()).n, events, 'no event for a settlement that did not happen');
+        assert.strictEqual((await t.db.prepare('SELECT COUNT(*) AS n FROM service_outbox').get()).n, events, 'no event for a settlement that did not happen');
         assert.strictEqual(r.json.processed, false);
         assert.strictEqual(await txnCount(), before);
         assert.strictEqual((await t.balances(buyer.id)).credit, credit);
@@ -216,12 +216,13 @@ const donation = (data, streamer = 'openvibe') => ({ type: 'donation.completed',
     });
 
     await check('OpenVibe.Events down: settlement is unaffected, events wait in the outbox and go out once it is back', async () => {
-        const { createRelay } = require('../server/outbox');
+        const { createServiceOutbox } = require('openvibe-sdk/events');
         const log = { warn() {} };
-        const unsent = async () => (await t.db.prepare('SELECT COUNT(*) AS n FROM outbox WHERE sent_at IS NULL').get()).n;
-        const down = createRelay({ db: t.db, config: { ...t.config, events: { url: 'http://127.0.0.1:9', intervalMs: 1000 } }, log });
+        const unsent = async () => (await t.db.prepare('SELECT COUNT(*) AS n FROM service_outbox WHERE sent_at IS NULL AND rejected_at IS NULL').get()).n;
+        const down = createServiceOutbox({ db: t.db, source: 'billing', table: 'service_outbox', eventsUrl: 'http://127.0.0.1:9',
+            networkInternalUrl: t.config.network.internalUrl, clientId: t.config.oauth.clientId, clientSecret: t.config.oauth.clientSecret, log });
         await fund(t, buyer, 200);
-        const r = await down.flush();
+        const r = await down.outbox.flush();
         assert.strictEqual(r.sent, 0);
         const waiting = await unsent();
         assert.ok(waiting > 0);
@@ -229,8 +230,10 @@ const donation = (data, streamer = 'openvibe') => ({ type: 'donation.completed',
         assert.match(m, new RegExp(`billing_outbox_pending ${waiting}\\b`));
         assert.match(m, /billing_outbox_failing [1-9]/);
         const events = await startEvents();
-        const up = createRelay({ db: t.db, config: { ...t.config, events: { url: events.url, intervalMs: 1000 } }, log });
-        await up.flush();
+        const up = createServiceOutbox({ db: t.db, source: 'billing', table: 'service_outbox', eventsUrl: events.url,
+            networkInternalUrl: t.config.network.internalUrl, clientId: t.config.oauth.clientId, clientSecret: t.config.oauth.clientSecret, log });
+        await t.db.prepare('UPDATE service_outbox SET next_attempt_at = 0 WHERE sent_at IS NULL').run();
+        await up.outbox.flush();
         assert.strictEqual(await unsent(), 0);
         const ids = events.batches.flatMap((b) => b.events).map((e) => e.event_id);
         assert.strictEqual(new Set(ids).size, ids.length, 'each event published once');
