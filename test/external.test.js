@@ -14,7 +14,7 @@ const { boot, check, done } = require('./helpers/app');
 const { startEvents } = require('./helpers/stubs');
 
 const donation = (data, streamer = { id: 'pc-77', username: 'StreamerPC' }) => ({ type: 'donation.completed', streamer, data: { eventId: `don-${Math.random().toString(36).slice(2)}`, ...data } });
-const externalEvents = async (db) => (await db.prepare("SELECT event FROM outbox WHERE json_extract(event, '$.event_type') = 'billing.receipt.external' ORDER BY seq").all()).map((r) => JSON.parse(r.event));
+const externalEvents = async (db) => (await db.prepare("SELECT envelope AS event FROM service_outbox WHERE (envelope #>> '{event_type}') = 'billing.receipt.external' ORDER BY id").all()).map((r) => typeof r.event === 'string' ? JSON.parse(r.event) : r.event);
 
 (async () => {
     console.log('external receipts');
@@ -155,9 +155,10 @@ const externalEvents = async (db) => (await db.prepare("SELECT event FROM outbox
 
     await check('the outbox relay publishes billing.receipt.external to OpenVibe.Events', async () => {
         const events = await startEvents();
-        const { createRelay } = require('../server/outbox');
-        const relay = createRelay({ db: t.db, config: { ...t.config, events: { url: events.url, intervalMs: 1000 } }, log: { warn() {} } });
-        await relay.flush();
+        const { createServiceOutbox } = require('openvibe-sdk/events');
+        const relay = createServiceOutbox({ db: t.db, source: 'billing', table: 'service_outbox', eventsUrl: events.url,
+            networkInternalUrl: t.config.network.internalUrl, clientId: t.config.oauth.clientId, clientSecret: t.config.oauth.clientSecret, log: { warn() {} } });
+        await relay.outbox.flush();
         const sent = events.batches.flatMap((b) => b.events).filter((e) => e.event_type === 'billing.receipt.external');
         assert.strictEqual(sent.length, (await externalEvents(t.db)).length);
         assert.strictEqual(sent[0].event_id, first.event_id);

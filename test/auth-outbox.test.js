@@ -9,7 +9,8 @@ const { boot, fund, check, done } = require('./helpers/app');
 const { startEvents } = require('./helpers/stubs');
 
 (async () => {
-    const t = await boot();
+    const events = await startEvents();
+    const t = await boot({ env: { EVENTS_URL: events.url } });
     const a = t.user(51);
     const b = t.user(52);
     console.log('auth, outbox, reconciliation');
@@ -42,7 +43,7 @@ const { startEvents } = require('./helpers/stubs');
         assert.strictEqual((await t.call('POST', '/api/v1/transfers', { body: { from: a, to: b, amount: 600 } })).status, 201);
         await t.call('POST', '/api/v1/cashouts', { body: { subject: b, amount: 500, payout_method: { type: 'paypal', address: 'b@example.com' } } });
         assert.strictEqual((await t.call('POST', '/api/v1/subscriptions', { body: { subscriber: a, streamer: b, source: 'credit', auto_renew: false } })).status, 201);
-        const rows = (await t.db.prepare('SELECT event FROM outbox ORDER BY seq').all()).map((r) => JSON.parse(r.event));
+        const rows = (await t.db.prepare('SELECT envelope AS event FROM service_outbox ORDER BY id').all()).map((r) => typeof r.event === 'string' ? JSON.parse(r.event) : r.event);
         const types = rows.map((e) => e.event_type);
         for (const type of ['billing.transaction.settled', 'billing.cashout.requested', 'billing.entitlement.changed']) assert.ok(types.includes(type), `${type} in ${types}`);
         for (const e of rows) {
@@ -54,25 +55,23 @@ const { startEvents } = require('./helpers/stubs');
         const txnCount = (await t.db.prepare('SELECT COUNT(*) AS n FROM transactions').get()).n;
         const refused = await t.call('POST', '/api/v1/transfers', { body: { from: a, to: b, amount: 999999 } });
         assert.strictEqual(refused.status, 409);
-        assert.strictEqual((await t.db.prepare('SELECT COUNT(*) AS n FROM outbox').get()).n, rows.length, 'a refused operation writes no event');
+        assert.strictEqual((await t.db.prepare('SELECT COUNT(*) AS n FROM service_outbox').get()).n, rows.length, 'a refused operation writes no event');
         assert.strictEqual((await t.db.prepare('SELECT COUNT(*) AS n FROM transactions').get()).n, txnCount);
     });
 
     await check('the relay publishes unsent events to OpenVibe.Events with an events.event.publish token', async () => {
-        const events = await startEvents();
-        const { createRelay } = require('../server/outbox');
-        const relay = createRelay({ db: t.db, config: { ...t.config, events: { url: events.url, intervalMs: 1000 } }, log: { warn() {} } });
-        const n = (await t.db.prepare('SELECT COUNT(*) AS n FROM outbox WHERE sent_at IS NULL').get()).n;
-        const r = await relay.flush();
+        const relay = t.ctx.outbox;
+        assert.strictEqual((await relay.status()).enabled, true);
+        const n = (await t.db.prepare('SELECT COUNT(*) AS n FROM service_outbox WHERE sent_at IS NULL AND rejected_at IS NULL').get()).n;
+        const r = await relay.outbox.flush();
         assert.strictEqual(r.sent, n);
-        assert.strictEqual((await t.db.prepare('SELECT COUNT(*) AS n FROM outbox WHERE sent_at IS NULL').get()).n, 0);
+        assert.strictEqual((await t.db.prepare('SELECT COUNT(*) AS n FROM service_outbox WHERE sent_at IS NULL AND rejected_at IS NULL').get()).n, 0);
         const token = events.tokens[0].slice(7);
         const v = serviceAuth.verifyServiceToken(token, { publicKey: t.network.publicPem, audience: 'openvibe.events' });
         assert.ok(v.ok, v.reason);
         assert.deepStrictEqual(v.claims.cap, ['events.event.publish']);
         assert.strictEqual(v.claims.sub, 'svc:billing');
-        assert.strictEqual((await relay.flush()).sent, 0);
-        await events.close();
+        assert.strictEqual((await relay.outbox.flush()).sent, 0);
     });
 
     await check('GET /admin/reconcile stores a run and detects a deliberately corrupted cached balance', async () => {
@@ -89,5 +88,6 @@ const { startEvents } = require('./helpers/stubs');
     });
 
     await t.close();
+    await events.close();
     done();
 })();

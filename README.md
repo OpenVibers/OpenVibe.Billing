@@ -61,7 +61,7 @@ promo write changes both in one transaction.
 ## Depends on
 
 - OpenVibe.Network (JWKS for service tokens; SSO with PKCE for the staff console; `identity.subject.resolve` for the Live import)
-- OpenVibe.Events (the outbox relay, only when `EVENTS_URL` is set)
+- OpenVibe.Events (the SDK outbox relay, when `EVENTS_URL` and the OAuth client secret are set)
 - the payment providers whose secrets are configured (none in production today)
 - `openvibe-contracts` v0.129.0, `openvibe-sdk` v0.38.0 (service tokens, per-person limits, `openvibe-sdk/db`, `openvibe-sdk/service`), `openvibe-shared` v3.0.0, pinned by release tarball
 - **PostgreSQL 18 and Valkey 9** (OpenVibe.Host `roles/data/`, ADR-035): every read and write is async through
@@ -119,10 +119,10 @@ Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
 - **Freeze** (ADR-012 rule 11): `settings.freeze`; while on, every mutating endpoint answers
   `503 billing.frozen`, reads work, webhooks are stored (202) and processed in arrival order after
   unfreeze. Jobs pause.
-- **Outbox**: `billing.transaction.settled|reversed`, `billing.entitlement.changed`,
+- **Outbox**: openvibe-sdk/events stores pending envelopes in `service_outbox` and relays them with Billing's service token. The legacy `outbox` table stays through the N-1 rollback window. Events include `billing.transaction.settled|reversed`, `billing.entitlement.changed`,
   `billing.subscription.canceled`, `billing.cashout.requested|paid|denied`, `billing.staff.action`,
   `billing.receipt.external`, written in the same transaction as the effect (events.event-envelope@1,
-  source `billing`, actor `service:billing`). Relayed to OpenVibe.Events only when `EVENTS_URL` is set.
+  source `billing`, actor `service:billing`). Relayed to OpenVibe.Events when `EVENTS_URL` and the OAuth client secret are set; otherwise rows wait.
 - **Authority** (`BILLING_AUTHORITY`, `live` by default = shadow; `billing` after the cutover): decides
   whether EXTERNAL tips are announced (see below). Anything else stops Billing at boot.
 - **EXTERNAL receipts** ([server/ops/external.js](server/ops/external.js)): a PowerChat tip paid to the

@@ -54,7 +54,7 @@ const DAY = 86_400_000;
     const csrfOf = (page) => (page.text.match(/name="_csrf" value="([^"]+)"/) || [])[1];
     const keyOf = (page, action) => (page.text.match(new RegExp(`action="${action}"><input type="hidden" name="_csrf" value="[^"]+"><input type="hidden" name="action_key" value="([^"]+)"`)) || [])[1];
     const auditRows = async (action, outcome = 'done') => await t.db.prepare('SELECT * FROM staff_audit WHERE action = ? AND outcome = ?').all(action, outcome);
-    const staffEvents = async (action) => (await t.db.prepare("SELECT event FROM outbox WHERE json_extract(event, '$.event_type') = 'billing.staff.action' AND json_extract(event, '$.payload.action') = ?").all(action)).map((r) => JSON.parse(r.event));
+    const staffEvents = async (action) => (await t.db.prepare("SELECT envelope AS event FROM service_outbox WHERE (envelope #>> '{event_type}') = 'billing.staff.action' AND (envelope #>> '{payload,action}') = ?").all(action)).map((r) => (typeof r.event === 'string' ? JSON.parse(r.event) : r.event));
     async function newCashout(amount = 600) {
         const r = await t.call('POST', '/api/v1/cashouts', { body: { subject: creator, amount, payout_method: { type: 'paypal', address: 'creator@example.com' } } });
         assert.strictEqual(r.status, 201, r.text);
@@ -231,7 +231,7 @@ const DAY = 86_400_000;
         assert.deepStrictEqual(ev[0].actor, { type: 'user', id: staff });
         assert.strictEqual(ev[0].visibility, 'internal');
         assert.deepStrictEqual(ev[0].payload.target, { type: 'cashout', id: co1 });
-        assert.strictEqual((await t.db.prepare("SELECT COUNT(*) AS n FROM outbox WHERE json_extract(event, '$.event_type') = 'billing.cashout.paid'").get()).n, 1);
+        assert.strictEqual((await t.db.prepare("SELECT COUNT(*) AS n FROM service_outbox WHERE (envelope #>> '{event_type}') = 'billing.cashout.paid'").get()).n, 1);
         const shown = await get(`/cashouts/${co1}?done=approved`, s);
         assert.ok(shown.text.includes('Payout recorded') && shown.text.includes('PAYOUT-7Q2'));
         await t.assertReconciled('after a console approval');

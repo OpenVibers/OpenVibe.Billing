@@ -30,6 +30,9 @@ const { consoleRouter } = require('./console');
 const providers = require('./providers');
 const { isFrozen } = require('./ops/common');
 const { createMetrics } = require('./metrics');
+const { createServiceOutbox } = require('openvibe-sdk/events');
+const contracts = require('openvibe-contracts');
+const { eventsProduced } = require('../docs/service-manifest-proposal.json');
 
 const VERSION = require('../package.json').version;
 
@@ -40,7 +43,14 @@ async function createApp(opts = {}) {
     const log = opts.log || console;
     const keys = opts.keys || createKeyProvider(config, { fetchImpl, log });
     const identity = opts.identity || createIdentity(config, { fetchImpl });
-    const ctx = { db, config, rates: createRates(config.rates), now: opts.now || (() => Date.now()), network: identity, log };
+    const outbox = createServiceOutbox({
+        db, source: 'billing', eventsUrl: config.events.url, networkInternalUrl: config.network.internalUrl,
+        clientId: config.oauth.clientId, clientSecret: config.oauth.clientSecret, intervalMs: config.events.intervalMs,
+        log, table: 'service_outbox', eventTypes: eventsProduced,
+        validate: (env) => contracts.validate('events.event-envelope@1', env),
+        ...(opts.fetchImpl ? { fetch: fetchImpl } : {}),
+    });
+    const ctx = { db, config, rates: createRates(config.rates), now: opts.now || (() => Date.now()), network: identity, log, outbox };
     const adapters = opts.adapters || providers.createAdapters(config, { fetchImpl, network: identity });
     const auth = createAuth({ config, keys });
 
@@ -53,7 +63,7 @@ async function createApp(opts = {}) {
     // HTTP golden signals by route template, process metrics, release_info and Billing's gauges;
     // GET /metrics before any other route (loopback only — relayed requests get 404). After the
     // routing settings above: the first app.use() fixes the router's case sensitivity.
-    const metrics = createMetrics({ db, config, now: ctx.now });
+    const metrics = createMetrics({ db, config, now: ctx.now, outbox });
     const release = createRelease({ service: 'billing', root: path.join(__dirname, '..') });
     instrument(app, { service: 'billing', release: release.release, registry: metrics.registry });
     // GET /release.json (ADR-016, D43) and POST /release-metrics: what this deployment is, for tabs and deploy checks.
@@ -66,7 +76,7 @@ async function createApp(opts = {}) {
     app.get('/api/health', async (req, res) => res.json({
         ok: true, service: 'billing', version: VERSION, frozen: await isFrozen(db), authority: config.authority,
         providers: Object.fromEntries(Object.values(adapters).map((a) => [a.name, a.enabled])),
-        events_relay: !!config.events.url,
+        events_relay: (await outbox.status()).enabled,
     }));
     // Readiness in the openvibe-shared/ready shape (status, named checks, release): 503 when the ledger
     // database or the Network key fails; the money freeze and the authority show without failing it.
@@ -81,6 +91,7 @@ async function createApp(opts = {}) {
             { name: 'db', required: true, check: async () => (await db.prepare('SELECT 1 AS ok FROM settings WHERE id = 1').get()).ok === 1 || 'settings row missing' },
             { name: 'network_jwks', required: true, check: () => Boolean(keys.get()) || 'Network public key not loaded' },
             { name: 'money_writes', required: false, check: async () => (await isFrozen(db) ? 'frozen' : true) },
+            { name: 'events_outbox', required: false, check: async () => await outbox.status() },
             { name: 'valkey', required: false, check: async () => (valkey ? await valkey.ready() : { skipped: 'VALKEY_URL not set: per-person limits count in this process only' }) },
         ],
     });
