@@ -189,9 +189,9 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
         }
         let who;
         try {
-            const publicKey = keys.get() || await keys.load();
-            if (!publicKey) throw new Error('the Network key is not loaded');
-            who = await sso.exchange(ctx, { code: req.query.code, verifier: flow.v, publicKey, fetchImpl });
+            if (!keys.loaded()) await keys.refresh();
+            if (!keys.loaded()) throw new Error('the Network key is not loaded');
+            who = await sso.exchange(ctx, { code: req.query.code, verifier: flow.v, keys, fetchImpl });
         } catch (e) {
             log.warn(`[Billing] console sign-in failed: ${e.message}`);
             return send(res, e.status && e.status < 500 ? 400 : 502, pages.signIn({ message: 'OpenVibe.Network did not confirm the sign-in. Please try again.' }));

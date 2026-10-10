@@ -41,7 +41,7 @@ async function boot(opts = {}) {
     const valkey = process.env.BILLING_TEST_STORE === 'pg' && process.env.OV_TEST_VALKEY_URL
         ? require('openvibe-sdk/valkey').createValkey({ url: process.env.OV_TEST_VALKEY_URL, prefix: `ov:billing-test:${crypto.randomBytes(6).toString('hex')}:` }) : null;
     const app = await createApp({ config, db, now: () => Date.now() + clock.offset, log, limitsNow: opts.limitsNow, valkey });
-    await app.locals.keys.load();
+    await app.locals.keys.refresh();
     const server = await new Promise((resolve) => { const s = http.createServer(app); s.listen(0, '127.0.0.1', () => resolve(s)); });
     const base = `http://127.0.0.1:${server.address().port}`;
     const ctx = app.locals.ctx;

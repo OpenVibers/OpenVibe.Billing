@@ -10,7 +10,8 @@ const { staff: staffMap } = require('openvibe-contracts');
  *                   &code_challenge_method=S256
  *   exchange()      POST <OV_NETWORK_INTERNAL_URL>/oauth/token (client secret + code_verifier),
  *                   server to server; the access token is then verified offline with the Network's
- *                   RS256 key Billing already holds (issuer, audience, expiry)
+ *                   keys Billing already holds (openvibe-sdk/auth verifyUserToken: issuer, audience,
+ *                   expiry, never a service principal or a typed token)
  *
  * The Network's user access token carries `role` and `subject_id` (server/auth/oauth-routes.js
  * issueTokenPair), minted from the users row at the moment of the code exchange, so the role read
@@ -19,8 +20,7 @@ const { staff: staffMap } = require('openvibe-contracts');
  * revoked straight away (best effort).
  */
 const crypto = require('crypto');
-
-const b64urlJson = (s) => JSON.parse(Buffer.from(String(s), 'base64url').toString('utf8'));
+const { verifyUserToken } = require('openvibe-sdk/auth');
 
 function pkcePair() {
     const verifier = crypto.randomBytes(32).toString('base64url');           // 43 chars
@@ -41,26 +41,7 @@ function authorizeUrl(config, { state, challenge }) {
     return `${config.network.url}/oauth/authorize?${q.toString()}`;
 }
 
-/** Verify a Network user access token (RS256). Returns claims or throws with a short reason. */
-function verifyUserToken(token, { publicKey, issuer, audience, now }) {
-    const parts = typeof token === 'string' ? token.split('.') : [];
-    if (parts.length !== 3) throw new Error('not a JWT');
-    let header, claims;
-    try { header = b64urlJson(parts[0]); claims = b64urlJson(parts[1]); } catch { throw new Error('undecodable token'); }
-    if (header.alg !== 'RS256') throw new Error(`alg ${header.alg} not accepted`);
-    let good = false;
-    try { good = crypto.verify('RSA-SHA256', Buffer.from(`${parts[0]}.${parts[1]}`), publicKey, Buffer.from(parts[2], 'base64url')); } catch { good = false; }
-    if (!good) throw new Error('signature does not verify');
-    const t = Math.floor(now / 1000);
-    if (typeof claims.exp !== 'number' || claims.exp + 30 < t) throw new Error('token expired');
-    if (typeof claims.iat === 'number' && claims.iat - 30 > t) throw new Error('token issued in the future');
-    if (claims.iss !== issuer) throw new Error('wrong issuer');
-    const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-    if (!aud.includes(audience)) throw new Error(`token is not for ${audience}`);
-    return claims;
-}
-
-async function exchange(ctx, { code, verifier, publicKey, fetchImpl = globalThis.fetch }) {
+async function exchange(ctx, { code, verifier, keys, fetchImpl = globalThis.fetch }) {
     const { config } = ctx;
     const body = new URLSearchParams({
         grant_type: 'authorization_code',
@@ -91,8 +72,10 @@ async function exchange(ctx, { code, verifier, publicKey, fetchImpl = globalThis
             signal: AbortSignal.timeout(3000),
         }).catch(() => {});
     }
-    const claims = verifyUserToken(data.access_token, {
-        publicKey, issuer: config.network.issuer, audience: config.console.ssoAudience, now: ctx.now(),
+    // openvibe-sdk/auth: RS256 with Network's keys, expiry and issuer, the console's audience; never a service principal
+    // or a typed token.
+    const claims = await verifyUserToken(data.access_token, {
+        ...keys.verifyOptions, issuer: config.network.issuer, audience: config.console.ssoAudience, now: ctx.now(),
     });
     return {
         subject: typeof claims.subject_id === 'string' ? claims.subject_id : null,
@@ -104,4 +87,4 @@ async function exchange(ctx, { code, verifier, publicKey, fetchImpl = globalThis
     };
 }
 
-module.exports = { pkcePair, authorizeUrl, verifyUserToken, exchange };
+module.exports = { pkcePair, authorizeUrl, exchange };

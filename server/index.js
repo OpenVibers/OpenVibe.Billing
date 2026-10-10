@@ -25,7 +25,7 @@ const { gracefulStop } = require('openvibe-sdk/service');
     const config = loadConfig();
     const app = await createApp({ config });
     const { ctx, adapters, keys } = app.locals;
-    keys.start();
+    keys.start().catch(() => { /* logged by the JWKS client */ });
 
     const timers = [];
     const relay = ctx.outbox;
