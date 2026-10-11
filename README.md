@@ -4,7 +4,7 @@
 
 **Status:** alpha — runtime built and tested (Wave 8). Deployed on the host in **shadow** mode
 since 2026-09-23 (`/opt/openvibe.billing`, API on `127.0.0.1:4600`): no provider secret is configured,
-it holds a reconciled import of a Live snapshot, and OpenVibe.Live stays the money authority
+it holds a reconciled import of Live's money data, and OpenVibe.Live stays the money authority
 (`BILLING_AUTHORITY` is not set in Live) until the cutover below is run. The cutover has not been run.  
 **Domain:** `billing.openvibe.network` — the staff console (Network SSO, staff only), `/webhooks/*` and
 `/api/health`; the service API `/api/v1` is reachable only on loopback (`127.0.0.1:4600`)  
@@ -89,8 +89,8 @@ npm run dev                   # http://localhost:4600
 npm test                      # 13 test files: stub Network/Events/providers, temp DBs, random ports
 npm run reconcile             # reconciliation report (exit 1 on failure)
 npm run freeze -- on "reason" # economy freeze from the host (status | on "<reason>" | off)
-node scripts/import-live.js --live-db <snapshot> [--dry-run] [--json]
-node scripts/import-live.js --live-db <snapshot> --accounts-only   # only PowerChat account → creator mappings
+LIVE_DATABASE_URL=… node scripts/import-live.js [--dry-run] [--json]   # reads Live's PostgreSQL (or --live-env <Live's env file>)
+LIVE_DATABASE_URL=… node scripts/import-live.js --accounts-only   # only PowerChat account → creator mappings
 ```
 
 Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
@@ -426,12 +426,12 @@ The exact production sequence, rollback, grants and the Live behaviour the switc
 switch unset. None of the steps below has been executed yet; step 3 needs the owner (PowerChat
 dashboard). In short:
 
-1. **Shadow import** as often as needed (`node scripts/import-live.js --live-db <snapshot> [--dry-run]`);
+1. **Shadow import** as often as needed (`billing_live 'node scripts/import-live.js --dry-run'`, docs/live-cutover.md);
    map held users in the Network and explain every adjustment until reconciliation is clean.
 2. **Freeze Live money writes**, wait for in-flight PowerChat checkouts (an hour), back up and **freeze Billing**,
    set `BILLING_AUTHORITY=billing` in billing.env (EXTERNAL tips are then announced for Tips).
 3. **Re-point the PowerChat webhook** to `https://billing.openvibe.network/webhooks/powerchat` (Billing holds
-   the deliveries while frozen), then take the **final snapshot and import**; reconcile.
+   the deliveries while frozen), then run the **final import** (Live's money writes frozen); reconcile.
 4. **Switch Live** (`BILLING_AUTHORITY=billing`, deploy with `--wait-idle`), **unfreeze Billing** (held
    deliveries settle; ones Live already credited are rejected for review, never credited twice).
 5. **Verify** the reads, **unfreeze Live**, verify with a small real PowerChat purchase.

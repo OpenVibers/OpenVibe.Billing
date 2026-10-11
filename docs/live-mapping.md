@@ -1,14 +1,14 @@
 # OpenVibe.Live → OpenVibe.Billing: what maps where
 
 Where every piece of Live's money state goes in Billing, as the importer
-([server/importer/live.js](../server/importer/live.js), `node scripts/import-live.js --live-db <snapshot>`) and
+([server/importer/live.js](../server/importer/live.js), `node scripts/import-live.js` with `LIVE_DATABASE_URL`) and
 the cutover ([live-cutover.md](live-cutover.md)) implement it. The audit found this was never written down,
 in particular for **payouts, refunds and plans**. **Live has no table for any of those three.** They live
 inside other rows, and this page says which ones.
 
-Counts are from production `/opt/openvibe.live/data/live.db`, read on 2026-09-23. The importer opens a
-**snapshot copy** read-only and never writes Live. Every write it makes is keyed, so a re-run over the same
-snapshot changes nothing.
+Counts are from production Live, read on 2026-09-23 (then its SQLite live.db; Live has run on PostgreSQL,
+`ov_live`, since 2026-10-08). The importer reads Live's database in one read-only, repeatable-read transaction and
+never writes Live. Every write it makes is keyed, so a re-run over the same data changes nothing.
 
 ## Balances: `users`
 

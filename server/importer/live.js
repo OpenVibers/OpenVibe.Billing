@@ -1,7 +1,8 @@
 'use strict';
 
 /**
- * Import from a SNAPSHOT COPY of OpenVibe.Live's live.db (opened read-only; never the live file).
+ * Import from OpenVibe.Live's PostgreSQL database (`ov_live`), read in one REPEATABLE READ, READ ONLY
+ * transaction (./live-source.js), so every table comes from the same moment and nothing is written there.
  *
  *   1. identities   every Live user id that holds a balance or appears in a money row is resolved to a
  *                   Network subject (resolve-batch). Unmapped users are never dropped: their accounts
@@ -42,14 +43,20 @@ const ROUTE_MARKER = /^(direct|site)(:|$)/;
 
 const liveTs = (s) => {
     if (!s) return null;
+    if (s instanceof Date) return Number.isFinite(s.getTime()) ? s.toISOString() : null;
     const str = String(s);
     const t = Date.parse(str.includes('T') ? str : `${str.replace(' ', 'T')}Z`);
     return Number.isFinite(t) ? new Date(t).toISOString() : null;
 };
 
-// Live's own database, still SQLite (read-only here): its catalog.
-function tableExists(live, name) { return !!live.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name); }
-function columns(live, table) { return tableExists(live, table) ? live.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name) : []; }
+// Live's own database (PostgreSQL, read-only here): its catalog, in the schema the connection uses.
+async function tableExists(live, name) {
+    return !!await live.prepare('SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?').get(name);
+}
+async function columns(live, table) {
+    const rows = await live.prepare('SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? ORDER BY ordinal_position').all(table);
+    return rows.map((c) => c.column_name);
+}
 
 class DryRun extends Error {}
 
@@ -84,12 +91,12 @@ async function applyProviderAccounts(ctx, rows, report) {
     return out;
 }
 
-/** Step 6 alone: refresh provider_accounts from a Live snapshot (no money is touched). */
+/** Step 6 alone: refresh provider_accounts from Live's database (no money is touched). */
 async function importProviderAccounts(ctx, { live, resolveLiveUsers, dryRun = false, log = console }) {
     const { db } = ctx;
     const started = ctx.now();
     const runId = prefixedId('imp', started);
-    const report = { run_id: runId, dry_run: !!dryRun, started_at: iso(started), source: 'openvibe-live snapshot (provider accounts only)' };
+    const report = { run_id: runId, dry_run: !!dryRun, started_at: iso(started), source: 'openvibe-live database (provider accounts only)' };
     const rows = await readProviderAccounts(live, resolveLiveUsers);
     try {
         await money(db, async () => {
@@ -110,12 +117,12 @@ async function importLive(ctx, { live, resolveLiveUsers, dryRun = false, log = c
     const started = ctx.now();
     const runId = prefixedId('imp', started);
     const report = {
-        run_id: runId, dry_run: !!dryRun, started_at: iso(started), source: 'openvibe-live snapshot',
+        run_id: runId, dry_run: !!dryRun, started_at: iso(started), source: 'openvibe-live database',
         counts: {}, holds: [], duplicate_provider_refs: [], route_markers: 0, adjustments: [], unreplayable: [],
         anomalies: [], subscriptions: { imported: 0, updated: 0, skipped: [] }, new_transactions: 0,
     };
 
-    // ── Read the snapshot ────────────────────────────────────
+    // ── Read Live (one read-only snapshot) ───────────────────
     const userCols = await columns(live, 'users');
     const hasCashout = userCols.includes('openvibe_bucks_cashout_balance');
     const users = await live.prepare(`SELECT id, username, COALESCE(openvibe_bucks_balance, 0) AS credit${hasCashout ? ', COALESCE(openvibe_bucks_cashout_balance, 0) AS payable' : ', 0 AS payable'} FROM users`).all();
