@@ -7,8 +7,7 @@
  * never celebrated twice. Accounts come from Live's powerchat_connections (import) or an operator.
  */
 const assert = require('assert');
-const path = require('path');
-const Database = require('better-sqlite3');
+const { fakeLive } = require('./helpers/live-pg');
 const { validate } = require('openvibe-contracts');
 const { boot, check, done } = require('./helpers/app');
 const { startEvents } = require('./helpers/stubs');
@@ -166,18 +165,16 @@ const externalEvents = async (db) => (await db.prepare("SELECT envelope AS event
     });
 
     await check('the importer maps Live\'s powerchat_connections (never over an operator\'s mapping); --accounts-only alone', async () => {
-        const file = path.join(t.dir, 'live-accounts.db');
-        const live = new Database(file);
-        live.exec(`CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, openvibe_bucks_balance REAL DEFAULT 0, openvibe_bucks_cashout_balance REAL DEFAULT 0);
-            CREATE TABLE powerchat_connections (user_id INTEGER PRIMARY KEY, powerchat_username TEXT, powerchat_user_id TEXT);
-            INSERT INTO users (id, username) VALUES (50, 'newbie'), (51, 'ghost'), (52, 'clash');
+        // A Live database with users and PowerChat connections only (the other money tables absent).
+        const fake = await fakeLive({ tables: `CREATE TABLE users (id bigint PRIMARY KEY, username text, openvibe_bucks_balance double precision DEFAULT 0, openvibe_bucks_cashout_balance double precision DEFAULT 0);
+            CREATE TABLE powerchat_connections (user_id bigint PRIMARY KEY, powerchat_username text, powerchat_user_id text);` });
+        await fake.exec(`INSERT INTO users (id, username) VALUES (50, 'newbie'), (51, 'ghost'), (52, 'clash');
             INSERT INTO powerchat_connections VALUES (50, 'NewbiePC', 'pc-50'), (51, 'GhostPC', 'pc-51'), (52, 'StreamerPC', 'pc-77'), (53, 'bad name!', NULL);`);
-        live.close();
         const newbie = t.network.addUser(50);
         t.network.addUser(52);
         t.network.addUser(53);
         const { importProviderAccounts, importLive } = require('../server/importer/live');
-        const ro = new Database(file, { readonly: true });
+        const ro = fake.source();
         const dry = await importProviderAccounts(t.ctx, { live: ro, resolveLiveUsers: t.ctx.network.resolveLiveUsers, dryRun: true, log: {} });
         assert.strictEqual(dry.provider_accounts.mapped, 1);
         assert.strictEqual((await t.db.prepare("SELECT COUNT(*) AS n FROM provider_accounts WHERE username = 'newbiepc'").get()).n, 0, 'dry run keeps nothing');
@@ -191,7 +188,8 @@ const externalEvents = async (db) => (await db.prepare("SELECT envelope AS event
         assert.strictEqual((await t.db.prepare("SELECT subject FROM provider_accounts WHERE username = 'streamerpc'").get()).subject, streamer.id);
         const full = await importLive(t.ctx, { live: ro, resolveLiveUsers: t.ctx.network.resolveLiveUsers, log: {} });
         assert.strictEqual(full.provider_accounts.unchanged, 1, 'the full import runs the same step; a re-run changes nothing');
-        ro.close();
+        await ro.close();
+        await fake.close();
         const r = await t.powerchat(donation({ eventId: 'ext-newbie', amountUsdCents: 100 }, { id: 'pc-50', username: 'NewbiePC' }));
         assert.strictEqual(r.json.result.streamer, newbie);
         await t.assertReconciled('after the accounts import');

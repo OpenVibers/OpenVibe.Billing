@@ -9,36 +9,25 @@
  * import run never books an opening-balance adjustment against what Billing settled itself.
  */
 const assert = require('assert');
-const path = require('path');
-const Database = require('better-sqlite3');
+const { fakeLive } = require('./helpers/live-pg');
 const { boot, check, done } = require('./helpers/app');
 
-async function fabricateLive(file) {
-    const live = new Database(file);
+async function fabricateLive() {
+    const live = await fakeLive();
     const recent = new Date(Date.now() - 30 * 60_000).toISOString().replace('T', ' ').slice(0, 19);
-    live.exec(`
-        CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, openvibe_bucks_balance REAL DEFAULT 0.00,
-            openvibe_bucks_cashout_balance REAL DEFAULT 0.00);
-        CREATE TABLE transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, from_user_id INTEGER, to_user_id INTEGER, stream_id INTEGER,
-            amount INTEGER NOT NULL, type TEXT NOT NULL, status TEXT DEFAULT 'completed', message TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE payment_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, provider TEXT NOT NULL, provider_ref TEXT,
-            kind TEXT NOT NULL DEFAULT 'bucks', amount_cents INTEGER NOT NULL DEFAULT 0, currency TEXT DEFAULT 'usd', bucks INTEGER DEFAULT 0,
-            streamer_id INTEGER, status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, subscriber_id INTEGER NOT NULL, streamer_id INTEGER NOT NULL, tier INTEGER DEFAULT 1,
-            provider TEXT, provider_ref TEXT, price_cents INTEGER DEFAULT 0, status TEXT DEFAULT 'active', auto_renew INTEGER DEFAULT 0,
-            current_period_end DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+    await live.exec(`
         INSERT INTO users (id, username, openvibe_bucks_balance, openvibe_bucks_cashout_balance) VALUES (1, 'alice', 500, 0), (2, 'bob', 0, 349), (3, 'carol', 0, 0);
         INSERT INTO transactions (id, from_user_id, to_user_id, amount, type, status, created_at) VALUES (1, NULL, 1, 500, 'purchase', 'completed', '${recent}');
     `);
-    await live.prepare(`INSERT INTO payment_orders (id, user_id, provider, provider_ref, kind, amount_cents, bucks, streamer_id, status, created_at) VALUES
-        (1, 1, 'powerchat', NULL, 'bucks', 700, 500, NULL, 'credited', ?),
-        (2, 3, 'powerchat', NULL, 'bucks', 700, 500, NULL, 'pending', ?),
-        (3, 1, 'powerchat', 'site:fee=50', 'subscription', 549, 0, 2, 'credited', ?),
-        (4, 3, 'powerchat', NULL, 'bucks', 1300, 1000, NULL, 'pending', ?)`).run(recent, recent, recent, recent);
+    await live.query(`INSERT INTO payment_orders (id, user_id, provider, provider_ref, kind, amount_cents, bucks, streamer_id, status, created_at) VALUES
+        (1, 1, 'powerchat', NULL, 'bucks', 700, 500, NULL, 'credited', $1),
+        (2, 3, 'powerchat', NULL, 'bucks', 700, 500, NULL, 'pending', $1),
+        (3, 1, 'powerchat', 'site:fee=50', 'subscription', 549, 0, 2, 'credited', $1),
+        (4, 3, 'powerchat', NULL, 'bucks', 1300, 1000, NULL, 'pending', $1)`, [recent]);
     const end = new Date(Date.now() + 20 * 86_400_000).toISOString().replace('T', ' ').slice(0, 19);
-    await live.prepare(`INSERT INTO subscriptions (id, subscriber_id, streamer_id, provider, price_cents, status, current_period_end, created_at)
-        VALUES (1, 1, 2, 'powerchat', 549, 'active', ?, ?)`).run(end, recent);
-    live.close();
+    await live.query(`INSERT INTO subscriptions (id, subscriber_id, streamer_id, provider, price_cents, status, current_period_end, created_at)
+        VALUES (1, 1, 2, 'powerchat', 549, 'active', $1, $2)`, [end, recent]);
+    return live;
 }
 
 (async () => {
@@ -46,14 +35,12 @@ async function fabricateLive(file) {
     const alice = t.network.addUser(1);
     const bob = t.network.addUser(2);
     const carol = t.network.addUser(3);
-    const file = path.join(t.dir, 'live-snapshot.db');
-    await fabricateLive(file);
+    const fake = await fabricateLive();
     const { importLive } = require('../server/importer/live');
     const { createIdentity } = require('../server/network');
     const identity = createIdentity(t.config);
     const run = async () => {
-        const live = new Database(file, { readonly: true, fileMustExist: true });
-        try { return await importLive(t.ctx, { live, resolveLiveUsers: identity.resolveLiveUsers, log: { log() {} } }); } finally { live.close(); }
+        return await importLive(t.ctx, { live: fake.source(), resolveLiveUsers: identity.resolveLiveUsers, log: { log() {} } });
     };
     const bal = async (kind, owner) => { const { balance } = require('../server/ledger'); return await balance(t.db, { kind, owner, currency: 'vibes-bits' }); };
     const intent = async (order) => await t.db.prepare('SELECT * FROM payment_intents WHERE legacy_order_id = ?').get(order);
@@ -96,11 +83,9 @@ async function fabricateLive(file) {
 
     await check('an order Live credited AFTER the shadow import is settled-in-Live after the final import', async () => {
         assert.strictEqual((await intent(4)).status, 'created');
-        const live = new Database(file);
-        live.exec(`UPDATE payment_orders SET status = 'credited' WHERE id = 4;
+        await fake.exec(`UPDATE payment_orders SET status = 'credited' WHERE id = 4;
             UPDATE users SET openvibe_bucks_balance = 1000 WHERE id = 3;
-            INSERT INTO transactions (from_user_id, to_user_id, amount, type, status) VALUES (NULL, 3, 1000, 'purchase', 'completed');`);
-        live.close();
+            INSERT INTO transactions (id, from_user_id, to_user_id, amount, type, status) VALUES (2, NULL, 3, 1000, 'purchase', 'completed');`);
         const report = await run();
         assert.ok(report.counts.intents_updated >= 1, JSON.stringify(report.counts));
         assert.strictEqual((await intent(4)).status, 'settled');
@@ -133,9 +118,7 @@ async function fabricateLive(file) {
         assert.strictEqual((await cli('on', 'Live cutover')).frozen, true);
         const w = await t.call('POST', '/api/v1/transfers', { body: { from: { type: 'user', id: carol }, to: { type: 'user', id: bob }, amount: 5 } });
         assert.strictEqual(w.status, 503); assert.strictEqual(w.json.code, 'billing.frozen');
-        const live = new Database(file);
-        live.exec("INSERT INTO payment_orders (id, user_id, provider, kind, amount_cents, bucks, status) VALUES (5, 3, 'powerchat', 'bucks', 700, 500, 'pending')");
-        live.close();
+        await fake.exec("INSERT INTO payment_orders (id, user_id, provider, kind, amount_cents, bucks, status) VALUES (5, 3, 'powerchat', 'bucks', 700, 500, 'pending')");
         await run();                                   // the final import, while Billing is frozen
         const held = await tip('pcorder:5', 700);
         assert.strictEqual(held.status, 202, JSON.stringify(held.json));

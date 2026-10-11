@@ -127,13 +127,12 @@ celebrated exactly once.
 Shell helpers used below (on the host):
 
 ```bash
-# billing '<command>' runs one command with Billing's environment, as Billing's service user (ubuntu)
-# so the Live snapshot files keep their owner — the same way the shadow imports were run.
+# billing '<command>' runs one command with Billing's environment, as Billing's service user (ubuntu).
 billing() { sudo bash -c "set -a; . /etc/openvibe/billing.env; set +a; export NODE_ENV=production; cd /opt/openvibe.billing && sudo -E -u ubuntu $1"; }
-LIVE_DB=/opt/openvibe.live/data/live.db     # production runs Live's legacy layout (a git checkout); there is no shared/
-# /var/backups/openvibe is root-only (0700), so Billing's user cannot read a snapshot there: the import reads
-# its copy from Billing's own state directory, and a second copy stays in /var/backups/openvibe for rollback.
-SNAPDIR=/var/lib/openvibe-billing
+# billing_live '<command>': the same, plus LIVE_DATABASE_URL = Live's own DATABASE_URL. Live runs on PostgreSQL
+# (ov_live, since 2026-10-08) and the import reads it directly, in one REPEATABLE READ, READ ONLY transaction.
+# Root reads /etc/openvibe/live.env (Billing's user cannot), and the URL never appears on a command line.
+billing_live() { sudo bash -c "set -a; . /etc/openvibe/billing.env; LIVE_DATABASE_URL=\$(sed -n 's/^DATABASE_URL=//p' /etc/openvibe/live.env); set +a; export NODE_ENV=production; cd /opt/openvibe.billing && sudo -E -u ubuntu $1"; }
 ```
 
 Live owner calls are made from the browser console on openvibe.live, signed in as the owner:
@@ -148,7 +147,7 @@ Live owner calls are made from the browser console on openvibe.live, signed in a
 2. **Let in-flight checkouts land** on Live: wait at least **60 minutes** after step 1 (minted PowerChat
    checkout links live one hour), then run the backfill once: `api('/powerchat/reconcile', { method: 'POST' })`.
    Look at what is still open:
-   `sudo sqlite3 -readonly "$LIVE_DB" "SELECT id, provider, kind, amount_cents, status, created_at FROM payment_orders WHERE status IN ('pending','paid') AND created_at >= datetime('now','-3 days')"`.
+   `sudo -u postgres psql -d ov_live -c "SELECT id, provider, kind, amount_cents, status, created_at FROM payment_orders WHERE status IN ('pending','paid') AND created_at >= datetime('now','-3 days')"`.
    A `paid` row is an anomaly to fix first; a `pending` one is carried into Billing as an intent and
    settles there if it is ever paid (canonical, un-minted links do not expire).
 3. **Back up and freeze Billing** so it holds PowerChat deliveries until the final import is in:
@@ -164,14 +163,14 @@ Live owner calls are made from the browser console on openvibe.live, signed in a
    `https://openvibe.live/api/powerchat/webhook` → **`https://billing.openvibe.network/webhooks/powerchat`**,
    same signing secret. From this moment every delivery is stored (202) and held by Billing; Live gets none.
    `billing 'node scripts/freeze.js status'` shows `held_webhooks` growing only if tips arrive.
-5. **Final snapshot and import** (after step 4, so every delivery either reached Live before the snapshot
-   or is held by Billing):
+5. **Final import** (after step 4, so every delivery either reached Live before this read or is held by
+   Billing). Live's money writes are frozen since step 1, and the import reads every Live table in one
+   read-only, repeatable-read transaction, so it sees one moment of Live. Dump Live first and keep the dump:
    ```bash
-   SNAP=$SNAPDIR/live-cutover-$(date +%F-%H%M).db
-   sudo sqlite3 "$LIVE_DB" ".backup $SNAP" && sudo chown ubuntu:ubuntu "$SNAP" && sudo chmod 600 "$SNAP"
-   sudo cp -p "$SNAP" /var/backups/openvibe/      # keep this copy (rollback)
-   billing "node scripts/import-live.js --live-db $SNAP --dry-run"
-   billing "node scripts/import-live.js --live-db $SNAP"
+   DUMP=/var/backups/openvibe/live-cutover-$(date +%F-%H%M).sql.gz
+   sudo -u postgres pg_dump -d ov_live | gzip | sudo tee "$DUMP" > /dev/null && sudo chmod 600 "$DUMP"   # rollback copy
+   billing_live 'node scripts/import-live.js --dry-run'
+   billing_live 'node scripts/import-live.js'
    billing 'node scripts/reconcile.js'
    ```
    Read the report: `holds` (must be empty for anyone with money), `adjustments`, `anomalies`,
@@ -185,9 +184,9 @@ Live owner calls are made from the browser console on openvibe.live, signed in a
    OV_BILLING_INTERNAL_URL=http://127.0.0.1:4600
    OV_BILLING_PUBLIC_URL=https://billing.openvibe.network
    ```
-   then `sudo /opt/openvibe.live/deploy/scripts/deploy.sh --restart --wait-idle`. `--restart` is
-   required: with no new commit, deploy.sh changes nothing unless told to restart, and only a restart
-   reads the new env. The systemd socket keeps accepting while Live boots. Wait for `GET /api/ready`.
+   then restart Live so it reads the new env: check `curl -s https://openvibe.live/api/streams` for anyone live
+   over RTMP (a restart drops them), then `sudo systemctl restart openvibe-live.service`. The systemd socket keeps
+   accepting while Live boots. Wait for `GET /api/ready`.
    `api('/admin/money')` → `authority: "billing"`, `billing.reachable: true`, `billing.rates.drift: []`.
    Then let Tips post chat lines: set `TIPS_CHAT_ADAPTER=live-chat` in `/etc/openvibe/tips.env` and run
    `sudo systemctl restart openvibe-tips`. `curl -s http://127.0.0.1:4610/api/health` →
@@ -221,7 +220,7 @@ exactly one of the two: Live before the snapshot, or Billing's held queue after 
 
 ## Rollback
 
-Keep the step-5 snapshot. The Billing side never needs undoing to roll Live back; the question is only
+Keep the step-5 dump. The Billing side never needs undoing to roll Live back; the question is only
 which money moved where.
 
 - **Before step 6** (Live still on its own columns): re-point the PowerChat webhook back to

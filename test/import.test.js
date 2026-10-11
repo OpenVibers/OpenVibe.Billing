@@ -1,32 +1,17 @@
 'use strict';
 /**
- * Import from a fabricated live.db snapshot (Live's own table shapes): opening balances equal the
+ * Import from a fabricated Live database (PostgreSQL in Live's own column types, test/helpers/live-pg.js): opening balances equal the
  * Live columns, differences against the replayed history are adjustments and listed, unmapped users
  * are held (never dropped) and released once mapped, test-era rows are flagged, duplicate provider
  * refs and route markers are handled, dry runs keep nothing, and a re-run changes nothing.
  */
 const assert = require('assert');
-const path = require('path');
-const Database = require('better-sqlite3');
+const { fakeLive } = require('./helpers/live-pg');
 const { boot, check, done } = require('./helpers/app');
 
-async function fabricateLive(file) {
-    const live = new Database(file);
-    live.exec(`
-        CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, openvibe_bucks_balance REAL DEFAULT 0.00,
-            openvibe_coins_balance INTEGER DEFAULT 0, openvibe_bucks_cashout_balance REAL DEFAULT 0.00);
-        CREATE TABLE transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, from_user_id INTEGER, to_user_id INTEGER, stream_id INTEGER,
-            amount INTEGER NOT NULL, type TEXT NOT NULL CHECK(type IN ('donation', 'purchase', 'subscription', 'cashout', 'refund', 'bonus')),
-            status TEXT DEFAULT 'completed' CHECK(status IN ('pending', 'completed', 'failed', 'escrow', 'refunded')), message TEXT,
-            paypal_transaction_id TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE payment_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, provider TEXT NOT NULL, provider_ref TEXT,
-            kind TEXT NOT NULL DEFAULT 'bucks', amount_cents INTEGER NOT NULL DEFAULT 0, currency TEXT DEFAULT 'usd', bucks INTEGER DEFAULT 0,
-            streamer_id INTEGER, status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, subscriber_id INTEGER NOT NULL, streamer_id INTEGER NOT NULL, tier INTEGER DEFAULT 1,
-            is_active INTEGER DEFAULT 1, started_at DATETIME DEFAULT CURRENT_TIMESTAMP, expires_at DATETIME, provider TEXT, provider_ref TEXT,
-            price_cents INTEGER DEFAULT 0, currency TEXT DEFAULT 'usd', status TEXT DEFAULT 'active', cancel_at_period_end INTEGER DEFAULT 0,
-            auto_renew INTEGER DEFAULT 0, current_period_end DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE site_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '', description TEXT DEFAULT '', type TEXT DEFAULT 'string', updated_at DATETIME);
+async function fabricateLive() {
+    const live = await fakeLive();
+    await live.exec(`
         INSERT INTO site_settings (key, value) VALUES ('stats_vibes_reset_at', '2026-06-01T00:00:00Z');
         INSERT INTO users (id, username, openvibe_bucks_balance, openvibe_bucks_cashout_balance, openvibe_coins_balance) VALUES
             (1, 'alice', 1500, 0, 999), (2, 'bob', 0, 700, 0), (3, 'carol', 250, 0, 0), (4, 'dave', 100.5, 0, 0), (5, 'erin', 0, 0, 0);
@@ -48,10 +33,9 @@ async function fabricateLive(file) {
             (5, 3, 'powerchat', NULL, 'bucks', 325, 250, NULL, 'paid', '2026-07-06 09:00:00');
     `);
     const future = new Date(Date.now() + 20 * 86_400_000).toISOString().replace('T', ' ').slice(0, 19);
-    await live.prepare(`INSERT INTO subscriptions (id, subscriber_id, streamer_id, provider, price_cents, status, auto_renew, current_period_end, created_at)
-        VALUES (1, 1, 2, 'powerchat', 549, 'active', 1, ?, '2026-07-08 09:00:00'), (2, 4, 2, 'bucks', 499, 'expired', 0, '2026-07-01 00:00:00', '2026-06-01 00:00:00')`).run(future);
-    live.close();
-    return new Database(file, { readonly: true, fileMustExist: true });
+    await live.query(`INSERT INTO subscriptions (id, subscriber_id, streamer_id, provider, price_cents, status, auto_renew, current_period_end, created_at)
+        VALUES (1, 1, 2, 'powerchat', 549, 'active', 1, $1, '2026-07-08 09:00:00'), (2, 4, 2, 'bucks', 499, 'expired', 0, '2026-07-01 00:00:00', '2026-06-01 00:00:00')`, [future]);
+    return live;
 }
 
 (async () => {
@@ -60,14 +44,15 @@ async function fabricateLive(file) {
     const bob = t.network.addUser(2);
     const dave = t.network.addUser(4);
     t.network.addUser(5);
-    const live = await fabricateLive(path.join(t.dir, 'live-snapshot.db'));
+    const fake = await fabricateLive();
+    const live = fake.source();
     const { importLive } = require('../server/importer/live');
     const { createIdentity } = require('../server/network');
     const identity = createIdentity(t.config);
     const run = async (opts = {}) => await importLive(t.ctx, { live, resolveLiveUsers: identity.resolveLiveUsers, log: { log() {} }, ...opts });
     const bal = async (kind, owner) => { const { balance } = require('../server/ledger'); return await balance(t.db, { kind, owner, currency: 'vibes-bits' }); };
     const count = async (table) => (await t.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).n;
-    console.log('import from live.db');
+    console.log('import from Live\'s database');
 
     await check('a dry run reports everything and keeps nothing but its report', async () => {
         const r = await run({ dryRun: true });
@@ -159,7 +144,7 @@ async function fabricateLive(file) {
         assert.strictEqual((await run()).new_transactions, 0);
     });
 
-    live.close();
+    await fake.close();
     await t.close();
     done();
 })();
