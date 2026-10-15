@@ -363,6 +363,13 @@ there — a share already recycled or cashed out goes to `chargeback_loss`, flag
 - **Payouts** are decided in the staff console (or with `billing.cashout.manage` on the API): pay at the
   provider, then approve with its payout reference once the escrow has ended.
 - **Metrics**: `curl -s http://127.0.0.1:4600/metrics` on the host.
+- **Request telemetry** (plan T1 step 10): each HTTP request is aggregated by route template, method and
+  status class, never by raw URL; `/shared` files, static assets, health, readiness and `/metrics` are not
+  counted. Once a minute one `http.request` sample per key, plus the active-requests, p95 latency and
+  event-loop-lag gauges, is written to Billing's own `telemetry_samples` table (openvibe-sdk 0.46 telemetry,
+  the `platform.telemetry-sample@1` shape); rows older than 14 days are deleted daily. `server/app.js` mounts
+  openvibe-sdk's `telemetryMiddleware` (a no-op until init); `server/index.js` calls `telemetry.init()` at
+  production start, runs the 14-day retention and flushes on stop; the table is `migrations/0007_telemetry.sql`.
 - **Backups**: `pg_dump ov_billing > billing-$(date +%F).sql` (the host's data role, ADR-035).
 - **Mapping of Live's tables** to Billing's (including payouts, refunds and plans, which have no table
   of their own on Live): [docs/live-mapping.md](docs/live-mapping.md).
