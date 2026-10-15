@@ -66,6 +66,7 @@ async function createApp(opts = {}) {
     const metrics = createMetrics({ db, config, now: ctx.now, outbox });
     const release = createRelease({ service: 'billing', root: path.join(__dirname, '..') });
     instrument(app, { service: 'billing', release: release.release, registry: metrics.registry });
+    app.use(require('openvibe-sdk/service').telemetryMiddleware);   // request telemetry: a no-op until server/index.js calls telemetry.init()
     // GET /release.json (ADR-016, D43) and POST /release-metrics: what this deployment is, for tabs and deploy checks.
     release.mount(app, { registry: metrics.registry });
     app.use(http.middleware());

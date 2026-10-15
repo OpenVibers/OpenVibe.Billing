@@ -45,7 +45,7 @@ async function waitFor(fn, ms = 2000) {
     console.log('service-kit');
 
     await check('server/index.js imports gracefulStop from openvibe-sdk/service and owns no signal handler', () => {
-        assert.match(source, /const \{ gracefulStop \} = require\('openvibe-sdk\/service'\)/);
+        assert.match(source, /const \{ gracefulStop(, [A-Za-z]+)* \} = require\('openvibe-sdk\/service'\)/);
         assert.doesNotMatch(source, /process\.on\('SIGTERM'/, 'server/index.js still installs its own SIGTERM handler');
         assert.doesNotMatch(source, /process\.on\('SIGINT'/, 'server/index.js still installs its own SIGINT handler');
         assert.doesNotMatch(source, /process\.exit\(0\), 5000\)/, 'the old 5 s exit-0 timer is gone');
