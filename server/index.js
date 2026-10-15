@@ -63,9 +63,9 @@ const { createPgTelemetrySink, startTelemetryRetention } = require('openvibe-sdk
     });
     server.keepAliveTimeout = 65_000;
     // Request telemetry (openvibe-sdk/service, plan T1): one aggregated sample per route template, method and status
-    // class each 15 s, stored in this service's telemetry_samples table; rows older than 30 days go daily.
-    telemetry.init({ service: 'billing', sink: createPgTelemetrySink({ db: ctx.db, log: console }), skipPrefixes: ['/shared'] });
-    const telemetryRetention = startTelemetryRetention({ db: ctx.db, log: console });
+    // class each minute, stored in this service's telemetry_samples table; rows older than 14 days go daily.
+    telemetry.init({ service: 'billing', sink: createPgTelemetrySink({ db: ctx.db, log: console }), skipPrefixes: ['/shared'], intervalMs: 60_000 });
+    const telemetryRetention = startTelemetryRetention({ db: ctx.db, log: console, olderThanDays: 14 });
 
     // SIGTERM/SIGINT (openvibe-sdk/service): the kit installs the handlers, stops the job timers, the outbox
     // relay and the Network key refresh, drains the HTTP server (requests in flight get Connection: close),
