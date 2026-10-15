@@ -19,7 +19,8 @@ const subscriptions = require('./ops/subscriptions');
 const rating = require('./ops/rating');
 const { isFrozen } = require('./ops/common');
 const { runScheduled } = require('./reconcile');
-const { gracefulStop } = require('openvibe-sdk/service');
+const { gracefulStop, telemetry } = require('openvibe-sdk/service');
+const { createPgTelemetrySink, startTelemetryRetention } = require('openvibe-sdk/telemetry');
 
 (async () => {
     const config = loadConfig();
@@ -61,6 +62,10 @@ const { gracefulStop } = require('openvibe-sdk/service');
         console.log(`[Billing] money authority: ${config.authority}${config.authority === 'live' ? ' (shadow: EXTERNAL tips are recorded, not announced)' : ' (EXTERNAL tips are announced as billing.receipt.external)'}`);
     });
     server.keepAliveTimeout = 65_000;
+    // Request telemetry (openvibe-sdk/service, plan T1): one aggregated sample per route template, method and status
+    // class each 15 s, stored in this service's telemetry_samples table; rows older than 30 days go daily.
+    telemetry.init({ service: 'billing', sink: createPgTelemetrySink({ db: ctx.db, log: console }), skipPrefixes: ['/shared'] });
+    const telemetryRetention = startTelemetryRetention({ db: ctx.db, log: console });
 
     // SIGTERM/SIGINT (openvibe-sdk/service): the kit installs the handlers, stops the job timers, the outbox
     // relay and the Network key refresh, drains the HTTP server (requests in flight get Connection: close),
@@ -78,6 +83,7 @@ const { gracefulStop } = require('openvibe-sdk/service');
         ],
         close: [
             () => app.locals.valkey && app.locals.valkey.close().catch(() => {}),
+            async () => { if (telemetryRetention) await telemetryRetention.stop(); await telemetry.stop(); },
             () => ctx.db.close(),
         ],
     });
