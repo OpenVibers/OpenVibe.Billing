@@ -1,0 +1,21 @@
+{
+  "id": "billing.stats.read",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Network-wide money counts with no person in them, for a product's public stats: Vibes bought with money (all time, recent windows and a daily series) and channel subscriptions (active now, started in recent windows and a daily series). Test and imported rows are left out of the windows and series.",
+  "permissions": [
+    "billing:read"
+  ],
+  "resourceConstraints": [
+    "none"
+  ],
+  "quotaClass": "ledger-read",
+  "events": [],
+  "implementedBy": [
+    "GET /api/v1/stats"
+  ],
+  "inputSchema": "common.no-body@1",
+  "outputSchema": "billing.stats-result@1"
+}
