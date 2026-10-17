@@ -15,7 +15,7 @@ const { policyData } = require('../server/policy');
         ], 'tiers start at the minimum purchase and cover every amount once');
         assert.deepStrictEqual(d.purchase.tiers.map((x) => x.openvibe_keeps_pct), [33.3, 28.6, 23.1, 19.4, 16.7, 13, 9.1]);
         assert.ok(d.purchase.tiers.every((x) => x.creator_value_per_100_cents === 100), 'a creator gets $1.00 per 100 Vibes at every tier');
-        assert.deepStrictEqual(d.subscription, { price_cents: 499, period_days: 31, creator_share_pct: 70, creator_share_cents: 349, site_route_fee_pct: 10, site_route_fee_cents: 50 });
+        assert.deepStrictEqual(d.subscription, { price_cents: 499, period_days: 31, creator_share_pct: 70, creator_share_cents: 349, site_route_fee_pct: 10, site_route_fee_cents: 50, tier_min_price_cents: 100, tier_max_price_cents: 50000, max_tiers: 10 });
         assert.deepStrictEqual(d.cashout, { min_vibes: 500, min_cents: 500, hold_days: 14 });
         assert.strictEqual(d.currencies.opencoins.withdrawable, false, 'OpenCoins are never withdrawable');
         assert.strictEqual(d.currencies.channel_points.withdrawable, false);

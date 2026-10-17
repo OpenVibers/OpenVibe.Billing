@@ -1,0 +1,23 @@
+{
+  "id": "billing.tier.manage",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "sensitive": true,
+  "description": "Read and set the monthly prices of a creator's subscription tiers, for the product where the creator sells them (OpenVibe.VIP), within Billing's bounds. Billing keeps the price and charges it: new subscriptions to a tier pay its price, running ones renew at the price they were bought at.",
+  "permissions": [
+    "billing:subscriptions"
+  ],
+  "resourceConstraints": [
+    "owner"
+  ],
+  "quotaClass": "ledger-write",
+  "events": [],
+  "implementedBy": [
+    "GET /api/v1/tiers/:streamer",
+    "PUT /api/v1/tiers/:streamer/:tier"
+  ],
+  "inputSchema": "billing.tier-request@1",
+  "outputSchema": "billing.tier-result@1"
+}

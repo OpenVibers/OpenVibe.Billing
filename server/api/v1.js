@@ -29,6 +29,7 @@ const external = require('../ops/external');
 const usage = require('../ops/usage');
 const promo = require('../ops/promo');
 const rating = require('../ops/rating');
+const tiers = require('../ops/tiers');
 
 const CAP = {
     intent: 'billing.intent.create',
@@ -38,6 +39,7 @@ const CAP = {
     cashoutManage: 'billing.cashout.manage',
     subscription: 'billing.subscription.manage',
     entitlement: 'billing.entitlement.check',
+    tier: 'billing.tier.manage',
     admin: 'billing.ledger.admin',
     usage: 'billing.usage.record',
 };
@@ -66,7 +68,11 @@ function v1Router({ ctx, auth, adapters, limits }) {
         res.json({
             currency: 'vibes-bits', bits_per_usd: rt.bitsPerUsd, price_tiers: rt.priceTiers, min_purchase_bits: rt.minPurchaseBits,
             packages: [100, 500, 1000, 2500, 5000, 10000, 25000].map((bits) => ({ bits, price_cents: rt.priceCents(bits) })),
-            subscription: { price_cents: rt.subPriceCents, streamer_share_pct: rt.subSharePct, site_route_fee_pct: rt.siteRouteFeePct, period_days: rt.subPeriodDays },
+            subscription: {
+                price_cents: rt.subPriceCents, streamer_share_pct: rt.subSharePct, site_route_fee_pct: rt.siteRouteFeePct, period_days: rt.subPeriodDays,
+                // Creators may price their own tiers (GET/PUT /api/v1/tiers); tier 1 without a price is price_cents.
+                tiers: { min_price_cents: rt.tierMinCents, max_price_cents: rt.tierMaxCents, max_tiers: rt.maxTiers },
+            },
             cashout: { min_bits: rt.minCashoutBits, escrow_days: rt.escrowDays },
             providers: Object.fromEntries(Object.values(adapters).map((a) => [a.name, a.enabled])),
         });
@@ -188,10 +194,22 @@ function v1Router({ ctx, auth, adapters, limits }) {
         }
         const out = await subscriptions.pay(ctx, {
             subscriber: userSubject(b.subscriber, 'subscriber'), streamer: userSubject(b.streamer, 'streamer'), source,
-            priceCents: b.price_cents, autoRenew: b.auto_renew, receipt, idempotencyKey: req.idempotencyKey, actor: actorOf(req),
+            // A tier is priced by Billing (ops/tiers.js); an explicit price_cents only applies without one.
+            tier: b.tier, priceCents: b.tier != null ? undefined : b.price_cents,
+            autoRenew: b.auto_renew, receipt, idempotencyKey: req.idempotencyKey, actor: actorOf(req),
         });
         res.status(201).json({ subscription: subscriptions.present(out.subscription), entitlement: out.entitlement, transaction: presentTxn(out.txn) });
     }, limits.budget('billing.subscription.create', person('subscriber'))));
+    // ── Subscription tiers (ops/tiers.js): the creator's prices, set by the product that sells them ──
+    // Anyone who may start a checkout may read what it costs; setting a price is billing.tier.manage.
+    r.get('/tiers/:streamer', ...read([CAP.tier, CAP.intent, CAP.subscription], async (req, res) => {
+        res.json(await tiers.list(ctx, pathSubject(req.params.streamer)));
+    }));
+    r.put('/tiers/:streamer/:tier', ...write(CAP.tier, async (req, res) => {
+        const b = req.body || {};
+        const tier = await tiers.set(ctx, { streamer: pathSubject(req.params.streamer), tier: req.params.tier, priceCents: b.price_cents, status: b.status, actor: actorOf(req) });
+        res.json({ tier });
+    }));
     r.get('/subscriptions', ...read([CAP.entitlement, CAP.subscription], async (req, res) => {
         const list = await subscriptions.list(db, {
             subscriber: req.query.subscriber ? pathSubject(req.query.subscriber) : null,

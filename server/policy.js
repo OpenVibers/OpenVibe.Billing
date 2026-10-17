@@ -14,7 +14,7 @@ const express = require('express');
 const TERMS_URL = 'https://openvibe.network/terms';
 const CONTACT = 'Contact@OpenVibe.Network';
 // The date the wording last changed. Rate changes show up on their own (the numbers are live).
-const WORDING_DATE = '2026-09-26';
+const WORDING_DATE = '2026-10-17';
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const usd = (cents) => `$${(cents / 100).toFixed(2)}`;
@@ -53,6 +53,7 @@ function policyData(rates, { authority = 'live' } = {}) {
             creator_share_cents: Math.floor((subCents * rates.subSharePct) / 100),
             site_route_fee_pct: rates.siteRouteFeePct,
             site_route_fee_cents: Math.round((subCents * rates.siteRouteFeePct) / 100),
+            tier_min_price_cents: rates.tierMinCents, tier_max_price_cents: rates.tierMaxCents, max_tiers: rates.maxTiers,
         },
         cashout: { min_vibes: rates.minCashoutBits, min_cents: Math.round(rates.minCashoutBits * perVibeValueCents), hold_days: rates.escrowDays },
     };
@@ -107,7 +108,7 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:12px 0
 <p>When you send Vibes, the creator receives all of them: nothing is taken when a tip is sent. A tip paid through OpenVibe's PowerChat account for a creator without their own PowerChat is credited to the creator in full, one Vibe per cent.</p>
 
 <h2>Subscriptions</h2>
-<p>A subscription is <strong>${usd(s.price_cents)}</strong> for ${num(s.period_days)} days.</p>
+<p>A subscription is <strong>${usd(s.price_cents)}</strong> for ${num(s.period_days)} days, unless the creator sets their own price for a tier (from ${usd(s.tier_min_price_cents)} to ${usd(s.tier_max_price_cents)}). The split below is the same at any price, and a subscription renews at the price it was bought at.</p>
 <ul>
 <li>Paid through the creator's own PowerChat: the creator is paid directly by PowerChat, and OpenVibe adds no fee.</li>
 <li>Paid through OpenVibe's PowerChat account: a routing fee of ${pct(s.site_route_fee_pct)} (${usd(s.site_route_fee_cents)}) is added on top of the price, and the creator receives ${pct(s.creator_share_pct)} of the price (${usd(s.creator_share_cents)}) as Vibes they can cash out. The routing fee is not part of the split.</li>

@@ -5,10 +5,13 @@
  * rates (never taken from the client), and the provider reference is unique once set.
  *
  *   kind purchase      bits → price under the tiers
- *   kind subscription  sub price, plus the site-route fee when PowerChat routes through the site
+ *   kind subscription  the creator's tier price (ops/tiers.js; tier 1 by default), plus the site-route fee when
+ *                      PowerChat routes through the site. The tier rides in metadata.tier, so every provider's
+ *                      settlement (subscriptions.pay with intentId) grants that tier.
  */
 const { prefixedId, iso } = require('../ledger');
 const { fail, positiveInt, userSubject } = require('./common');
+const tiers = require('./tiers');
 
 function parse(row) {
     return row ? { ...row, auto_renew: !!row.auto_renew, metadata: JSON.parse(row.metadata || '{}') } : null;
@@ -23,6 +26,17 @@ async function find(db, ref) {
 
 async function findByProviderRef(db, provider, ref) {
     return parse(await db.prepare('SELECT * FROM payment_intents WHERE provider = ? AND provider_ref = ?').get(provider, ref));
+}
+
+/**
+ * One membership per member and creator, at one tier: while a period runs, a checkout for another tier is refused
+ * (the member cancels and joins the other tier when it ends). The same tier may be renewed early, as before.
+ */
+async function refuseTierChange(db, subject, streamer, tier, ms) {
+    const sub = await db.prepare('SELECT tier, status, current_period_end FROM subscriptions WHERE subscriber = ? AND streamer = ?').get(subject, streamer);
+    if (!sub || Number(sub.tier || 1) === tier) return;
+    const running = (sub.status === 'active' || sub.status === 'past_due') && sub.current_period_end && Date.parse(sub.current_period_end) > ms;
+    if (running) fail(409, 'billing.tier_change_unsupported', `this member has tier ${sub.tier} until ${sub.current_period_end}; cancel it and join tier ${tier} when it ends`);
 }
 
 async function create(ctx, input) {
@@ -44,7 +58,9 @@ async function create(ctx, input) {
     } else if (kind === 'subscription') {
         row.streamer_subject = userSubject(input.streamer, 'streamer');
         if (row.streamer_subject === subject) fail(422, 'billing.self_dealing', 'you cannot subscribe to yourself');
-        const base = rates.subPriceCents;
+        row.tier = tiers.tierOf(rates, input.tier);
+        await refuseTierChange(db, subject, row.streamer_subject, row.tier, ms);
+        const base = await tiers.priceFor(ctx, row.streamer_subject, row.tier);
         row.route = input.route === 'direct' ? 'direct' : (provider === 'powerchat' ? 'site' : null);
         row.fee_cents = row.route === 'site' ? rates.siteFeeCents(base) : 0;
         row.amount_cents = base + row.fee_cents;
@@ -60,6 +76,7 @@ async function create(ctx, input) {
     }
     row.metadata = { rates: rates.snapshot({ price_tiers: kind === 'purchase' ? rates.priceTiers : undefined, sub_share_pct: rates.subSharePct, site_route_fee_pct: rates.siteRouteFeePct }) };
     if (row.receiving_account) row.metadata.receiving_account = row.receiving_account;
+    if (row.tier) Object.assign(row.metadata, { tier: row.tier, tier_price_cents: row.amount_cents - row.fee_cents });
     await db.prepare(`INSERT INTO payment_intents (id, provider, provider_ref, kind, subject, streamer_subject, amount_cents, fee_cents, bits, route,
             auto_renew, status, metadata, created_at, updated_at)
         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, ?)`).run(row.id, provider, kind, subject, row.streamer_subject,
@@ -103,6 +120,7 @@ function present(i) {
         subject: { type: 'user', id: i.subject }, streamer: i.streamer_subject ? { type: 'user', id: i.streamer_subject } : null,
         amount_cents: i.amount_cents, fee_cents: i.fee_cents, bits: i.bits, route: i.route, auto_renew: i.auto_renew,
         status: i.status, settled_txn: i.settled_txn || null, created_at: i.created_at,
+        ...(i.kind === 'subscription' ? { tier: Number((i.metadata && i.metadata.tier) || 1) } : {}),
         // PowerChat checkouts carry this in app_ref; the webhook echoes it back.
         checkout_ref: i.provider === 'powerchat' ? `${i.kind === 'purchase' ? 'pcorder' : 'pcsub'}:${i.id}` : undefined,
     };
