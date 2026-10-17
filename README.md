@@ -64,7 +64,7 @@ promo write changes both in one transaction.
 - OpenVibe.Network (JWKS for service tokens; SSO with PKCE for the staff console; `identity.subject.resolve` for the Live import)
 - OpenVibe.Events (the SDK outbox relay, when `EVENTS_URL` and the OAuth client secret are set)
 - the payment providers whose secrets are configured (none in production today)
-- `openvibe-contracts` v0.201.0, `openvibe-sdk` v0.50.1 (service tokens, per-person limits, `openvibe-sdk/db`, `openvibe-sdk/service`), `openvibe-shared` v4.3.0, pinned by release tarball
+- `openvibe-contracts` v0.203.0, `openvibe-sdk` v0.50.1 (service tokens, per-person limits, `openvibe-sdk/db`, `openvibe-sdk/service`), `openvibe-shared` v4.3.0, pinned by release tarball
 - **PostgreSQL 18 and Valkey 9** (OpenVibe.Host `roles/data/`, ADR-035): every read and write is async through
   `openvibe-sdk/db`; Valkey holds the per-person limit counters (optional: without `VALKEY_URL` they count in the process)
 
@@ -205,6 +205,7 @@ Contracts service manifests name (never a wildcard), never cached, limited to 30
 | `POST /api/v1/cashouts/:id/approve` | `billing.cashout.manage` | `{payout_reference (required), payout_provider?}`; refused before the escrow ends |
 | `POST /api/v1/cashouts/:id/deny` | `billing.cashout.manage` | reversal back to payable `{reason?}` |
 | `POST /api/v1/subscriptions` | `billing.subscription.manage` | start/renew a period `{subscriber, streamer, source: credit, tier?, auto_renew?}` at the tier's price (share credited every period); no switching tiers while a period runs (409 `billing.tier_change_unsupported`); `source: receipt` also needs `billing.ledger.admin` |
+| `GET /api/v1/stats[?days=1..90]` | `billing.stats.read` | network-wide counts with no person in them (Vibes bought: all time, d/w/m/pw windows, a daily series; subscriptions: active now, started in the windows and per day; test and imported rows left out of windows and series), for a product's public stats (Live's home) |
 | `GET /api/v1/tiers/:streamer` | `billing.tier.manage`, `billing.intent.create` or `billing.subscription.manage` | a creator's tier prices `{streamer, tiers: [{tier, price_cents, status}], default_price_cents, min_price_cents, max_price_cents, max_tiers}`; tier 1 without a row sells at the default price |
 | `PUT /api/v1/tiers/:streamer/:tier` | `billing.tier.manage` | set a tier's monthly price `{price_cents, status?: active\|archived}` within the bounds (`BILLING_TIER_MIN_CENTS`..`BILLING_TIER_MAX_CENTS`, at most `BILLING_MAX_TIERS` tiers); the product that sells memberships (OpenVibe.VIP) calls it for the creator; archived sells no more, running subscriptions renew at the price they were bought at |
 | `POST /api/v1/subscriptions/:id/cancel` | `billing.subscription.manage` | cancel at period end; Stripe is cancelled at Stripe first |
@@ -486,7 +487,7 @@ PowerChat purchase settling end to end after the cutover.
 Part of the [OpenVibe network](https://openvibe.network). Built in the open by [OpenVibers](https://github.com/OpenVibers).
 
 <!-- versions:start -->
-- openvibe-contracts: v0.201.0
+- openvibe-contracts: v0.203.0
 - openvibe-sdk: v0.50.1
 - openvibe-shared: v4.3.0
 <!-- versions:end -->

@@ -30,6 +30,7 @@ const usage = require('../ops/usage');
 const promo = require('../ops/promo');
 const rating = require('../ops/rating');
 const tiers = require('../ops/tiers');
+const { stats } = require('../ops/stats');
 
 const CAP = {
     intent: 'billing.intent.create',
@@ -40,6 +41,7 @@ const CAP = {
     subscription: 'billing.subscription.manage',
     entitlement: 'billing.entitlement.check',
     tier: 'billing.tier.manage',
+    stats: 'billing.stats.read',
     admin: 'billing.ledger.admin',
     usage: 'billing.usage.record',
 };
@@ -200,6 +202,11 @@ function v1Router({ ctx, auth, adapters, limits }) {
         });
         res.status(201).json({ subscription: subscriptions.present(out.subscription), entitlement: out.entitlement, transaction: presentTxn(out.txn) });
     }, limits.budget('billing.subscription.create', person('subscriber'))));
+    // ── Network-wide counts with no person in them (ops/stats.js): a product's public stats ──
+    r.get('/stats', ...read(CAP.stats, async (req, res) => {
+        res.json(await stats(ctx, { days: req.query.days }));
+    }));
+
     // ── Subscription tiers (ops/tiers.js): the creator's prices, set by the product that sells them ──
     // Anyone who may start a checkout may read what it costs; setting a price is billing.tier.manage.
     r.get('/tiers/:streamer', ...read([CAP.tier, CAP.intent, CAP.subscription], async (req, res) => {
