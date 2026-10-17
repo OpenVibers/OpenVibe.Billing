@@ -2,10 +2,11 @@
 
 > The isolated money ledger: providers, receipts, subscriptions, entitlements, refunds and payouts.
 
-**Status:** alpha — runtime built and tested (Wave 8). Deployed on the host in **shadow** mode
-since 2026-09-23 (`/opt/openvibe.billing`, API on `127.0.0.1:4600`): no provider secret is configured,
-it holds a reconciled import of Live's money data, and OpenVibe.Live stays the money authority
-(`BILLING_AUTHORITY` is not set in Live) until the cutover below is run. The cutover has not been run.  
+**Status:** alpha — **the money ledger of the OpenVibe network since 2026-10-17** (the cutover below, 04:50–04:56 UTC):
+`BILLING_AUTHORITY=billing` in Billing and OpenVibe.Live, PowerChat deliveries settle here, and Live's own money tables
+are read-only. Deployed on the host since 2026-09-23 (`/opt/openvibe.billing`, API on `127.0.0.1:4600`); it ran in
+shadow, holding a reconciled import of Live's money data, until the cutover. Every OpenVibe site's account menu shows
+a person's Vibes from `GET /api/me/vibes`.  
 **Domain:** `billing.openvibe.network` — the staff console (Network SSO, staff only), `/webhooks/*` and
 `/api/health`; the service API `/api/v1` is reachable only on loopback (`127.0.0.1:4600`)  
 **Decision:** [ADR-012](https://github.com/OpenVibers/OpenVibe.Contracts/blob/main/docs/adr/ADR-012-economic-classification.md) —
@@ -436,8 +437,9 @@ The exact production sequence, rollback, grants and the Live behaviour the switc
 [docs/live-cutover.md](docs/live-cutover.md); the Live side (a `BILLING_AUTHORITY=live|billing` switch,
 `live` by default, plus the `money_writes_frozen` freeze) was the patch
 [docs/live-patch.diff](docs/live-patch.diff) and is deployed in OpenVibe.Live since `c384787` with the
-switch unset. None of the steps below has been executed yet; step 3 needs the owner (PowerChat
-dashboard). In short:
+switch unset. **Run on 2026-10-17 04:50–04:56 UTC** (docs/live-cutover.md has the record): final import 0 new rows,
+reconciliation OK before and after. Step 3 was done in Live's vhost rather than the PowerChat dashboard: openvibe.live's
+`/api/powerchat/webhook` is proxied to Billing (OpenVibe.Live#172; the signature does not cover the URL). In short:
 
 1. **Shadow import** as often as needed (`billing_live 'node scripts/import-live.js --dry-run'`, docs/live-cutover.md);
    map held users in the Network and explain every adjustment until reconciliation is clean.
@@ -455,15 +457,15 @@ Billing did itself.
 
 ## Launch rule
 
-`billing.openvibe.network` left OpenVibe.Sites on 2026-09-23: it serves the staff console only. Billing
-is not a public product and is not the money authority until the cutover above and everything in plan
-§12.12 holds: owning runtime with health/readiness and `/metrics` ✔; canonical identity and
+`billing.openvibe.network` left OpenVibe.Sites on 2026-09-23: it serves the staff console, the billing policy and a
+person's own Vibes (`/api/me/vibes`). Billing is not a public product of its own; it became the money authority with
+the cutover above (2026-10-17). Plan §12.12, as it stood: owning runtime with health/readiness and `/metrics` ✔; canonical identity and
 scoped service principals ✔ (principal `billing`); server-rendered public routes useful without
 JavaScript (partly — the public billing policy at `/policy`; the other pages are the staff-only console); real persistence and end-to-end
-workflows ✔ in tests, shadow only in production; capability/event registration against
+workflows ✔ in tests, and in production since the cutover; capability/event registration against
 OpenVibe.Contracts ✔ (v0.8.0); migration strategy ✔ (shadow import reconciles; restore drill passed
-2026-09-23) with a security review, sitemap/robots still to do; acceptance tests ✔. A shadow deployment
-is never counted as the money authority.
+2026-09-23) with a security review, sitemap/robots still to do; acceptance tests ✔. Still due: a small real
+PowerChat purchase settling end to end after the cutover.
 
 ---
 
