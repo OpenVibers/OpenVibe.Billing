@@ -54,7 +54,7 @@ button.link{border:0;background:none;padding:0;color:var(--accent);text-decorati
 fieldset{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0}fieldset[disabled]{opacity:.6}
 legend{padding:0 6px;font-weight:600}
 dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{color:var(--muted)}dd{margin:0}
-.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;align-items:start}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px, 100%), 1fr));gap:16px;align-items:start}
 .shipped{max-width:1180px;margin:24px auto;padding:0 16px 24px;color:var(--muted);font-size:.85rem}
 `;
 const CSS_HASH = `sha256-${crypto.createHash('sha256').update(CSS).digest('base64')}`;
