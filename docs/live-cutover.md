@@ -119,7 +119,7 @@ celebrated exactly once.
    review instead of announced.
 6. **Tips** (for EXTERNAL tips): OpenVibe.Tips runs a release that consumes `billing.receipt.external`
    (Tips `6d14574` or later). Its Events subscriptions include `billing.receipt.*`. To add it, run
-   `sudo bash -c "set -a; . /etc/openvibe/tips.env; set +a; cd /opt/openvibe.tips && sudo -E -u ubuntu node scripts/subscribe.js"`.
+   `sudo bash -c "set -a; . /etc/openvibe/tips.env; set +a; cd /opt/openvibe.tips && setpriv --reuid=ubuntu --regid=ubuntu --init-groups node scripts/subscribe.js"`.
    It creates the missing `billing.receipt.*` subscription and reports the existing
    `billing.transaction.*` one. Tips already holds `live.tips_delivery.write`. `TIPS_CHAT_ADAPTER` stays
    `none` until step 6.
@@ -133,11 +133,12 @@ Shell helpers used below (on the host):
 
 ```bash
 # billing '<command>' runs one command with Billing's environment, as Billing's service user (ubuntu).
-billing() { sudo bash -c "set -a; . /etc/openvibe/billing.env; set +a; export NODE_ENV=production; cd /opt/openvibe.billing && sudo -E -u ubuntu $1"; }
+# (setpriv keeps the environment; the host's sudo refuses -E.)
+billing() { sudo bash -c "set -a; . /etc/openvibe/billing.env; set +a; export NODE_ENV=production; cd /opt/openvibe.billing && setpriv --reuid=ubuntu --regid=ubuntu --init-groups $1"; }
 # billing_live '<command>': the same, plus LIVE_DATABASE_URL = Live's own DATABASE_URL. Live runs on PostgreSQL
 # (ov_live, since 2026-10-08) and the import reads it directly, in one REPEATABLE READ, READ ONLY transaction.
 # Root reads /etc/openvibe/live.env (Billing's user cannot), and the URL never appears on a command line.
-billing_live() { sudo bash -c "set -a; . /etc/openvibe/billing.env; LIVE_DATABASE_URL=\$(sed -n 's/^DATABASE_URL=//p' /etc/openvibe/live.env); set +a; export NODE_ENV=production; cd /opt/openvibe.billing && sudo -E -u ubuntu $1"; }
+billing_live() { sudo bash -c "set -a; . /etc/openvibe/billing.env; LIVE_DATABASE_URL=\$(sed -n 's/^DATABASE_URL=//p' /etc/openvibe/live.env); set +a; export NODE_ENV=production; cd /opt/openvibe.billing && setpriv --reuid=ubuntu --regid=ubuntu --init-groups $1"; }
 ```
 
 Live owner calls are made from the browser console on openvibe.live, signed in as the owner:
