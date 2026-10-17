@@ -123,6 +123,11 @@ celebrated exactly once.
    It creates the missing `billing.receipt.*` subscription and reports the existing
    `billing.transaction.*` one. Tips already holds `live.tips_delivery.write`. `TIPS_CHAT_ADAPTER` stays
    `none` until step 6.
+7. **Live's notices from Billing** (Live#171): Live subscribes to `billing.transaction.settled` and
+   `billing.entitlement.changed` → `/internal/billing-events`:
+   `sudo node /opt/openvibe.live/current/scripts/subscribe-media-events.js --billing` (needs `LIVE_EVENTS_SECRET`
+   in live.env, as for `--network`). Harmless before step 6: Live acknowledges them and does nothing while it is
+   the ledger.
 
 Shell helpers used below (on the host):
 
@@ -159,9 +164,31 @@ Live owner calls are made from the browser console on openvibe.live, signed in a
    `"frozen":true,"authority":"billing"`. From step 4 on, an EXTERNAL tip that reaches Billing is held
    with the other deliveries and announced when step 7 processes it. Live receives none of them, so it
    announces none.
-4. **Re-point the PowerChat webhook** (manual, PowerChat developer dashboard for OpenVibe.Live's app):
-   `https://openvibe.live/api/powerchat/webhook` → **`https://billing.openvibe.network/webhooks/powerchat`**,
-   same signing secret. From this moment every delivery is stored (202) and held by Billing; Live gets none.
+4. **Re-point the PowerChat webhook** to Billing, same signing secret. Either way works; the first needs nobody
+   but the operator:
+   - **On OpenVibe's side (no PowerChat dashboard change):** Live's vhost hands the webhook path to Billing.
+     PowerChat signs `HMAC-SHA256(secret, timestamp + "." + raw body)`, not the URL, so Billing verifies a
+     delivery that arrives at Live's address (`server/providers/powerchat.js` `verify`). Add above
+     `location /api/` in OpenVibe.Live's `deploy/nginx/openvibe.live.conf`, install it (`ov-vhost-install`,
+     which runs `nginx -t` and rolls back on failure) and reload:
+     ```nginx
+     location = /api/powerchat/webhook {
+         limit_req zone=api_limit burst=40 nodelay;
+         client_max_body_size 1m;
+         proxy_pass http://127.0.0.1:4600/webhooks/powerchat;
+         proxy_http_version 1.1;
+         proxy_set_header Host billing.openvibe.network;
+         proxy_set_header X-Real-IP $remote_addr;
+         proxy_set_header X-Forwarded-For $remote_addr;
+         proxy_set_header X-Forwarded-Proto $scheme;
+     }
+     ```
+     Check: `curl -s -o /dev/null -w '%{http_code}' -X POST https://openvibe.live/api/powerchat/webhook` → 401
+     from Billing (unsigned), not Live's answer.
+   - **In PowerChat's developer dashboard** for OpenVibe.Live's app: `https://openvibe.live/api/powerchat/webhook`
+     → **`https://billing.openvibe.network/webhooks/powerchat`** (the owner's account).
+
+   From this moment every delivery is stored (202) and held by Billing; Live gets none.
    `billing 'node scripts/freeze.js status'` shows `held_webhooks` growing only if tips arrive.
 5. **Final import** (after step 4, so every delivery either reached Live before this read or is held by
    Billing). Live's money writes are frozen since step 1, and the import reads every Live table in one
@@ -224,7 +251,7 @@ Keep the step-5 dump. The Billing side never needs undoing to roll Live back; th
 which money moved where.
 
 - **Before step 6** (Live still on its own columns): re-point the PowerChat webhook back to
-  `https://openvibe.live/api/powerchat/webhook`; leave Billing **frozen** (its held deliveries are
+  `https://openvibe.live/api/powerchat/webhook` (remove the vhost block, or revert the dashboard); leave Billing **frozen** (its held deliveries are
   not processed, and must not be until a fresh final import); unfreeze Live. Remove
   `BILLING_AUTHORITY` from billing.env and restart Billing (it stays frozen). When the held deliveries
   are eventually processed, the EXTERNAL tips among them are then recorded, not announced hours late.
@@ -251,8 +278,10 @@ which money moved where.
 
 Said plainly, for whoever runs this and for Wave 9 (Tips) / Wave 10 (VIP):
 
-1. **Tips on a streamer's own PowerChat (EXTERNAL) move to the Billing → Tips → Live path, and lose
-   Live's own goals.** Billing records each one once (`external_receipts`, no journal entry). It
+1. **Tips on a streamer's own PowerChat (EXTERNAL) move to the Billing → Tips → Live path.** Since Live#169
+   Live's `/internal/tips/deliveries` advances the channel's donation goal (goal-update, "Goal reached", the goal
+   sound) once per delivery (its PostgreSQL claim), and since Live#170 the tip lands in the channel's tip history.
+   What follows was true before those: Billing records each one once (`external_receipts`, no journal entry). It
    announces it as `billing.receipt.external`, attributed through `provider_accounts`. Tips posts the
    chat line through Live's `/internal/tips/deliveries`: channel room, global mirror, saved `donation`
    message, donation sound. Tips also advances its own goal and overlay. **Not carried:** Live's own
@@ -262,28 +291,32 @@ Said plainly, for whoever runs this and for Wave 9 (Tips) / Wave 10 (VIP):
    memory only. A tip on a PowerChat account no creator has connected is held for review, not announced.
    PowerChat follow/host/channel-points/subscription notices no longer appear in Live chat: they carry no
    money, and nobody forwards them. PowerChat has one webhook URL per app.
-2. **Live no longer learns about PowerChat settlements:** no "Vibes credited" / "Subscribed!"
+2. **Carried since Live#171** (`/internal/billing-events`, step 7 of *Before the day*): "Vibes credited",
+   "Subscribed!" for a provider-paid subscription, the sub alert on the streamer's PowerChat overlay for a
+   PowerChat-paid one, and the celebration of a site-routed `pcdon:` tip. Before it, **Live no longer learned about PowerChat settlements:** no "Vibes credited" / "Subscribed!"
    notification to the buyer, no sub alert forwarded to the streamer's PowerChat overlay for
    PowerChat-paid subscriptions (Vibes-paid ones still get it), no celebration for legacy site-routed
    `pcdon:` tips.
 3. **Cashout decisions leave Live's admin:** approve, deny and the pending list answer 409 on Live.
    They move to Billing's staff console (`https://billing.openvibe.network/cashouts`, Network admins listed
    in `BILLING_STAFF_SUBJECTS`): approving needs the provider payout reference and is refused before the
-   escrow ends; denying needs a reason; each decision is in the staff audit log. Live's 409 message still
-   points at "its operator API" — updating that wording to name the console is a Live-side change.
-4. **Displays that read Live's `transactions` table freeze at the cutover:** the stream donation
+   escrow ends; denying needs a reason; each decision is in the staff audit log. Live's 409 names that
+   console since Live#169.
+4. **Carried since Live#170** (`channel_tips`, every tip a channel received on any rail): the displays that
+   read Live's `transactions` table used to freeze at the cutover: the stream donation
    leaderboard, stream recap tip totals, VOD tip counts and the home "Vibes tipped"/"supporters" stats
    stop counting new tips (admin money totals are blanked rather than shown stale).
-5. **Renewal notices** ("could not auto-renew", "subscription has ended") came from Live's sweeper;
-   Billing's sweep renews and expires but notifies nobody.
+5. **Renewal notices** ("could not auto-renew", "subscription has ended") came from Live's sweeper. Billing's
+   sweep notifies nobody, but since Live#171 Live sends them from `billing.entitlement.changed`
+   (`renewal_insufficient_credit`, `renewal_failed`, `expired` unless cancelled, `grace_ended`, `stripe_not_renewed`).
 6. **Cancelling a Vibes-paid subscription** used to end access at once on Live; Billing keeps the paid
    period and ends it at period end.
 7. **Subscriber perks can lag by up to a minute** (entitlement cache; the first check of a pair
    answers "not a subscriber" while it fetches).
 8. **An "unknown" outcome that the owner resolves** re-sends the same request: if Billing never got the
    first attempt, the action (e.g. a donation the viewer was told may not have gone through) happens then.
-9. **The SPA does not send an `Idempotency-Key` yet**, so a double-clicked donation is still two
-   donations (as today); the server honours the header when a client sends it.
+9. **Carried since Live#168:** the SPA sends an `Idempotency-Key` with each donation, reused when the same
+   donation is tried again after no answer, and keeps one donation in flight, so a double click is one donation.
 10. **Card rails** additionally stay behind Live's `payments_enabled` switch (off in production), on top
     of Billing's own provider enablement.
 11. **A Vibes media request charged before the cutover and refunded after it is not refunded
