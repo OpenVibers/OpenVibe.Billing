@@ -105,6 +105,11 @@ function loadConfig(env = process.env) {
             minPurchaseBits: int(env.BILLING_MIN_PURCHASE_BITS, 100),
             maxBits: int(env.BILLING_MAX_BITS, 10_000_000),
             subPriceCents: int(env.BILLING_SUB_PRICE_CENTS, 499),
+            // Creator-priced subscription tiers (ops/tiers.js): the bounds a creator's monthly price must stay within,
+            // and how many tiers one creator may sell. Tier 1 without a price keeps subPriceCents.
+            tierMinCents: int(env.BILLING_TIER_MIN_CENTS, 100),
+            tierMaxCents: int(env.BILLING_TIER_MAX_CENTS, 50_000),
+            maxTiers: Math.min(10, Math.max(1, int(env.BILLING_MAX_TIERS, 10))),
             subSharePct: num(env.BILLING_SUB_SHARE_PCT, 70),                // streamer share of a sub
             siteRouteFeePct: num(env.BILLING_SITE_ROUTE_FEE_PCT, 10),       // PowerChat site-route fee
             subPeriodDays: int(env.BILLING_SUB_PERIOD_DAYS, 31),

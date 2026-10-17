@@ -26,6 +26,7 @@ const { enqueue } = require('../outbox');
 const { A, MAX_RECEIPT_CENTS, entry, receiptEntries, fail, positiveInt } = require('./common');
 const { summary } = require('./purchases');
 const intents = require('./intents');
+const tiers = require('./tiers');
 
 const KIND = 'channel_subscription';
 
@@ -63,7 +64,7 @@ async function entitlement(db, subject, streamer, ms) {
     const sub = await findPair(db, subject, streamer);
     return {
         subject: { type: 'user', id: subject }, streamer: { type: 'user', id: streamer }, kind: KIND,
-        active: !!expires, expires_at: expires || null,
+        active: !!expires, expires_at: expires || null, tier: sub ? Number(sub.tier) || 1 : null,
         // past_due: when the sweep stops retrying the renewal. The grace grants no access (active stays false).
         grace_until: sub && sub.status === 'past_due' ? sub.grace_until || null : null,
         subscription: sub ? { id: sub.id, status: sub.status, auto_renew: sub.auto_renew, cancel_at_period_end: sub.cancel_at_period_end, provider: sub.provider } : null,
@@ -77,7 +78,7 @@ async function activeEntitlements(db, subject, ms) {
 }
 
 /**
- * Pay one period. input: { subscriber, streamer, source: 'credit'|'receipt', priceCents?, autoRenew?,
+ * Pay one period. input: { subscriber, streamer, source: 'credit'|'receipt', tier?, priceCents?, autoRenew?,
  *   receipt?: { provider, receiptRef, paidCents, feeCents, route, providerRef, test, periodEnd },
  *   intentId?, idempotencyKey, actor, sourceEventId, renewal? }
  */
@@ -88,15 +89,31 @@ async function pay(ctx, input) {
     return await money(db, async () => {
         const existingTxn = await db.prepare('SELECT id FROM transactions WHERE idempotency_key = ?').get(input.idempotencyKey);
         if (existingTxn) return await result(db, await getTxn(db, existingTxn.id), ctx, true);
-        if (input.intentId) intents.refuseIfSettledInLive(await intents.find(db, input.intentId));
+        const intent = input.intentId ? await intents.find(db, input.intentId) : null;
+        if (intent) intents.refuseIfSettledInLive(intent);
         const r = input.receipt;
         if (r) {
             const dup = await db.prepare('SELECT id FROM transactions WHERE receipt_ref = ?').get(r.receiptRef);
             if (dup) return { ...await result(db, await getTxn(db, dup.id), ctx, true), duplicateReceipt: true };
         }
         const ms = ctx.now();
-        const priceCents = input.priceCents != null ? positiveInt(input.priceCents, 'price_cents', 10_000_000) : rates.subPriceCents;
         const prior = await findPair(db, subscriber, streamer);
+        // The tier (ops/tiers.js): the caller's, else the checkout's (a provider settlement), else the running one's.
+        const meta0 = (intent && intent.metadata) || {};
+        const tier = input.tier != null ? tiers.tierOf(rates, input.tier) : Number(meta0.tier || (prior && prior.tier) || 1);
+        const sameTier = !prior || Number(prior.tier || 1) === tier;
+        let priceCents;
+        if (input.priceCents != null) {
+            priceCents = positiveInt(input.priceCents, 'price_cents', 10_000_000);   // a renewal keeps the price it was bought at
+        } else if (input.source === 'credit') {
+            // One membership per member and creator at one tier: no switching tiers while a paid period runs.
+            const running = prior && (prior.status === 'active' || prior.status === 'past_due') && prior.current_period_end && Date.parse(prior.current_period_end) > ms;
+            if (running && !sameTier) fail(409, 'billing.tier_change_unsupported', `this member has tier ${prior.tier} until ${prior.current_period_end}; cancel it and join tier ${tier} when it ends`);
+            priceCents = await tiers.priceFor(ctx, streamer, tier);
+        } else {
+            // A provider receipt: what the checkout priced the tier at (the money arrived; it is never refused here).
+            priceCents = Number(meta0.tier_price_cents) > 0 ? Number(meta0.tier_price_cents) : (sameTier && prior && prior.price_cents) || rates.subPriceCents;
+        }
 
         let entries = [];
         let provider = 'credit';
@@ -107,7 +124,7 @@ async function pay(ctx, input) {
             const share = Math.min(cost, rates.subShareBits(priceCents));
             await requireFunds(db, A.credit(subscriber), cost, 'credit');
             entries = [entry(A.credit(subscriber), -cost), entry(A.payable(streamer), share), entry(A.revenue('vibes-bits'), cost - share)];
-            meta = { source: 'credit', price_cents: priceCents, cost_bits: cost, share_bits: share, sub_share_pct: rates.subSharePct };
+            meta = { source: 'credit', tier, price_cents: priceCents, cost_bits: cost, share_bits: share, sub_share_pct: rates.subSharePct };
         } else if (input.source === 'receipt' && r) {
             provider = r.provider;
             route = r.route || null;
@@ -115,12 +132,12 @@ async function pay(ctx, input) {
             const fee = Math.max(0, Math.round(Number(r.feeCents) || 0));
             if (route === 'direct') {
                 // EXTERNAL: the streamer holds the money already; nothing touches the journal.
-                meta = { source: 'external', route, paid_cents: paid, external: true };
+                meta = { source: 'external', tier, route, paid_cents: paid, external: true };
             } else {
                 const base = Math.max(0, paid - fee);
                 const share = rates.subShareBits(base);
                 entries = receiptEntries(rates, { provider, paidCents: paid, bits: share, target: A.payable(streamer) });
-                meta = { source: 'receipt', route, paid_cents: paid, fee_cents: fee, share_base_cents: base, share_bits: share, sub_share_pct: rates.subSharePct };
+                meta = { source: 'receipt', tier, route, paid_cents: paid, fee_cents: fee, share_base_cents: base, share_bits: share, sub_share_pct: rates.subSharePct };
             }
         } else {
             fail(422, 'billing.invalid_input', "source must be 'credit' or 'receipt' (with a receipt)");
@@ -151,15 +168,15 @@ async function pay(ctx, input) {
         let sub;
         if (prior) {
             await db.prepare(`UPDATE subscriptions SET provider = ?, provider_ref = COALESCE(?, provider_ref), route = ?, status = 'active', auto_renew = ?,
-                    cancel_at_period_end = 0, price_cents = ?, current_period_end = ?, grace_until = NULL, renewal_failed_at = NULL, renewal_attempts = 0,
+                    cancel_at_period_end = 0, tier = ?, price_cents = ?, current_period_end = ?, grace_until = NULL, renewal_failed_at = NULL, renewal_attempts = 0,
                     updated_at = ? WHERE id = ?`)
-                .run(provider, r ? r.providerRef || null : null, route, autoRenew, priceCents, iso(end), nowIso, prior.id);
+                .run(provider, r ? r.providerRef || null : null, route, autoRenew, tier, priceCents, iso(end), nowIso, prior.id);
             sub = await find(db, prior.id);
         } else {
             const id = prefixedId('sub', ms);
             await db.prepare(`INSERT INTO subscriptions (id, subscriber, streamer, tier, provider, provider_ref, route, status, auto_renew, cancel_at_period_end,
-                    price_cents, current_period_end, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, 'active', ?, 0, ?, ?, ?, ?)`)
-                .run(id, subscriber, streamer, provider, r ? r.providerRef || null : null, route, autoRenew, priceCents, iso(end), nowIso, nowIso);
+                    price_cents, current_period_end, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, ?, ?, ?, ?)`)
+                .run(id, subscriber, streamer, tier, provider, r ? r.providerRef || null : null, route, autoRenew, priceCents, iso(end), nowIso, nowIso);
             sub = await find(db, id);
         }
         await db.prepare(`INSERT INTO entitlements (id, subject, kind, scope, subscription_id, starts_at, ends_at, source_txn, created_at)
