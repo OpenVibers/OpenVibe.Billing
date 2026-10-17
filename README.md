@@ -383,6 +383,18 @@ there — a share already recycled or cashed out goes to `chargeback_loss`, flag
 - **Mapping of Live's tables** to Billing's (including payouts, refunds and plans, which have no table
   of their own on Live): [docs/live-mapping.md](docs/live-mapping.md).
 
+### Account export and deletion (ADR-033)
+
+Billing answers a person's account export and deletion since 2026-10-17 ([server/account-data.js](server/account-data.js),
+openvibe-sdk/account-data): OpenVibe.Events delivers `network.account.export_requested` and `network.account.deleted` to
+`POST /internal/events` on 127.0.0.1:4600 (signed with `BILLING_EVENTS_SECRET`; loopback only, and nginx 404s
+`/internal/`), the two subscriptions are created at boot. The export holds the person's balances and every money record
+about them: transactions sent and received, checkouts, cash-outs, subscriptions (as a member, and as a creator without
+the members' identities), entitlements, tips on their own PowerChat, usage, promo allowances, tier prices and connected
+payment accounts. A deletion keeps the money records (the ledger must still balance; payments are records the law
+requires) and removes settings: tier prices, connected payment accounts and staff sessions. Each deletion is confirmed
+once with its counts (`account_data_events`).
+
 ## Acceptance
 
 `npm test` runs every `test/*.test.js` against stub Network, Events and providers, temp databases and

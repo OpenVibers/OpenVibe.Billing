@@ -100,6 +100,16 @@ async function createApp(opts = {}) {
     app.get('/api/ready', readiness.handler);
 
     app.use('/webhooks', webhooksRouter({ ctx, adapters }));
+    // Account export and deletion (ADR-033, server/account-data.js): OpenVibe.Events delivers network.account.* to
+    // 127.0.0.1:4600 directly (the consumer refuses anything that came through a proxy; nginx 404s /internal/ too), and
+    // the parts and confirmations go to Network with Billing's own token. A test injects a stand-in through opts.accountSend.
+    const accountData = require('./account-data').create({ db, log });
+    const accountSend = opts.accountSend || (config.oauth.clientSecret
+        ? require('openvibe-sdk/account-data').createNetworkSender({ networkInternalUrl: config.network.internalUrl, clientId: config.oauth.clientId, clientSecret: config.oauth.clientSecret, ...(opts.fetchImpl ? { fetch: fetchImpl } : {}) })
+        : null);
+    app.post('/internal/events', accountData.consumer({ secrets: config.events.webhookSecrets, send: accountSend }));
+    app.locals.accountData = accountData;
+    app.locals.accountSend = accountSend;
     // Per-person limits on the money-creating routes (api/actor-limits.js); the webhooks above never are.
     const limits = createActorLimits({ config, db, now: opts.limitsNow || (() => Date.now()), registry: metrics.registry, log, valkey });
     app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters, limits }));

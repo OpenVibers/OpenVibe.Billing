@@ -12,6 +12,7 @@
  * BILLING_RATING_INTERVAL_MS is set (default 0 = off). While the economy is frozen only the relay and the
  * reconciliation (it only reads the books) run.
  */
+const { startSubscriptions } = require('openvibe-sdk/account-data');
 const { loadConfig } = require('./config');
 const { createApp } = require('./app');
 const providers = require('./providers');
@@ -55,6 +56,13 @@ const { createPgTelemetrySink, startTelemetryRetention } = require('openvibe-sdk
         relay.start();
     }
 
+    // The two account subscriptions at OpenVibe.Events (ADR-033), created when missing; off without EVENTS_URL,
+    // BILLING_EVENTS_SECRET or the client secret.
+    const accountSubscriptions = startSubscriptions({
+        eventsUrl: config.events.url, endpoint: `http://127.0.0.1:${config.port}/internal/events`, secret: config.events.webhookSecrets[0],
+        networkInternalUrl: config.network.internalUrl, clientId: config.oauth.clientId, clientSecret: config.oauth.clientSecret,
+    });
+
     const server = app.listen(config.port, config.host, async () => {
         const enabled = Object.values(adapters).filter((a) => a.enabled).map((a) => a.name);
         console.log(`[Billing] ${config.nodeEnv} on http://${config.host}:${config.port} → ${config.baseUrl} (PostgreSQL)`);
@@ -80,6 +88,7 @@ const { createPgTelemetrySink, startTelemetryRetention } = require('openvibe-sdk
             () => { for (const t of timers) { clearInterval(t); clearTimeout(t); } },
             () => relay.stop(),
             () => keys.stop(),
+            () => { if (accountSubscriptions) accountSubscriptions.stop(); },
         ],
         close: [
             () => app.locals.valkey && app.locals.valkey.close().catch(() => {}),
