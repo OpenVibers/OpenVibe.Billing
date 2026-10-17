@@ -96,7 +96,9 @@ async function startNetwork() {
     });
     const url = await listen(server);
     issuer = url;
-    return { url, publicPem, signService, addUser, authorize, revoked, legacy, resolveCalls, grants, state, close: () => new Promise((r) => server.close(r)) };
+    // A person's Network session token, as the browser holds it (the shared navbar sends it).
+    const signUser = (u) => userToken({ role: 'user', username: 'someone', nowMs: Date.now(), ...u });
+    return { url, publicPem, signService, signUser, addUser, authorize, revoked, legacy, resolveCalls, grants, state, close: () => new Promise((r) => server.close(r)) };
 }
 
 async function startStripe() {

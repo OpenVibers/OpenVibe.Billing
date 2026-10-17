@@ -183,6 +183,12 @@ POST needs an `Idempotency-Key` (8–200 of `A-Za-z0-9._:-`); a replay returns t
 are not stored. Errors are RFC 9457 problem+json. People are SubjectRefs `{ "type": "user", "id": "usr_…" }`
 (path parameters take the bare id); amounts are integer bits or cents.
 
+One public route takes a **person's** token instead: `GET https://billing.openvibe.network/api/me/vibes` with the
+person's Network user JWT (`Authorization: Bearer`) answers their own `{ credit, payable, currency, bits_per_usd }`
+for the shared navbar on every OpenVibe site (`server/api/me.js`). It is CORS-open to the exact https origins the
+Contracts service manifests name (never a wildcard), never cached, limited to 30 a minute per person, and answers
+`409 billing.not_authoritative` while OpenVibe.Live is still the ledger.
+
 | Method & path | Capability | Does |
 |---|---|---|
 | `GET /api/health`, `/api/ready` | — | liveness / readiness (DB + Network key) |
