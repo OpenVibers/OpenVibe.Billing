@@ -5,9 +5,10 @@
  * for a product's public stats: OpenVibe.Live's home counted Vibes bought and channel subscriptions from its own tables,
  * which stopped at the cutover of 2026-10-17.
  *
- *   purchases       Vibes bought with money: the credit settled purchase transactions put in buyers' accounts.
- *                   bits_total is all time (the Vibes imported from Live included); the windows and the daily series
- *                   leave out test and imported rows (an imported row is dated by the import, not the purchase).
+ *   purchases       Vibes bought with money: the credit settled purchase transactions put in buyers' accounts,
+ *                   test rows left out. bits_total is all time; the balances imported from Live at the cutover are
+ *                   'import' transactions, not purchases, so they count in neither the total nor the windows and series
+ *                   (Live itself had settled one PowerChat order before the cutover).
  *   subscriptions   active now (status active, period not over); started = paid first periods (renewals are not new
  *                   subscriptions), windows and daily series, test and imported rows left out.
  *
