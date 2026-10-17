@@ -53,7 +53,7 @@ function personOf(v) {
 }
 
 /**
- * createActorLimits({ config, db, now, registry, log }) → { budget(name, personFrom), history, refund }.
+ * createActorLimits({ config, db, now, registry, log }) → { budget(name, personFrom), history, selfRead, payerOf }.
  * personFrom(req) names the person a request is counted against (or null: its principal).
  */
 function createActorLimits({ config, db, now = () => Date.now(), registry = null, log = console, valkey = null }) {
@@ -97,13 +97,20 @@ function createActorLimits({ config, db, now = () => Date.now(), registry = null
         return historyLimit(req, res, next);
     }
 
+    /** A person reading their own Vibes (GET /api/me/vibes: the navbar on every site, once per menu): 30 a minute, 600 an hour. */
+    const selfLimit = limiter('billing.vibes.self', { minute: 30, hour: 600 });
+    function selfRead(req, res, next) {
+        req.limitPerson = personOf(req.person && req.person.subject);
+        return selfLimit(req, res, next);
+    }
+
     /** The payer of the transfer a refund gives back (one primary-key read), else null. */
     async function payerOf(req) {
         const row = await db.prepare('SELECT from_subject FROM transactions WHERE id = ?').get(String(req.params.id));
         return row ? personOf(row.from_subject) : null;
     }
 
-    return { budget, history, payerOf };
+    return { budget, history, selfRead, payerOf };
 }
 
 module.exports = { createActorLimits, personOf, BUDGETS };

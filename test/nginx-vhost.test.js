@@ -19,4 +19,9 @@ assert.match(block, /add_header X-Content-Type-Options nosniff always;/);
 assert.match(block, /add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;/);
 assert.match(block, /proxy_pass http:\/\/127\.0\.0\.1:4600;/);
 assert.ok(tls.indexOf(m[0]) < tls.indexOf('location / {'), 'before the console catch-all');
-console.log('nginx vhost: the policy is indexable, the rest noindex');
+// The public /api: health and a person's own Vibes (the navbar), both before the catch-all 404; the service API stays loopback.
+const me = tls.match(/location = \/api\/me\/vibes \{([^}]*)\}/);
+assert.ok(me && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(me[1]) && /limit_req /.test(me[1]), 'a rate-limited location for /api/me/vibes');
+assert.ok(tls.indexOf(me[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
+assert.match(tls, /location \^~ \/api\/v1 \{ deny all; \}/);
+console.log('nginx vhost: the policy is indexable, the rest noindex; /api/me/vibes public, /api/v1 loopback only');

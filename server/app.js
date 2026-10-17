@@ -7,6 +7,7 @@
  *   GET  /api/health, /api/ready          liveness / readiness
  *   GET  /metrics                         Prometheus text (direct loopback callers only; server/metrics.js)
  *   /api/v1/*                             operations API (service tokens, see api/v1.js)
+ *   /api/me/vibes                         a signed-in person's own Vibes (user token; CORS for OpenVibe's own sites, api/me.js)
  *   /webhooks/<provider>                  provider receipts (see api/webhooks.js)
  *   /, /auth/*, /cashouts, …               staff console (Network SSO, server-rendered; see console/index.js)
  *
@@ -102,6 +103,8 @@ async function createApp(opts = {}) {
     // Per-person limits on the money-creating routes (api/actor-limits.js); the webhooks above never are.
     const limits = createActorLimits({ config, db, now: opts.limitsNow || (() => Date.now()), registry: metrics.registry, log, valkey });
     app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters, limits }));
+    // A signed-in person's own Vibes, for the shared navbar on every OpenVibe site (api/me.js; user tokens, CORS for owned sites).
+    app.use('/api/me', require('./api/me').meRouter({ ctx, config, keys, limits }));
 
     // The billing policy is public and indexable; the staff console and the API are not.
     app.get('/robots.txt', (req, res) => res.type('text/plain').send('User-agent: *\nAllow: /policy\nDisallow: /\n'));
