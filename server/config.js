@@ -159,6 +159,9 @@ function loadConfig(env = process.env) {
         events: {
             url: trim(env.EVENTS_URL || ''),
             intervalMs: int(env.EVENTS_RELAY_INTERVAL_MS, 2000),
+            // Signing secret of Billing's own subscriptions (account export and deletion, server/account-data.js);
+            // comma-separated so a rotation can accept the old and the new value.
+            webhookSecrets: String(env.BILLING_EVENTS_SECRET || '').split(',').map((v) => v.trim()).filter(Boolean),
         },
         jobs: {
             enabled: env.BILLING_JOBS !== 'off',

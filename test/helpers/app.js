@@ -40,7 +40,7 @@ async function boot(opts = {}) {
     // npm run test:pg: the per-person limits count in the Valkey container (a prefix of this app's own), as in production.
     const valkey = process.env.BILLING_TEST_STORE === 'pg' && process.env.OV_TEST_VALKEY_URL
         ? require('openvibe-sdk/valkey').createValkey({ url: process.env.OV_TEST_VALKEY_URL, prefix: `ov:billing-test:${crypto.randomBytes(6).toString('hex')}:` }) : null;
-    const app = await createApp({ config, db, now: () => Date.now() + clock.offset, log, limitsNow: opts.limitsNow, valkey });
+    const app = await createApp({ config, db, now: () => Date.now() + clock.offset, log, limitsNow: opts.limitsNow, valkey, accountSend: opts.accountSend });
     await app.locals.keys.refresh();
     const server = await new Promise((resolve) => { const s = http.createServer(app); s.listen(0, '127.0.0.1', () => resolve(s)); });
     const base = `http://127.0.0.1:${server.address().port}`;
