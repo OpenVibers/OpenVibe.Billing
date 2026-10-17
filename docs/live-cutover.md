@@ -144,6 +144,10 @@ billing_live() { sudo bash -c "set -a; . /etc/openvibe/billing.env; LIVE_DATABAS
 Live owner calls are made from the browser console on openvibe.live, signed in as the owner:
 `await api('/admin/money')`, `await api('/admin/money/freeze', { method: 'POST', body: { on: true, reason: '…' } })`.
 
+**Done 2026-10-17 04:50–04:56 UTC** (no one live; Live and Billing frozen ~6 minutes): final import 0 new rows, 0 holds,
+0 anomalies; reconciliation OK before and after; the one account holding money read 400 credit / 100 payable in both;
+step 4 by Live's vhost (Live#172); Tips on `chat`; VIP checkout open. openvibe.tips and openvibe.vip launched right after.
+
 ## The sequence
 
 0. **Check who is live**: `curl -s https://openvibe.live/api/streams` — the deploy in step 6 restarts
@@ -216,9 +220,11 @@ Live owner calls are made from the browser console on openvibe.live, signed in a
    over RTMP (a restart drops them), then `sudo systemctl restart openvibe-live.service`. The systemd socket keeps
    accepting while Live boots. Wait for `GET /api/ready`.
    `api('/admin/money')` → `authority: "billing"`, `billing.reachable: true`, `billing.rates.drift: []`.
-   Then let Tips post chat lines: set `TIPS_CHAT_ADAPTER=live-chat` in `/etc/openvibe/tips.env` and run
+   Then let Tips post chat lines: set `TIPS_CHAT_ADAPTER=chat` (OpenVibe.Chat's ingress; Tips has no `live-chat`
+   adapter since Live's chat moved to OpenVibe.Chat) in `/etc/openvibe/tips.env` and run
    `sudo systemctl restart openvibe-tips`. `curl -s http://127.0.0.1:4610/api/health` →
-   `"chat_adapter":"live-chat"`.
+   `"chat_adapter":"chat"`. Subscribe Live to Tips' settled tips for the goal and tip history:
+   `sudo node /opt/openvibe.live/current/scripts/subscribe-media-events.js --tips` (Live#179).
 7. **Unfreeze Billing**: `billing 'node scripts/freeze.js off'`. Within a minute the service processes the
    held deliveries in arrival order: a checkout Live never credited settles once; a delivery for an order
    Live already credited is **rejected** (`billing.intent_settled_in_live`) and listed for review — never
