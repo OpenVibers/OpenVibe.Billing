@@ -8,7 +8,7 @@
   "authoritative": true,
   "deployed": true,
   "deployment": "The money ledger since the cutover of 2026-10-17 04:50-04:56 UTC (BILLING_AUTHORITY=billing in billing.env and live.env): deployed with `sudo ovhost deploy billing`, /opt/openvibe.billing, unit openvibe-billing, API on 127.0.0.1:4600 (loopback only; /api/v1 is denied on the public host). Public at https://billing.openvibe.network: the staff console (Network SSO + PKCE, BILLING_STAFF_SUBJECTS = the owner only), the billing policy (/policy), a person's own Vibes (/api/me/vibes, CORS for OpenVibe's sites), /api/health, /api/ready, /release.json and /webhooks/*. PowerChat deliveries reach /webhooks/powerchat through openvibe.live's /api/powerchat/webhook (proxied by Live's vhost, OpenVibe.Live#172).",
-  "contracts": "openvibe-contracts v0.203.0 (openvibe-sdk v0.28.0, openvibe-shared v2.13.0)",
+  "contracts": "openvibe-contracts v0.209.0 (openvibe-sdk v0.28.0, openvibe-shared v2.13.0)",
   "sdk": "openvibe-sdk v0.60.0",
   "shared": "openvibe-shared v4.4.0",
   "notes": "Runtime, journal, adapters, import, reconciliation and the staff console (cashout approve/deny, review queue, reconciliation, freeze, audit log) are built, tested and deployed, with /metrics (loopback only), hourly scheduled reconciliation, EXTERNAL PowerChat receipts (billing.receipt.external, announced for OpenVibe.Tips), overflow guards and serializable settlement (PostgreSQL, ADR-035). The cutover (README runbook, docs/live-cutover.md) ran on 2026-10-17: final import 0 new rows, 0 holds, 0 anomalies; reconciliation OK before and after; Live's money tables are read-only behind a database tripwire. OpenVibe.Tips and OpenVibe.VIP launched right after (VIP checkout open). Still due: a small real PowerChat purchase settling end to end after the cutover. Live's payouts, refunds and plans have no tables of their own; where they map is docs/live-mapping.md.",
@@ -31,5 +31,5 @@
     "usage rating: a rate card -> the subject's promo allowance -> one usage transaction per reading, under hard budgets (BILLING_RATING_INTERVAL_MS off by default; nothing charged without a loaded card, key usage:<reading key>)",
     "promo allowance ledger"
   ],
-  "updated": "2026-10-20"
+  "updated": "2026-10-21"
 }
