@@ -10,7 +10,7 @@
   "deployment": "The money ledger since the cutover of 2026-10-17 04:50-04:56 UTC (BILLING_AUTHORITY=billing in billing.env and live.env): deployed with `sudo ovhost deploy billing`, /opt/openvibe.billing, unit openvibe-billing, API on 127.0.0.1:4600 (loopback only; /api/v1 is denied on the public host). Public at https://billing.openvibe.network: the staff console (Network SSO + PKCE, BILLING_STAFF_SUBJECTS = the owner only), the billing policy (/policy), a person's own Vibes (/api/me/vibes, CORS for OpenVibe's sites), /api/health, /api/ready, /release.json and /webhooks/*. PowerChat deliveries reach /webhooks/powerchat through openvibe.live's /api/powerchat/webhook (proxied by Live's vhost, OpenVibe.Live#172).",
   "contracts": "openvibe-contracts v0.209.0",
   "sdk": "openvibe-sdk v0.60.0",
-  "shared": "openvibe-shared v4.8.0",
+  "shared": "openvibe-shared v4.9.0",
   "notes": "Runtime, journal, adapters, import, reconciliation and the staff console (cashout approve/deny, review queue, reconciliation, freeze, audit log) are built, tested and deployed, with /metrics (loopback only), hourly scheduled reconciliation, EXTERNAL PowerChat receipts (billing.receipt.external, announced for OpenVibe.Tips), overflow guards and serializable settlement (PostgreSQL, ADR-035). The cutover (README runbook, docs/live-cutover.md) ran on 2026-10-17: final import 0 new rows, 0 holds, 0 anomalies; reconciliation OK before and after; Live's money tables are read-only behind a database tripwire. OpenVibe.Tips and OpenVibe.VIP launched right after (VIP checkout open). Still due: a small real PowerChat purchase settling end to end after the cutover. Live's payouts, refunds and plans have no tables of their own; where they map is docs/live-mapping.md.",
   "features": [
     "append-only double-entry journal in bits and cents, balanced per currency",
@@ -35,5 +35,5 @@
     "network-wide money counts with no person in them, for products' public stats (billing.stats.read)",
     "account export and deletion (ADR-033)"
   ],
-  "updated": "2026-10-22"
+  "updated": "2026-10-23"
 }
