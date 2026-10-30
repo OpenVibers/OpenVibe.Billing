@@ -8,8 +8,10 @@
 const assert = require('assert');
 const http = require('http');
 const crypto = require('crypto');
-const { createNetworkSender } = require('openvibe-sdk/account-data');
+const { createNetworkSender, uncovered } = require('openvibe-sdk/account-data');
 const { boot, fund, check, done } = require('./helpers/app');
+const { TABLES } = require('../server/account-data');
+const { testDb } = require('./helpers/db');
 
 async function startNetworkStub() {
     const calls = [];
@@ -32,6 +34,17 @@ const ulid = () => Array.from(crypto.randomBytes(26), (b) => CROCKFORD[b % 32]).
 const envelope = (id, type, payload) => ({ event_id: id, event_type: type, source: 'network', version: 1, timestamp: new Date().toISOString(), actor: { type: 'service', id: 'network' }, subject: { type: 'account', id: payload.subject }, visibility: 'internal', payload });
 
 (async () => {
+    await check('every table that names a person is covered or exempted with a reason', async () => {
+        const d = await testDb();
+        try {
+            const missing = await uncovered(d, {
+                tables: TABLES,
+                               exempt: {"account_data_events":"the ledger of requests itself: which export and deletion Billing applied"},
+            });
+            assert.deepStrictEqual(missing, [], `a table with a person column is neither covered nor exempted: ${missing.join(', ')}`);
+        } finally { await d.close(); }
+    });
+
     const stub = await startNetworkStub();
     const secret = crypto.randomBytes(32).toString('hex');
     const t = await boot({ env: { BILLING_EVENTS_SECRET: secret, BILLING_RENEWAL_GRACE_DAYS: '0' }, accountSend: createNetworkSender({ networkInternalUrl: stub.url, clientId: 'billing', clientSecret: 'shh' }) });
