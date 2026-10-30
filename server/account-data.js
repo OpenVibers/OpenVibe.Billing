@@ -31,6 +31,9 @@ const TABLES = [
     { table: 'subscription_tiers', subject: 'streamer', file: 'tier-prices.json', columns: ['tier', 'price_cents', 'status', 'created_at', 'updated_at'] },
     { table: 'provider_accounts', subject: 'subject', file: 'payment-accounts.json', columns: ['provider', 'username', 'source', 'created_at', 'updated_at'] },
     { table: 'staff_sessions', subject: 'subject', file: null },
+    // Import holds and usage budgets are part of the books: the import, its credits and the spend must still reconcile.
+    { table: 'import_holds', subject: 'owner', file: 'import-holds.json', columns: ['live_user_id', 'owner', 'reason', 'credit_bits', 'payable_bits', 'resolved_subject', 'first_seen_at', 'updated_at'], erase: { keep: ledger } },
+    { table: 'usage_budgets', subject: 'subject', file: 'usage-budgets.json', erase: { keep: ledger } },
 ];
 
 /** Accounts with their balances (a balance is the account's cached sum of ledger entries). */
