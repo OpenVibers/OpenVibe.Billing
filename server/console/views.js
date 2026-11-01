@@ -120,8 +120,11 @@ ${body}
 function signIn({ next, message }) {
     const href = `/auth/login${next && next !== '/' ? `?next=${encodeURIComponent(next)}` : ''}`;
     return layout({
-        title: 'Sign in', body: html`<h1>Billing staff console</h1>
-<div class="card"><p>${message || 'Sign in with your OpenVibe.Network account. Only network admins listed as Billing staff can use this console.'}</p>
+        // Whoever lands here first learns what Billing is and where their own money is; the staff sign-in comes after.
+        title: 'Sign in', body: html`<h1>OpenVibe.Billing</h1>
+<p>The network's one money ledger: every Vibes purchase, tip, membership, payout and refund on OpenVibe is recorded here, once.</p>
+<div class="card"><p><strong>Looking for your money?</strong> Your Vibes balance and history are in <a href="https://openvibe.network/my">your account</a>, and each site shows its own receipts (tips: <a href="https://openvibe.tips/receipts">openvibe.tips/receipts</a>).</p></div>
+<div class="card"><p><strong>Billing staff.</strong> ${message || 'Sign in with your OpenVibe.Network account. Only network admins listed as Billing staff can use this console.'}</p>
 <p><a href="${href}">Sign in with OpenVibe.Network</a></p></div>`,
     });
 }
