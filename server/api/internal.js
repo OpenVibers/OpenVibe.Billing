@@ -12,8 +12,12 @@ const { isFrozen } = require('../ops/common');
 const { actorOf } = require('./auth');
 const inference = require('../ops/credits');
 
+// One capability per operation, as openvibe-contracts v0.284.0 defines them (D9).
 const CAP = {
-    credit: 'billing.credit.hold',
+    create: 'billing.credit.hold.create',
+    extend: 'billing.credit.hold.extend',
+    settle: 'billing.credit.hold.settle',
+    release: 'billing.credit.hold.release',
     sandbox: 'billing.credit.sandbox.grant',
 };
 
@@ -23,22 +27,22 @@ function internalRouter({ ctx, auth }) {
         ? http.sendProblem(res, 503, 'billing.frozen', { detail: 'the economy is frozen', ctx: req.ov })
         : next());
 
-    r.post('/holds', auth.needs(CAP.credit), notFrozen, wrap(async (req, res) => {
+    r.post('/holds', auth.needs(CAP.create), notFrozen, wrap(async (req, res) => {
         const out = await inference.createHold(ctx, { ...req.body, actor: actorOf(req) });
         res.status(out.replay ? 200 : 201).json(out.hold);
     }));
 
-    r.post('/holds/:id/extend', auth.needs(CAP.credit), notFrozen, wrap(async (req, res) => {
+    r.post('/holds/:id/extend', auth.needs(CAP.extend), notFrozen, wrap(async (req, res) => {
         const out = await inference.extendHold(ctx, { hold_id: req.params.id, add_nano_usd: req.body.add_nano_usd, actor: actorOf(req) });
         res.json(out.hold);
     }));
 
-    r.post('/holds/:id/settle', auth.needs(CAP.credit), notFrozen, wrap(async (req, res) => {
+    r.post('/holds/:id/settle', auth.needs(CAP.settle), notFrozen, wrap(async (req, res) => {
         const out = await inference.settleHold(ctx, { hold_id: req.params.id, ...req.body, actor: actorOf(req) });
         res.status(out.replay ? 200 : 201).json(out.settlement);
     }));
 
-    r.post('/holds/:id/release', auth.needs(CAP.credit), notFrozen, wrap(async (req, res) => {
+    r.post('/holds/:id/release', auth.needs(CAP.release), notFrozen, wrap(async (req, res) => {
         const out = await inference.releaseHold(ctx, { hold_id: req.params.id, actor: actorOf(req) });
         res.json(out);
     }));

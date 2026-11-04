@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const { boot, check, done } = require('./helpers/app');
 const inference = require('../server/ops/credits');
 
-const INF = ['billing.credit.hold'];
+const INF = ['billing.credit.hold.create', 'billing.credit.hold.extend', 'billing.credit.hold.settle', 'billing.credit.hold.release'];
 const SBX = ['billing.credit.sandbox.grant'];
 const PRJ = 'prj_01JAB2C3D4E5F6G7H8J9K0MNPQ';
 
