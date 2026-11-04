@@ -21,7 +21,7 @@
  */
 const { post, getTxn, money, prefixedId, iso } = require('../ledger');
 const { enqueue } = require('../outbox');
-const { MAX_RECEIPT_CENTS, entry, fail, positiveInt, userSubject } = require('./common');
+const { MAX_RECEIPT_CENTS, entry, fail, positiveInt, userSubject, isFrozen } = require('./common');
 const { A_INF, NANO_PER_CENT } = require('./credits');
 const intents = require('./intents');
 const { summary } = require('./purchases');
@@ -53,6 +53,8 @@ function assertStartable(config) {
 async function startTopup(ctx, adapters, input) {
     const { config } = ctx;
     const t = assertStartable(config);
+    // The freeze stops money writes; opening a checkout that would take money is one, as on /api/v1/intents.
+    if (await isFrozen(ctx.db)) fail(503, 'billing.frozen', 'the economy is frozen: top-ups are refused');
     const subject = userSubject(input.subject, 'subject');
     const projectId = String(input.project_id || '');
     if (!PROJECT_RE.test(projectId)) fail(422, 'billing.invalid_input', 'project_id is a project id');

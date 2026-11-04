@@ -140,6 +140,18 @@ const nanoBalance = async (t, kind) => (await t.db.prepare(`SELECT COALESCE(SUM(
         assert.strictEqual(rec.totals.credit_topup_debt_nano_usd, '4000000000');
     });
 
+    await check('the economy freeze refuses a top-up before any intent or checkout', async () => {
+        await require('../server/ops/admin').setFreeze(t.ctx, { on: true, reason: 'top-up test' });
+        const before = t.stripe.calls.length;
+        const r = await start({ provider: 'stripe', project_id: PRJ, amount_cents: 1000 });
+        assert.strictEqual(r.status, 503, r.text);
+        assert.strictEqual(r.json.code, 'billing.frozen');
+        assert.strictEqual(t.stripe.calls.length, before);
+        const n = await t.db.prepare("SELECT COUNT(*)::int AS n FROM payment_intents WHERE kind = 'credits_topup'").get();
+        assert.strictEqual(n.n, 1, 'only the one settled top-up exists');
+        await require('../server/ops/admin').setFreeze(t.ctx, { on: false });
+    });
+
     await t.close();
 
     await check('unset amounts or fee refuses with 503 billing.topup_unconfigured', async () => {
