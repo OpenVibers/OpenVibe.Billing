@@ -10,6 +10,7 @@
  * Nothing here goes through chargeFor or the Vibes bits ledger.
  */
 const { ids } = require('openvibe-contracts');
+const { enqueue } = require('../outbox');
 const { post, balance, requireFunds, money, iso, prefixedId } = require('../ledger');
 const { A, entry, fail, userSubject, positiveInt, text, isFrozen } = require('./common');
 
@@ -20,6 +21,10 @@ const TERMINAL_STATUSES = ['settled', 'released', 'expired'];
 
 const A_INF = {
     credit: (subject, projectId) => ({ kind: 'usd_credit', owner: `${subject}:${projectId}`, currency: CURRENCY }),
+    // A person's sandbox credit for one project (D10): its own account, spent only by a hold marked sandbox, so a
+    // grant never becomes spending power on real supply.
+    sandboxCredit: (subject, projectId) => ({ kind: 'usd_credit_sandbox', owner: `${subject}:${projectId}`, currency: CURRENCY }),
+    // The issuer the grants come from and sandbox charges return to (owner null).
     sandbox: () => ({ kind: 'usd_credit_sandbox', owner: null, currency: CURRENCY }),
     revenue: () => ({ kind: 'platform_revenue', owner: null, currency: CURRENCY }),
 };
@@ -64,15 +69,21 @@ async function assertNotFrozen(db) {
     if (await isFrozen(db)) fail(503, 'billing.frozen', 'the economy is frozen: inference writes are refused');
 }
 
-/** The account row id for a (subject, project_id), selected FOR UPDATE. Creates the account and balance row if absent. */
-async function lockAccount(db, subject, projectId, nowIso) {
+const KINDS = new Set(['usd_credit', 'usd_credit_sandbox']);
+
+/**
+ * The account row id for a (subject, project_id), selected FOR UPDATE. Creates the account and balance row if absent.
+ * `kind` is usd_credit (real Credits) or usd_credit_sandbox (that person's sandbox credit for the project).
+ */
+async function lockAccount(db, subject, projectId, nowIso, kind = 'usd_credit') {
+    if (!KINDS.has(kind)) throw new Error(`lockAccount: unknown kind ${kind}`);
     const owner = `${subject}:${projectId}`;
-    let row = await db.prepare(`SELECT a.id FROM accounts a WHERE a.kind = 'usd_credit' AND a.owner_subject = ? AND a.currency = 'nano-usd'`).get(owner);
+    let row = await db.prepare(`SELECT a.id FROM accounts a WHERE a.kind = ? AND a.owner_subject = ? AND a.currency = 'nano-usd'`).get(kind, owner);
     if (!row) {
         // Two first holds at once: one inserts, the other finds it (the account's unique key), never a 500.
-        await db.prepare(`INSERT INTO accounts (kind, owner_subject, currency, created_at) VALUES ('usd_credit', ?, 'nano-usd', ?)
-            ON CONFLICT DO NOTHING`).run(owner, nowIso);
-        row = await db.prepare(`SELECT a.id FROM accounts a WHERE a.kind = 'usd_credit' AND a.owner_subject = ? AND a.currency = 'nano-usd'`).get(owner);
+        await db.prepare(`INSERT INTO accounts (kind, owner_subject, currency, created_at) VALUES (?, ?, 'nano-usd', ?)
+            ON CONFLICT DO NOTHING`).run(kind, owner, nowIso);
+        row = await db.prepare(`SELECT a.id FROM accounts a WHERE a.kind = ? AND a.owner_subject = ? AND a.currency = 'nano-usd'`).get(kind, owner);
         await db.prepare('INSERT INTO account_balances (account_id, balance, updated_at) VALUES (?, 0, ?) ON CONFLICT DO NOTHING').run(row.id, nowIso);
     }
     // Re-select FOR UPDATE to serialize concurrent holds on the same account.
@@ -152,6 +163,9 @@ async function createHold(ctx, input) {
     const service = String(input.service == null ? 'ai' : input.service);
     if (!/^[a-z][a-z0-9-]{0,39}$/.test(service)) fail(422, 'billing.invalid_input', 'service is a lowercase service name (ai, run, ...)');
     const leaseSeconds = Math.max(1, Math.min(config.credits.leaseSeconds || 300, 86400));
+    // D10: a sandbox caller's hold draws on its sandbox credit only; a real hold never sees sandbox credit.
+    const sandbox = input.sandbox === true;
+    if (sandbox) assertSandbox(config);
 
     return await money(db, async () => {
         const now = ctx.now();
@@ -161,7 +175,7 @@ async function createHold(ctx, input) {
             if (existing.request_fingerprint !== fingerprint) fail(409, 'billing.hold_key_reused', 'the same idempotency_key with a different fingerprint is already used');
             return { hold: presentHold(existing, await available(db, existing.account_id)), replay: true };
         }
-        const accountId = await lockAccount(db, subject, projectId, nowIso);
+        const accountId = await lockAccount(db, subject, projectId, nowIso, sandbox ? 'usd_credit_sandbox' : 'usd_credit');
         // The same key at the same moment: the account lock serializes them, so the second sees the first's hold here.
         const raced = await db.prepare('SELECT * FROM credit_holds WHERE idempotency_key = ?').get(idempotencyKey);
         if (raced) {
@@ -169,7 +183,7 @@ async function createHold(ctx, input) {
             return { hold: presentHold(raced, await available(db, raced.account_id)), replay: true };
         }
         const avail = await available(db, accountId);
-        if (avail < maxNano) fail(402, 'billing.insufficient_funds', `insufficient inference credit: ${avail} < ${maxNano} nano-USD`, { available: String(avail), required: String(maxNano) });
+        if (avail < maxNano) fail(402, 'billing.insufficient_funds', `insufficient ${sandbox ? 'sandbox ' : ''}credit: ${avail} < ${maxNano} nano-USD`, { available: String(avail), required: String(maxNano) });
 
         const holdId = prefixedId('hld', now);
         const leaseExpires = iso(now + leaseSeconds * 1000);
@@ -290,11 +304,13 @@ async function settleHold(ctx, input) {
         }
         const released = collected >= held ? 0n : held - collected;
 
-        const journalId = prefixedId('txn', now);
+        const sandbox = (await kindOf(db, hold.account_id)) === 'usd_credit_sandbox';
         const { txn } = await post(ctx, {
             type: 'credit', idempotencyKey: `credit:settle:${idempotencyKey}`, actor: input.actor || ACTOR,
-            fromSubject: hold.subject, toSubject: null,
-            entries: [entry(A_INF.credit(hold.subject, hold.project_id), -collected), entry(A_INF.revenue(), collected)],
+            fromSubject: hold.subject, toSubject: null, ...(sandbox ? { test: true } : {}),
+            entries: sandbox
+                ? [entry(A_INF.sandboxCredit(hold.subject, hold.project_id), -collected), entry(A_INF.sandbox(), collected)]
+                : [entry(A_INF.credit(hold.subject, hold.project_id), -collected), entry(A_INF.revenue(), collected)],
             metadata: {
                 credit: 'settle', hold_id: holdId, project_id: hold.project_id, credential_id: hold.credential_id,
                 usage, retail, byok, supply_cost_nano_usd: String(supplyCost), attempts, released_nano_usd: String(released),
@@ -308,6 +324,20 @@ async function settleHold(ctx, input) {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?::jsonb, ?::timestamptz) RETURNING *`).get(
             prefixedId('stl', now), holdId, idempotencyKey, hold.subject, hold.project_id, hold.account_id,
             collected, released, shortfall, txn.id, JSON.stringify(usage), JSON.stringify(retail), supplyCost, byok, JSON.stringify(attempts), nowIso);
+        // billing.credit.settled@1, in the same transaction: for aggregates only (no subject, project or account).
+        const answered = attempts.filter((a) => a && !a.error_code).pop() || attempts[attempts.length - 1] || null;
+        await enqueue(ctx, {
+            event_type: 'billing.credit.settled', subject: { type: 'credit-settlement', id: row.id },
+            payload: {
+                settlement_id: row.id, hold_id: holdId, service: hold.service || 'ai', settled_at: nowIso,
+                deployment_id: answered && answered.deployment_id ? String(answered.deployment_id) : null,
+                provider_access: answered && answered.provider_access ? answered.provider_access : null,
+                rate_version: String(retail.version),
+                usage: { input_tokens: usage.input_tokens, cached_read_tokens: usage.cached_read_tokens, cache_write_tokens: usage.cache_write_tokens, output_tokens: usage.output_tokens },
+                charge_nano_usd: String(collected), supply_cost_nano_usd: String(supplyCost), shortfall_nano_usd: String(shortfall),
+                released_nano_usd: String(released), byok, sandbox,
+            },
+        });
         return { settlement: presentSettlement(row), replay: false };
     });
 }
@@ -371,17 +401,17 @@ async function sandboxGrant(ctx, input) {
     return await money(db, async () => {
         const now = ctx.now();
         const nowIso = iso(now);
-        const accountId = await lockAccount(db, subject, projectId, nowIso);
+        const accountId = await lockAccount(db, subject, projectId, nowIso, 'usd_credit_sandbox');
         const grantId = prefixedId('igr', now);
         const { txn } = await post(ctx, {
             type: 'credit', idempotencyKey: `credit:sandbox:${grantId}`, actor: input.actor || ACTOR, toSubject: subject,
             test: true,
-            entries: [entry(A_INF.sandbox(), -amount), entry(A_INF.credit(subject, projectId), amount)],
+            entries: [entry(A_INF.sandbox(), -amount), entry(A_INF.sandboxCredit(subject, projectId), amount)],
             metadata: { credit: 'sandbox_grant', grant_id: grantId, project_id: projectId, reason, amount_nano_usd: String(amount) },
         });
         await db.prepare(`INSERT INTO credit_sandbox_grants (id, subject, project_id, account_id, amount_nano_usd, journal_id, reason, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?::timestamptz)`).run(grantId, subject, projectId, accountId, amount, txn.id, reason, nowIso);
-        return { grant_id: grantId, amount_nano_usd: String(amount), balance_nano_usd: String(await balance(db, A_INF.credit(subject, projectId))) };
+        return { grant_id: grantId, amount_nano_usd: String(amount), balance_nano_usd: String(await balance(db, A_INF.sandboxCredit(subject, projectId))) };
     });
 }
 
@@ -395,7 +425,16 @@ async function statement(ctx, subject, projectId, { limit = 50 } = {}) {
     const owner = `${subject}:${projectId}`;
     const acct = await db.prepare(`SELECT a.id, b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id
         WHERE a.kind = 'usd_credit' AND a.owner_subject = ? AND a.currency = 'nano-usd'`).get(owner);
-    if (!acct) return { project_id: projectId, balance_nano_usd: '0', held_nano_usd: '0', available_nano_usd: '0', charges: [] };
+    // Sandbox credit is shown apart (D10): it never pays for a real request, so it is never part of the balance.
+    const box = await db.prepare(`SELECT a.id, b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id
+        WHERE a.kind = 'usd_credit_sandbox' AND a.owner_subject = ? AND a.currency = 'nano-usd'`).get(owner);
+    let sandbox = null;
+    if (box) {
+        const boxHeld = await heldOnAccount(db, box.id);
+        const boxBal = BigInt(String(box.balance));
+        sandbox = { balance_nano_usd: String(boxBal), held_nano_usd: String(boxHeld), available_nano_usd: String(boxBal - boxHeld < 0n ? 0n : boxBal - boxHeld) };
+    }
+    if (!acct) return { project_id: projectId, balance_nano_usd: '0', held_nano_usd: '0', available_nano_usd: '0', sandbox, charges: [] };
     const held = await heldOnAccount(db, acct.id);
     const rows = await db.prepare(`SELECT s.*, h.service FROM credit_settlements s JOIN credit_holds h ON h.id = s.hold_id
         WHERE s.account_id = ? ORDER BY s.created_at DESC, s.id DESC LIMIT ?`).all(acct.id, Math.max(1, Math.min(200, limit)));
@@ -403,6 +442,7 @@ async function statement(ctx, subject, projectId, { limit = 50 } = {}) {
     return {
         project_id: projectId,
         balance_nano_usd: String(bal), held_nano_usd: String(held), available_nano_usd: String(bal - held < 0n ? 0n : bal - held),
+        sandbox,
         charges: rows.map((r) => {
             const attempts = Array.isArray(r.attempts) ? r.attempts : [];
             const last = attempts.length ? attempts[attempts.length - 1] : null;
@@ -421,6 +461,12 @@ function modelOfAttempt(a) {
     const i = a.deployment_id.indexOf(':');
     const model = i >= 0 ? a.deployment_id.slice(i + 1) : '';
     return model ? model.slice(0, 160) : null;
+}
+
+/** An account's kind (usd_credit or usd_credit_sandbox for a hold's account). */
+async function kindOf(db, accountId) {
+    const row = await db.prepare('SELECT kind FROM accounts WHERE id = ?').get(accountId);
+    return row ? row.kind : null;
 }
 
 /** Read a hold by id. */
