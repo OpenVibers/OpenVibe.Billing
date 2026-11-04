@@ -167,6 +167,8 @@ function loadConfig(env = process.env) {
             enabled: env.BILLING_JOBS !== 'off',
             sweepIntervalMs: int(env.BILLING_SWEEP_INTERVAL_MS, 60 * 60 * 1000),
             webhookRetryMs: int(env.BILLING_WEBHOOK_RETRY_MS, 60 * 1000),
+            // Vibes Pay app webhooks (D12): due deliveries from vibes_webhook_outbox, retried with backoff.
+            vibesWebhookIntervalMs: Math.max(0, int(env.BILLING_VIBES_WEBHOOK_INTERVAL_MS, 5000)),
             // Scheduled reconciliation (0 turns it off): stored like any other run; passing scheduled
             // runs older than reconcileKeepDays are pruned, failed ones are kept.
             reconcileIntervalMs: int(env.BILLING_RECONCILE_INTERVAL_MS, 60 * 60 * 1000),
@@ -205,6 +207,13 @@ function loadConfig(env = process.env) {
             maxChargeVibes: Math.max(0, int(env.BILLING_VIBES_MAX_CHARGE, 0)),
             dailyAppSpendVibesPerPerson: Math.max(0, int(env.BILLING_VIBES_DAILY_APP_SPEND, 0)),
             fromBalance: bool(env.BILLING_VIBES_FROM_BALANCE),
+            // D12 step 4: the pay sheet lives on openvibe.network; a charge's expires_at is this far after creation.
+            payBaseUrl: trim(env.BILLING_VIBES_PAY_BASE_URL || 'https://openvibe.network'),
+            chargeTtlSeconds: Math.max(1, Math.min(86_400, int(env.BILLING_VIBES_CHARGE_TTL_SECONDS, 1800))),
+            // Test grants and sandbox charges (like BILLING_CREDITS_SANDBOX): off by default, worth nothing.
+            sandbox: bool(env.BILLING_VIBES_SANDBOX),
+            // Development only: let a webhook point at a private address. Production always applies the egress guard.
+            allowPrivateWebhooks: bool(env.BILLING_VIBES_ALLOW_PRIVATE_WEBHOOKS),
         },
 
         // Staff console (server/console): Network SSO (authorization code + PKCE S256, OAuth

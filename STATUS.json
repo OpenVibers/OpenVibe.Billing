@@ -39,7 +39,8 @@
     "owner settings: billing.vibes (Vibes Pay, the largest charge, the daily app spend per person and from_balance)",
     "network-wide money counts with no person in them, for products' public stats (billing.stats.read)",
     "account export and deletion (ADR-033)",
-    "owner settings: billing.credits (Balance, sandbox, top-up switch/amounts/fee and the hold lease) and billing.vibes (Vibes Pay limits, Get Vibes with Balance) through openvibe-shared/config, with env pins and live changes (D11/D12)"
+    "owner settings: billing.credits (Balance, sandbox, top-up switch/amounts/fee and the hold lease) and billing.vibes (Vibes Pay limits, Get Vibes with Balance) through openvibe-shared/config, with env pins and live changes (D11/D12)",
+    "Vibes Pay (D12): app-token charges with the app's reference as the idempotency key, the person's pay-sheet routes, the project's Vibes wallet (project_payable) with the project owner's cashout through the existing path, HMAC-SHA256 webhooks from vibes_webhook_outbox retried with backoff, sandbox Vibes gated by BILLING_VIBES_SANDBOX, and the billing.vibes limits and frozen-economy checks"
   ],
   "updated": "2026-11-04"
 }

@@ -126,4 +126,59 @@ function createProjects(config, { fetchImpl = globalThis.fetch } = {}) {
     return { administered, member };
 }
 
-module.exports = { createKeyProvider, createIdentity, createProjects };
+/**
+ * Network's app registry: the name (and icon, when Network carries one) of a developer app, for the pay sheet.
+ * One read of the app's project (GET /internal/projects/:project_id, network.project.read). Best effort: a
+ * Network hiccup must not hide a charge, and Network's own pay sheet fills the name from dev_apps anyway.
+ */
+function createApps(config, { fetchImpl = globalThis.fetch, log = console } = {}) {
+    const base = config.network.internalUrl;
+    const tokens = serviceAuth.createTokenClient({
+        tokenUrl: `${base}/oauth/token`,
+        clientId: config.oauth.clientId,
+        clientSecret: config.oauth.clientSecret,
+        audience: 'openvibe.network',
+        scope: 'network.project.read',
+        fetchImpl,
+    });
+    const cache = new Map();
+    const TTL_MS = 60 * 1000;
+    let warned = false;
+
+    async function get(path, { retried = false } = {}) {
+        const res = await fetchImpl(`${base}${path}`, {
+            method: 'GET',
+            headers: { Accept: 'application/json', ...(await tokens.authHeaders()) },
+            signal: AbortSignal.timeout(10000),
+        });
+        if (res.status === 401 && !retried) { tokens.invalidate(); return await get(path, { retried: true }); }
+        const data = await res.json().catch(() => null);
+        if (!res.ok || data == null) throw new Error(`network app read ${res.status}`);
+        return data;
+    }
+
+    /** { id, name, icon } for one app; name/icon are null when Network does not know it (or the read failed). */
+    async function app(projectId, appId) {
+        const key = `${projectId}:${appId}`;
+        const hit = cache.get(key);
+        if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
+        let value = { id: appId, name: null, icon: null };
+        try {
+            const out = await get(`/internal/projects/${encodeURIComponent(projectId)}`);
+            const found = (out.apps || []).find((a) => a && a.id === appId);
+            if (found) value = { id: appId, name: found.name || null, icon: found.icon || found.icon_url || null };
+        } catch (err) {
+            if (!warned) {
+                warned = true;
+                // The error names neither a person nor a secret; it is a service permission or a Network outage.
+                if (log && log.warn) log.warn(`[Billing] app registry read failed (${err && err.message ? err.message : 'network'}); the pay sheet falls back to the app id`);
+            }
+        }
+        cache.set(key, { at: Date.now(), value });
+        return value;
+    }
+
+    return { app };
+}
+
+module.exports = { createKeyProvider, createIdentity, createProjects, createApps };

@@ -65,7 +65,7 @@ function labelFor(t, { settlement, projectName, creatorName }) {
     if (t.type === 'donation') {
         return { label: creatorName ? `Tipped @${creatorName}` : 'Tipped a creator', detail: '' };
     }
-    if (t.type === 'refund') return { label: 'Refund', detail: 'Returned' };
+    if (t.type === 'refund' || t.type === 'vibes_refund') return { label: 'Refund', detail: 'Returned' };
     if (t.type === 'cashout_request' || t.type === 'cashout_paid') return { label: 'Cash out', detail: 'Payable' };
     return { label: titleCase(t.type) || 'Activity', detail: '' };
 }

@@ -30,6 +30,8 @@ async function startNetwork() {
     const grants = [];
     const memberships = [];      // { project_id, subject, role, archived, name }
     const publicNames = new Map(); // subject id -> username (the public name only)
+    const projects = [];         // { id, name, owner, archived_at }
+    const apps = [];             // { id, project_id, name, environment, icon }
     let issuer = 'http://network.test';
     const state = { down: false };
 
@@ -67,6 +69,31 @@ async function startNetwork() {
         else memberships.push({ project_id: projectId, subject, role, archived, name });
         return memberships[memberships.length - 1];
     }
+    /** A developer project as GET /internal/projects/:id answers it (name, owner, archived_at). */
+    function addProject({ id, name = 'A project', owner = null, archived_at = null }) {
+        const existing = projects.find((p) => p.id === id);
+        const row = { id, name, owner, archived_at };
+        if (existing) Object.assign(existing, row); else projects.push(row);
+        return row;
+    }
+    /** A dev_apps row as the project view carries it. */
+    function addApp({ id, projectId, name = 'An app', environment = 'production', icon = null }) {
+        const existing = apps.find((a) => a.id === id);
+        const row = { id, project_id: projectId, name, environment, icon };
+        if (existing) Object.assign(existing, row); else apps.push(row);
+        return row;
+    }
+    /** A Network app token: sub app:app_<ULID>, project_id, env and approved grants. */
+    function signApp({ appId, projectId, env = 'production', cap = [], onBehalfOf = null, expSec = 300 }) {
+        const now = Math.floor(Date.now() / 1000);
+        const claims = {
+            iss: issuer, sub: `app:${appId}`, actor_type: 'app', aud: ['openvibe.billing'], cap,
+            ns: [projectId, `app.${projectId}.*`], project_id: projectId, env,
+            ...(onBehalfOf ? { on_behalf_of: onBehalfOf } : {}),
+            iat: now, exp: now + expSec, jti: crypto.randomBytes(8).toString('hex'),
+        };
+        return serviceAuth.signServiceToken(claims, privatePem);
+    }
 
     const server = http.createServer(async (req, res) => {
         const raw = await readBody(req);
@@ -92,14 +119,27 @@ async function startNetwork() {
             const auth = String(req.headers.authorization || '');
             const v = serviceAuth.verifyServiceToken(auth.slice(7), { publicKey: publicPem, issuer, audience: 'openvibe.network' });
             if (!v.ok) return send(res, 401, { code: v.code });
-            if (!(v.claims.cap || []).includes('network.project.member.read')) return send(res, 403, { code: 'capability.denied' });
+            const caps = v.claims.cap || [];
+            if (!caps.includes('network.project.member.read') && !caps.includes('network.project.read')) return send(res, 403, { code: 'capability.denied' });
             const u = new URL(req.url, issuer);
             if (u.pathname === '/internal/projects') {
+                if (!caps.includes('network.project.member.read')) return send(res, 403, { code: 'capability.denied' });
                 const subject = u.searchParams.get('subject');
                 return send(res, 200, { projects: memberships.filter((m) => m.subject === subject).map((m) => ({ ...m })) });
             }
+            const view = u.pathname.match(/^\/internal\/projects\/([^/]+)$/);
+            if (view) {
+                if (!(v.claims.cap || []).includes('network.project.read')) return send(res, 403, { code: 'capability.denied' });
+                const project = projects.find((p) => p.id === decodeURIComponent(view[1]));
+                if (!project) return send(res, 404, { code: 'project.not_found' });
+                return send(res, 200, {
+                    project: { id: project.id, name: project.name, owner: project.owner ? { type: 'user', id: project.owner } : null, archived_at: project.archived_at },
+                    apps: apps.filter((a) => a.project_id === project.id).map((a) => ({ id: a.id, name: a.name, environment: a.environment, ...(a.icon ? { icon: a.icon } : {}) })),
+                });
+            }
             const m = u.pathname.match(/^\/internal\/projects\/([^/]+)\/members\/([^/]+)$/);
             if (!m) return send(res, 404, { error: 'not found' });
+            if (!caps.includes('network.project.member.read')) return send(res, 403, { code: 'capability.denied' });
             const found = memberships.find((x) => x.project_id === decodeURIComponent(m[1]) && x.subject === decodeURIComponent(m[2]));
             if (!found) return send(res, 404, { code: 'project.member_not_found' });
             return send(res, 200, { project_id: found.project_id, subject: found.subject, role: found.role, archived: found.archived, added_at: null });
@@ -133,7 +173,7 @@ async function startNetwork() {
     issuer = url;
     // A person's Network session token, as the browser holds it (the shared navbar sends it).
     const signUser = (u) => userToken({ role: 'user', username: 'someone', nowMs: Date.now(), ...u });
-    return { url, publicPem, signService, signUser, addUser, addMembership, memberships, publicNames, authorize, revoked, legacy, resolveCalls, grants, state, close: () => new Promise((r) => server.close(r)) };
+    return { url, publicPem, signService, signApp, signUser, addUser, addMembership, addProject, addApp, memberships, projects, apps, publicNames, authorize, revoked, legacy, resolveCalls, grants, state, close: () => new Promise((r) => server.close(r)) };
 }
 
 async function startStripe() {

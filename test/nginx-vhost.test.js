@@ -35,6 +35,12 @@ assert.ok(tls.indexOf(fromBalance[0]) < tls.indexOf('location ^~ /api/ { return 
 const activity = tls.match(/location = \/api\/me\/activity \{([^}]*)\}/);
 assert.ok(activity && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(activity[1]) && /limit_req /.test(activity[1]), 'a rate-limited location for /api/me/activity');
 assert.ok(tls.indexOf(activity[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
+const charge = tls.match(/location ~ \^\/api\/me\/vibes\/charges\/vch_\[0-9A-HJKMNP-TV-Z\]\{26\}\$ \{([^}]*)\}/);
+assert.ok(charge && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(charge[1]) && /limit_req /.test(charge[1]), 'a rate-limited location for GET /api/me/vibes/charges/:id');
+assert.ok(tls.indexOf(charge[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
+const chargeAct = tls.match(/location ~ \^\/api\/me\/vibes\/charges\/vch_\[0-9A-HJKMNP-TV-Z\]\{26\}\/\(pay\|cancel\)\$ \{([^}]*)\}/);
+assert.ok(chargeAct && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(chargeAct[1]) && /limit_req /.test(chargeAct[1]), 'a rate-limited location for POST pay/cancel');
+assert.ok(tls.indexOf(chargeAct[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
 const credits = tls.match(/location = \/api\/me\/credits \{([^}]*)\}/);
 assert.ok(credits && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(credits[1]) && /limit_req /.test(credits[1]), 'a rate-limited location for /api/me/credits');
 assert.ok(tls.indexOf(credits[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');

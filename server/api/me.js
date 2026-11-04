@@ -29,6 +29,7 @@ const { balance } = require('../ledger');
 const { A } = require('../ops/common');
 const topups = require('../ops/topups');
 const balances = require('../ops/balance');
+const vibesPay = require('../ops/vibes');
 const activity = require('../ops/activity');
 
 const HOST_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
@@ -144,6 +145,38 @@ function meRouter({ ctx, config, keys, limits, adapters }) {
                 return res.status(out.replay ? 200 : 201).json(out);
             } catch (e) {
                 return failure(req, res, e, 'the purchase is unavailable');
+            }
+        });
+
+    // ── Vibes Pay (D12): the pay sheet's charge ───────────────
+    // What the sheet shows: the app (name and icon from Network's registry, the id when it cannot be read), the item,
+    // the price, the person's Vibes and whether they can pay now. Paying is atomic and once; a double pay is a replay
+    // for the same person and 409 for anyone else. Cancelling a pending charge moves no money.
+    r.get('/vibes/charges/:id', person, limits.selfRead, async (req, res) => {
+        try {
+            return res.json(await vibesPay.personCharge(ctx, req.person.subject, req.params.id));
+        } catch (e) {
+            return failure(req, res, e, 'the payment link is unavailable');
+        }
+    });
+
+    r.post('/vibes/charges/:id/pay', express.json({ limit: '16kb' }), person,
+        limits.budget('billing.vibes.pay', (req) => req.person && req.person.subject), async (req, res) => {
+            try {
+                const out = await vibesPay.payCharge(ctx, req.person.subject, req.params.id, req.body || {});
+                return res.status(200).json({ charge: out.charge, vibes_credit: out.vibes_credit, replay: out.replay });
+            } catch (e) {
+                return failure(req, res, e, 'the payment could not be completed');
+            }
+        });
+
+    r.post('/vibes/charges/:id/cancel', express.json({ limit: '16kb' }), person,
+        limits.budget('billing.vibes.cancel', (req) => req.person && req.person.subject), async (req, res) => {
+            try {
+                const out = await vibesPay.cancelCharge(ctx, req.person.subject, req.params.id);
+                return res.status(200).json({ charge: out.charge, replay: out.replay, ...(out.expired ? { expired: true } : {}) });
+            } catch (e) {
+                return failure(req, res, e, 'the payment could not be cancelled');
             }
         });
 

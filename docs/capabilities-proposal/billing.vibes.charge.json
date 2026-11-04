@@ -1,0 +1,27 @@
+{
+  "id": "billing.vibes.charge",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "public",
+  "sensitive": true,
+  "description": "Sell something for Vibes as a developer app (Vibes Pay, D12). POST /api/v1/vibes/charges creates a charge from the app's token (billing.vibes-charge-create-request@1; idempotent on the app's reference) and answers billing.vibes-charge@1 with a pay_url; GET /api/v1/vibes/charges/:id reads it; POST /api/v1/vibes/charges/:id/refund returns the Vibes from the project's Vibes wallet to the person (billing.vibes-charge-refund-request@1). The person pays on OpenVibe's pay sheet; Billing moves the Vibes atomically and once to the app's project Vibes wallet, then POSTs a signed webhook (HMAC-SHA256 with the app's webhook secret, retried with backoff) whose body is billing.vibes.charge.paid@1 or billing.vibes.charge.refunded@1 — no person id or email, only an opaque payer_ref stable per app. A sandbox app charges sandbox Vibes only (test grants, worth nothing). The owner's billing.vibes settings cap the amount, the daily per-person spend and whether Vibes Pay is on.",
+  "permissions": [
+    "billing:vibes:charge"
+  ],
+  "resourceConstraints": [
+    "project"
+  ],
+  "quotaClass": "billing-vibes-write",
+  "events": [
+    "billing.vibes.charge.paid",
+    "billing.vibes.charge.refunded"
+  ],
+  "implementedBy": [
+    "POST /api/v1/vibes/charges",
+    "GET /api/v1/vibes/charges/:id",
+    "POST /api/v1/vibes/charges/:id/refund"
+  ],
+  "inputSchema": "billing.vibes-charge-create-request@1",
+  "outputSchema": "billing.vibes-charge@1"
+}

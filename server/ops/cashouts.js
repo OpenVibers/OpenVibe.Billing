@@ -4,6 +4,8 @@
  * Cashouts (MONEY leaving the platform) and recycling (MONEY → CREDIT, ADR-012 rule 4).
  *
  *   request()  creator_payable → payouts_pending; escrow_until = now + escrowDays
+ *              with project_id: project_payable:<prj> → payouts_pending:<the project's owner> (D12 Vibes Pay). The
+ *              owner role is checked with Network's membership read; deny returns to the owner's creator_payable.
  *   approve()  payouts_pending → out through the payout provider; needs a payout reference from
  *              the provider and is refused while the escrow period runs (rule 10)
  *   deny()     reverses the request: payouts_pending → creator_payable
@@ -22,7 +24,7 @@ async function find(db, id) { return parse(await db.prepare('SELECT * FROM casho
 function present(c) {
     if (!c) return null;
     return {
-        id: c.id, subject: { type: 'user', id: c.subject }, amount_bits: c.amount_bits, value_cents: c.value_cents,
+        id: c.id, subject: { type: 'user', id: c.subject }, project_id: c.project_id || null, amount_bits: c.amount_bits, value_cents: c.value_cents,
         status: c.status, payout_method: c.payout_method, escrow_until: c.escrow_until,
         request_txn: c.request_txn, settle_txn: c.settle_txn || null,
         payout_provider: c.payout_provider || null, payout_reference: c.payout_reference || null,
@@ -56,23 +58,42 @@ async function request(ctx, input) {
     const amount = positiveInt(input.amount, 'amount', rates.maxBits);
     if (amount < rates.minCashoutBits) fail(422, 'billing.amount_too_small', `the minimum cashout is ${rates.minCashoutBits} bits`);
     const method = payoutMethod(input.payout_method);
+    const projectId = input.projectId == null || input.projectId === '' ? null : String(input.projectId);
+    if (projectId && !/^prj_[0-9A-HJKMNP-TV-Z]{26}$/.test(projectId)) fail(422, 'billing.invalid_input', 'project_id is a project id');
+    if (projectId) {
+        // D12: only the project's owner cashes out its Vibes, under the same escrow and payout rules as a creator.
+        const m = await ctx.projects.member(projectId, input.subject);
+        if (!m || m.archived || m.role !== 'owner') fail(403, 'billing.not_project_owner', "only the project's owner may cash out its Vibes");
+    }
+    const source = projectId ? A.projectPayable(projectId) : A.payable(input.subject);
     return await money(db, async () => {
-        const existing = await db.prepare('SELECT id FROM transactions WHERE idempotency_key = ?').get(input.idempotencyKey);
-        if (existing) return { cashout: parse(await db.prepare('SELECT * FROM cashouts WHERE request_txn = ?').get(existing.id)), replay: true };
-        await requireFunds(db, A.payable(input.subject), amount, 'creator payable (only money given to you can be cashed out)');
+        const existing = await db.prepare('SELECT * FROM transactions WHERE idempotency_key = ?').get(input.idempotencyKey);
+        if (existing) {
+            const meta = JSON.parse(existing.metadata || '{}');
+            if (existing.from_subject !== input.subject || Number(meta.amount_bits) !== amount || (meta.project_id || null) !== projectId) {
+                fail(409, 'billing.idempotency_key_reused', 'the same idempotency_key was used for another cashout');
+            }
+            return { cashout: parse(await db.prepare('SELECT * FROM cashouts WHERE request_txn = ?').get(existing.id)), replay: true };
+        }
+        await requireFunds(db, source, amount, projectId ? 'the project\'s Vibes' : 'creator payable (only money given to you can be cashed out)');
         const ms = ctx.now();
         const id = prefixedId('co', ms);
         const escrowUntil = iso(ms + rates.escrowDays * 86_400_000);
+        const entries = projectId
+            // The project's Vibes become the owner's payable in the same request, then the normal cashout escrow
+            // applies. A deny returns them to the owner's creator_payable (payouts are for the owner).
+            ? [entry(source, -amount), entry(A.payable(input.subject), amount), entry(A.payable(input.subject), -amount), entry(A.pending(input.subject), amount)]
+            : [entry(source, -amount), entry(A.pending(input.subject), amount)];
         const { txn } = await post(ctx, {
             type: 'cashout_request',
             idempotencyKey: input.idempotencyKey,
-            entries: [entry(A.payable(input.subject), -amount), entry(A.pending(input.subject), amount)],
+            entries,
             actor: input.actor,
             fromSubject: input.subject,
-            metadata: { cashout_id: id, amount_bits: amount, value_cents: rates.valueCents(amount), escrow_until: escrowUntil, escrow_days: rates.escrowDays, rates: rates.snapshot() },
+            metadata: { cashout_id: id, amount_bits: amount, value_cents: rates.valueCents(amount), escrow_until: escrowUntil, escrow_days: rates.escrowDays, rates: rates.snapshot(), ...(projectId ? { project_id: projectId } : {}) },
         });
-        await db.prepare(`INSERT INTO cashouts (id, subject, amount_bits, value_cents, status, payout_method, escrow_until, request_txn, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'requested', ?, ?, ?, ?, ?)`).run(id, input.subject, amount, rates.valueCents(amount), JSON.stringify(method), escrowUntil, txn.id, iso(ms), iso(ms));
+        await db.prepare(`INSERT INTO cashouts (id, subject, project_id, amount_bits, value_cents, status, payout_method, escrow_until, request_txn, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'requested', ?, ?, ?, ?, ?)`).run(id, input.subject, projectId, amount, rates.valueCents(amount), JSON.stringify(method), escrowUntil, txn.id, iso(ms), iso(ms));
         const cashout = await find(db, id);
         await enqueue(ctx, { event_type: 'billing.cashout.requested', subject: { type: 'cashout', id }, payload: { cashout: eventView(cashout), transaction_id: txn.id } });
         return { cashout, replay: false };

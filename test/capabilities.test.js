@@ -52,12 +52,7 @@ for (const p of proposals) {
     }
 }
 
-// D12 step 4 (Vibes Pay) is not built yet: Contracts v0.289.0 releases these two capabilities for the later Billing
-// change, which will declare them and route them. Balance (step 2) does not serve them, so a grant naming one is not
-// declared here until the routes exist.
-const PENDING = new Set(['billing.vibes.charge', 'billing.vibes.read']);
 for (const id of service.capabilities) {
-    if (PENDING.has(id)) continue;
     assert.ok(proposals.some((p) => p.id === id), `${id} is released for billing but has no declaration in docs/capabilities-proposal`);
 }
 

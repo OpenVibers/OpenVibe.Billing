@@ -142,7 +142,7 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
 
     const warnings = {
         negative_balances: await db.prepare(`SELECT a.kind, a.owner_subject AS owner, a.currency, b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id
-            WHERE a.kind IN ('user_credit', 'creator_payable', 'payouts_pending', 'promo_credit', 'usd_credit') AND b.balance < 0`).all(),
+            WHERE a.kind IN ('user_credit', 'creator_payable', 'project_payable', 'project_payable_sandbox', 'payouts_pending', 'promo_credit', 'usd_credit') AND b.balance < 0`).all(),
         unprocessed_events: await db.prepare('SELECT id, provider, provider_event_id, type, received_at, attempts, last_error FROM provider_events WHERE processed_at IS NULL ORDER BY id').all(),
         rejected_events: (await db.prepare("SELECT id, provider, provider_event_id, type, result FROM provider_events WHERE json_extract(result, '$.effect') = 'rejected'").all())
             .map((r) => ({ ...r, result: JSON.parse(r.result) })),
@@ -167,6 +167,7 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
         chargeback_loss_cents: await sumKind('chargeback_loss', 'usd-cents'),
         credit_outstanding_bits: await sumKind('user_credit', 'vibes-bits', false),
         payable_outstanding_bits: await sumKind('creator_payable', 'vibes-bits', false),
+        project_payable_outstanding_bits: await sumKind('project_payable', 'vibes-bits', false),
         payouts_pending_bits: await sumKind('payouts_pending', 'vibes-bits', false),
         import_adjustment_bits: await sumKind('import_adjustment', 'vibes-bits', false),
         credit_outstanding_nano_usd: (await db.prepare("SELECT COALESCE(SUM(b.balance), 0)::text AS n FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'usd_credit'").get()).n,

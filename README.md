@@ -51,6 +51,8 @@ promo write changes both in one transaction.
   schema in [migrations/](migrations/))
 - provider webhooks (PowerChat, Stripe, PayPal, CCBill, NOWPayments): they land here and nowhere else
 - the `billing.*` events and the public billing policy page (`/policy`, every number from the rates)
+- Vibes Pay (D12): app charges, the project's `project_payable` Vibes wallet, its signed webhooks and sandbox test
+  Vibes ([docs/vibes-pay.md](docs/vibes-pay.md))
 
 ## Does not own
 
@@ -73,10 +75,11 @@ promo write changes both in one transaction.
 Implemented here (the service manifest's `capabilities`, audience `openvibe.billing`; routes under
 [API](#api)): `billing.intent.create`, `billing.transfer.create`, `billing.balance.read`,
 `billing.cashout.request`, `billing.cashout.manage`, `billing.subscription.manage`,
-`billing.entitlement.check`, `billing.ledger.admin` and `billing.usage.record` (usage readings; released in
-Contracts v0.85.0). Callers today are Live (after the cutover),
-Tips (`billing.intent.create`, `billing.transfer.create`) and VIP (`billing.intent.create`,
-`billing.subscription.manage`, `billing.entitlement.check`).
+`billing.entitlement.check`, `billing.ledger.admin`, `billing.usage.record` (usage readings; released in
+Contracts v0.85.0), and the public `billing.vibes.charge` and `billing.vibes.read` for developer apps (D12).
+Callers today are Live (after the cutover),
+Tips (`billing.intent.create`, `billing.transfer.create`), VIP (`billing.intent.create`,
+`billing.subscription.manage`, `billing.entitlement.check`) and a developer app with its own app token for Vibes Pay.
 
 Called elsewhere, as the service principal `billing`: `events.event.publish` (Events) and
 `identity.subject.resolve` (Network, the Live import).
@@ -107,6 +110,13 @@ Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
   same transaction and verified by reconciliation. Funds checks run inside the transaction that moves
   the money, and every money transaction is SERIALIZABLE (`ledger.js` `money()`, retried on a
   serialization failure), so two movements that each passed a check cannot both commit.
+- **Vibes Pay** (`server/ops/vibes.js`, `server/ops/vibes-webhooks.js`, [docs/vibes-pay.md](docs/vibes-pay.md)):
+  an app creates a charge (whole Vibes, idempotent on its reference), the person pays it on the pay sheet, and the
+  Vibes move once from `user_credit` to `project_payable:project:<prj_id>`; a project owner cashes out through the
+  existing cashout path. Each paid/refunded charge publishes `billing.vibes.charge.paid@1`/`.refunded@1` to Events
+  and queues a signed HMAC-SHA256 webhook in `vibes_webhook_outbox`, retried with backoff. Sandbox apps use
+  `vibes_credit_sandbox`/`project_payable_sandbox` and test transactions only. The owner's `billing.vibes` limits
+  and the economy freeze are checked inside the money transaction.
 - **Two currencies.** Money arrives in cents and becomes bits through the `fx_conversion` account pair
   at the recorded value rate (`bits_per_usd`, 100 today); reconciliation checks that each transaction's
   cents side mirrors its bits side. Anything a payment exceeds the bits' value by is `platform_revenue`.

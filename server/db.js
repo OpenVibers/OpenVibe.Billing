@@ -19,12 +19,14 @@ const { createDb } = require('openvibe-sdk/db');
 
 const ACCOUNT_KINDS = ['user_credit', 'creator_payable', 'provider_clearing', 'platform_revenue', 'payouts_pending',
     'refunds', 'import_adjustment', 'chargeback_loss', 'fx_conversion', 'promo_credit', 'promo_reserve',
-    'usd_credit', 'usd_credit_sandbox'];
+    'usd_credit', 'usd_credit_sandbox', 'credit_topup_debt', 'project_payable', 'vibes_credit_sandbox',
+    'project_payable_sandbox', 'vibes_sandbox'];
 // The promo ledger's kinds (migrations/0003): their entries never share a transaction with any other kind.
 const PROMO_KINDS = ['promo_credit', 'promo_reserve'];
 const CURRENCIES = ['vibes-bits', 'usd-cents', 'nano-usd'];
 const TXN_TYPES = ['purchase', 'donation', 'subscription', 'subscription_share', 'cashout_request', 'cashout_paid',
-    'cashout_denied', 'recycle', 'refund', 'chargeback', 'adjustment', 'import', 'usage', 'inference'];
+    'cashout_denied', 'recycle', 'refund', 'chargeback', 'adjustment', 'import', 'usage', 'credit', 'inference',
+    'balance_transfer', 'vibes_charge', 'vibes_refund', 'vibes_sandbox_grant'];
 
 
 const MIGRATIONS = path.join(__dirname, '..', 'migrations');

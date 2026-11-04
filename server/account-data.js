@@ -22,7 +22,7 @@ const TABLES = [
     { table: 'transactions', subject: 'from_subject', file: 'transactions-sent.json', columns: ['id', 'type', 'status', 'from_subject', 'to_subject', 'provider', 'reverses_txn', 'test', 'metadata', 'created_at'], erase: { keep: ledger } },
     { table: 'transactions', subject: 'to_subject', file: 'transactions-received.json', columns: ['id', 'type', 'status', 'from_subject', 'to_subject', 'provider', 'reverses_txn', 'test', 'metadata', 'created_at'], erase: { keep: ledger }, kind: 'transactions_received' },
     { table: 'payment_intents', subject: 'subject', file: 'checkouts.json', columns: ['id', 'provider', 'kind', 'streamer_subject', 'amount_cents', 'fee_cents', 'bits', 'route', 'auto_renew', 'status', 'settled_txn', 'created_at', 'updated_at'], erase: { keep: ledger } },
-    { table: 'cashouts', subject: 'subject', file: 'cashouts.json', columns: ['id', 'amount_bits', 'value_cents', 'status', 'payout_method', 'escrow_until', 'payout_provider', 'payout_reference', 'reason', 'created_at', 'updated_at'], erase: { keep: ledger } },
+    { table: 'cashouts', subject: 'subject', file: 'cashouts.json', columns: ['id', 'project_id', 'amount_bits', 'value_cents', 'status', 'payout_method', 'escrow_until', 'payout_provider', 'payout_reference', 'reason', 'created_at', 'updated_at'], erase: { keep: ledger } },
     { table: 'subscriptions', subject: 'subscriber', file: 'subscriptions.json', columns: ['id', 'streamer', 'tier', 'provider', 'status', 'auto_renew', 'cancel_at_period_end', 'price_cents', 'current_period_end', 'created_at', 'updated_at'], erase: { keep: ledger } },
     // As a creator: their subscriptions without who the members are (that is the members' data).
     { table: 'subscriptions', subject: 'streamer', file: 'subscriptions-to-you.json', columns: ['id', 'tier', 'status', 'price_cents', 'current_period_end', 'created_at'], erase: { keep: ledger }, kind: 'subscriptions_to_you' },
@@ -45,6 +45,10 @@ const TABLES = [
     // D12: moving Balance to a project and buying Vibes with Balance are money records too.
     { table: 'balance_transfers', subject: 'subject', file: 'balance-transfers.json', columns: ['id', 'idempotency_key', 'to_project_id', 'amount_nano_usd', 'journal_id', 'created_at'], erase: { keep: ledger } },
     { table: 'vibes_from_balance', subject: 'subject', file: 'vibes-from-balance.json', columns: ['id', 'idempotency_key', 'vibes', 'price_nano_usd', 'bits_per_usd', 'journal_id', 'created_at'], erase: { keep: ledger } },
+    // D12 Vibes Pay: the charges this person paid in an app, and the opaque reference that app knows them by. A
+    // charge they never paid has no payer and is not their data; the app's own settings are not people's records.
+    { table: 'vibes_charges', subject: 'payer_subject', file: 'vibes-pay-charges.json', columns: ['id', 'app_id', 'project_id', 'amount', 'description', 'reference', 'status', 'sandbox', 'paid_at', 'refunded_at', 'created_at'], erase: { keep: ledger } },
+    { table: 'vibes_payers', subject: 'subject', file: 'vibes-pay-payers.json', columns: ['app_id', 'payer_ref', 'created_at'], erase: { keep: ledger } },
 ];
 
 /** Accounts with their balances (a balance is the account's cached sum of ledger entries). */

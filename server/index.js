@@ -19,6 +19,7 @@ const providers = require('./providers');
 const subscriptions = require('./ops/subscriptions');
 const rating = require('./ops/rating');
 const inference = require('./ops/credits');
+const vibesWebhooks = require('./ops/vibes-webhooks');
 const { isFrozen } = require('./ops/common');
 const { runScheduled } = require('./reconcile');
 const { gracefulStop, telemetry } = require('openvibe-sdk/service');
@@ -52,6 +53,13 @@ const { createPgTelemetrySink, startTelemetryRetention } = require('openvibe-sdk
             every(config.jobs.ratingIntervalMs, async () => {
                 const out = await rating.sweep(ctx);
                 if (out.rated || out.skipped || out.failed) console.log(`[Billing] rating: ${out.rated} rated, ${out.skipped} left unrated, ${out.failed} failed`);
+            });
+        }
+        if (config.jobs.vibesWebhookIntervalMs > 0) {
+            every(config.jobs.vibesWebhookIntervalMs, async () => {
+                // Vibes Pay app webhooks (D12): due rows in vibes_webhook_outbox, signed and retried with backoff.
+                const out = await vibesWebhooks.deliverDue(ctx);
+                if (out.delivered || out.failed || out.abandoned) console.log(`[Billing] Vibes Pay webhooks: ${out.delivered} delivered, ${out.failed} retried, ${out.abandoned} abandoned`);
             });
         }
         if (config.credits.sweepIntervalMs > 0) {

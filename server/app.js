@@ -22,12 +22,13 @@ const { createRelease } = require('openvibe-shared/release');
 const { loadConfig } = require('./config');
 const { openDb } = require('./db');
 const { createRates } = require('./rates');
-const { createKeyProvider, createIdentity, createProjects } = require('./network');
+const { createKeyProvider, createIdentity, createProjects, createApps } = require('./network');
 const { createAuth } = require('./api/auth');
 const { v1Router } = require('./api/v1');
 const { internalRouter } = require('./api/internal');
 const { createBillingConfig, createVibesConfig, applyValues, applyVibesValues } = require('./config-store');
 const { internalConfigRouter } = require('./internal-config');
+const { createVibesWebhooks } = require('./ops/vibes-webhooks');
 const { createActorLimits } = require('./api/actor-limits');
 const { webhooksRouter } = require('./api/webhooks');
 const { consoleRouter } = require('./console');
@@ -66,6 +67,11 @@ async function createApp(opts = {}) {
     applyVibesValues(config, ctx.vibesConfigStore.get());
     // Network's project-membership reads (D12): the projects a person administers and one role check.
     ctx.projects = opts.projects || createProjects(config, { fetchImpl });
+    // Network's app registry (D12 Vibes Pay): the app name/icon on the pay sheet. Best effort; Network's own
+    // pay sheet fills the name from dev_apps when this read is not permitted.
+    ctx.apps = opts.apps || createApps(config, { fetchImpl, log });
+    // Per-app Vibes Pay webhook settings (D12): a D11 namespace each, sealed with the service KEK when present.
+    ctx.vibesWebhooks = createVibesWebhooks({ db, config, env: ctx.env, log });
     const adapters = opts.adapters || providers.createAdapters(config, { fetchImpl, network: identity });
     const auth = createAuth({ config, keys });
 
