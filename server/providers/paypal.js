@@ -13,6 +13,7 @@
  *                           and the receipt reference makes either one settle exactly once.
  */
 const intents = require('../ops/intents');
+const topups = require('../ops/topups');
 
 const cents = (v) => Math.round(Number(v) * 100);
 
@@ -58,6 +59,7 @@ function createPaypal(cfg, { fetchImpl = globalThis.fetch } = {}) {
         const paid = capture.amount && capture.amount.currency_code === 'USD' ? cents(capture.amount.value) : null;
         if (!paid) return { effect: 'none', reason: 'capture without a USD amount' };
         const receipt = { provider: 'paypal', receiptRef: `paypal:${capture.id}`, paidCents: paid };
+        if (intent.kind === 'credits_topup') return topups.plan(ctx, intent, { ...receipt, idempotencyKey: key, actor });
         if (intent.kind === 'purchase') return { effect: 'purchase', args: { ...receipt, intentId: intent.id, idempotencyKey: key, actor } };
         if (paid + 1 < intent.amount_cents) return { effect: 'none', reason: 'underpaid subscription capture — review', review: true };
         return { effect: 'subscription', args: { subscriber: intent.subject, streamer: intent.streamer_subject, source: 'receipt', intentId: intent.id, receipt, idempotencyKey: key, actor } };

@@ -30,6 +30,9 @@ const BUDGETS = {
     // Someone buying Vibes or subscribing starts one, and perhaps retries it once or twice; dozens are card
     // testing. Tips' supporters are also capped at 20 unpaid checkouts a day there.
     'billing.intent.create': { minute: 5, hour: 30 },
+    // Starting a Credits top-up (POST /api/me/credits/topups) opens a provider checkout for real money; the same
+    // budget as a purchase checkout, counted per signed-in person.
+    'billing.credits.topup.create': { minute: 5, hour: 30 },
     // A tip, donation or paid interaction from a person's credit: one a second at most, above Tips' own
     // 20 a minute per supporter, so no real supporter meets it.
     'billing.transfer.create': { minute: 60, hour: 1200 },

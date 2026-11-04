@@ -6,7 +6,8 @@
  *
  *   export   the person's accounts with their balances, every transaction they sent or received, their checkouts,
  *            cash-outs, subscriptions (as a member, and as a creator without the members' identities), entitlements,
- *            tips on their own PowerChat, usage readings, promo allowances, tier prices and connected payment accounts
+ *            tips on their own PowerChat, usage readings, promo allowances, Credits holds, settlements, sandbox
+ *            grants and refunded-top-up debts, tier prices and connected payment accounts
  *   erase    money records stay (the ledger, receipts, checkouts, cash-outs, subscriptions, entitlements, usage and
  *            promo rows are records the law and the reconciliation need): counted as retained. What is only settings
  *            goes: tier prices, connected payment accounts (the attribution of a provider username to the person),
@@ -38,6 +39,8 @@ const TABLES = [
     { table: 'credit_holds', subject: 'subject', file: 'inference-holds.json', columns: ['id', 'project_id', 'held_nano_usd', 'max_nano_usd', 'rate_version', 'status', 'lease_expires_at', 'created_at', 'updated_at'], erase: { keep: ledger } },
     { table: 'credit_settlements', subject: 'subject', file: 'inference-charges.json', columns: ['id', 'hold_id', 'project_id', 'charge_nano_usd', 'released_nano_usd', 'journal_id', 'usage', 'retail', 'byok', 'created_at'], erase: { keep: ledger } },
     { table: 'credit_sandbox_grants', subject: 'subject', file: 'inference-sandbox-grants.json', columns: ['id', 'project_id', 'amount_nano_usd', 'reason', 'created_at'], erase: { keep: ledger } },
+    // A refunded top-up whose credit was already spent: a money record of the person (and the debt they owe).
+    { table: 'credit_topup_debts', subject: 'subject', file: 'credit-debts.json', columns: ['id', 'topup_txn_id', 'transaction_id', 'reversal_ref', 'project_id', 'provider', 'amount_nano_usd', 'reason', 'created_at'], erase: { keep: ledger } },
 ];
 
 /** Accounts with their balances (a balance is the account's cached sum of ledger entries). */

@@ -15,6 +15,8 @@ const { post, balance, requireFunds, money, iso, prefixedId } = require('../ledg
 const { A, entry, fail, userSubject, positiveInt, text, isFrozen } = require('./common');
 
 const CURRENCY = 'nano-usd';
+// D9: 1 cent = 10,000,000 nano-USD. The checkout top-up is priced in whole cents at the edge.
+const NANO_PER_CENT = 10_000_000n;
 const ACTOR = { type: 'service', id: 'billing' };
 const ACTIVE_STATUSES = ['active', 'extended'];
 const TERMINAL_STATUSES = ['settled', 'released', 'expired'];
@@ -27,6 +29,10 @@ const A_INF = {
     // The issuer the grants come from and sandbox charges return to (owner null).
     sandbox: () => ({ kind: 'usd_credit_sandbox', owner: null, currency: CURRENCY }),
     revenue: () => ({ kind: 'platform_revenue', owner: null, currency: CURRENCY }),
+    // A top-up's money arrives from the checkout provider in nano-USD (D9), not through the Vibes usd-cents clearing.
+    clearing: (provider) => ({ kind: 'provider_clearing', owner: provider, currency: CURRENCY }),
+    // The spent part of a refunded top-up: a debt of the person, reported by reconciliation, never written off.
+    debt: () => ({ kind: 'credit_topup_debt', owner: null, currency: CURRENCY }),
 };
 
 const nano = (v, field) => {
@@ -416,8 +422,9 @@ async function sandboxGrant(ctx, input) {
 }
 
 /**
- * A person's statement for one project (GET /api/me/credits): the balance, what is held now, what is available, and the
- * last 50 charges with their usage (no prompt or answer is ever here: only counts, prices and ids).
+ * A person's statement for one project (GET /api/me/credits): the balance, what is held now, what is available, the
+ * last 50 top-ups beside the last 50 charges (no prompt or answer is ever here: only counts, prices and ids). A
+ * top-up's reversal shows what was clawed back and what remains a debt.
  */
 async function statement(ctx, subject, projectId, { limit = 50 } = {}) {
     const { db, config } = ctx;
@@ -434,15 +441,44 @@ async function statement(ctx, subject, projectId, { limit = 50 } = {}) {
         const boxBal = BigInt(String(box.balance));
         sandbox = { balance_nano_usd: String(boxBal), held_nano_usd: String(boxHeld), available_nano_usd: String(boxBal - boxHeld < 0n ? 0n : boxBal - boxHeld) };
     }
-    if (!acct) return { project_id: projectId, balance_nano_usd: '0', held_nano_usd: '0', available_nano_usd: '0', sandbox, charges: [] };
+    if (!acct) return { project_id: projectId, balance_nano_usd: '0', held_nano_usd: '0', available_nano_usd: '0', sandbox, topups: [], charges: [] };
     const held = await heldOnAccount(db, acct.id);
     const rows = await db.prepare(`SELECT s.*, h.service FROM credit_settlements s JOIN credit_holds h ON h.id = s.hold_id
         WHERE s.account_id = ? ORDER BY s.created_at DESC, s.id DESC LIMIT ?`).all(acct.id, Math.max(1, Math.min(200, limit)));
+    const tops = await db.prepare(`SELECT t.id, t.created_at, t.provider, t.receipt_ref, t.metadata FROM transactions t
+        WHERE json_extract(t.metadata, '$.credit') = 'topup'
+          AND EXISTS (SELECT 1 FROM ledger_entries e WHERE e.txn_id = t.id AND e.account_id = ?)
+        ORDER BY t.created_at DESC, t.id DESC LIMIT ?`).all(acct.id, Math.max(1, Math.min(200, limit)));
+    const topIds = tops.map((r) => r.id);
+    const revs = topIds.length ? await db.prepare(`SELECT r.reverses_txn, r.type, r.created_at,
+            json_extract(r.metadata, '$.cents') AS cents, json_extract(r.metadata, '$.clawed_nano_usd') AS clawed,
+            json_extract(r.metadata, '$.debt_nano_usd') AS debt
+        FROM transactions r WHERE r.reverses_txn IN (${topIds.map(() => '?').join(',')}) ORDER BY r.created_at, r.id`).all(...topIds) : [];
+    const reversed = new Map();
+    for (const r of revs) {
+        const o = reversed.get(r.reverses_txn) || { cents: 0, clawed: 0n, debt: 0n };
+        o.cents += Number(r.cents || 0);
+        o.clawed += BigInt(r.clawed || 0);
+        o.debt += BigInt(r.debt || 0);
+        reversed.set(r.reverses_txn, o);
+    }
     const bal = BigInt(String(acct.balance));
     return {
         project_id: projectId,
         balance_nano_usd: String(bal), held_nano_usd: String(held), available_nano_usd: String(bal - held < 0n ? 0n : bal - held),
         sandbox,
+        topups: tops.map((r) => {
+            const m = parseJson(r.metadata);
+            const rev = reversed.get(r.id) || { cents: 0, clawed: 0n, debt: 0n };
+            const paid = Number(m.paid_cents || 0);
+            return {
+                at: r.created_at, transaction_id: r.id, provider: r.provider, receipt_ref: r.receipt_ref || null,
+                amount_nano_usd: String(m.amount_nano_usd || '0'), fee_nano_usd: String(m.fee_nano_usd || '0'),
+                paid_cents: paid, fee_bps: Number(m.fee_bps || 0),
+                reversed_cents: rev.cents, refunded_nano_usd: String(rev.clawed), debt_nano_usd: String(rev.debt),
+                status: rev.cents <= 0 ? 'settled' : (rev.cents >= paid ? (rev.debt > 0n ? 'refunded_with_debt' : 'refunded') : 'partially_refunded'),
+            };
+        }),
         charges: rows.map((r) => {
             const attempts = Array.isArray(r.attempts) ? r.attempts : [];
             const last = attempts.length ? attempts[attempts.length - 1] : null;
@@ -453,6 +489,13 @@ async function statement(ctx, subject, projectId, { limit = 50 } = {}) {
             };
         }),
     };
+}
+
+/** JSON from a text column, never a throw. */
+function parseJson(v) {
+    if (v == null) return {};
+    if (typeof v === 'object') return v;
+    try { return JSON.parse(v) || {}; } catch { return {}; }
 }
 
 /** The model of a settle attempt: the contract's deployment_id is "<provider>:<model>" (AI's form). */
@@ -485,5 +528,5 @@ async function findSettlement(db, { holdId, id } = {}) {
 
 module.exports = {
     createHold, extendHold, settleHold, releaseHold, sweepExpired, sandboxGrant, statement,
-    findHold, findSettlement, computeCharge, available, A_INF, CURRENCY,
+    findHold, findSettlement, computeCharge, available, A_INF, CURRENCY, NANO_PER_CENT,
 };

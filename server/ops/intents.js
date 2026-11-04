@@ -11,6 +11,7 @@
  */
 const { prefixedId, iso } = require('../ledger');
 const { fail, positiveInt, userSubject } = require('./common');
+const { NANO_PER_CENT } = require('./credits');
 const tiers = require('./tiers');
 
 function parse(row) {
@@ -85,6 +86,23 @@ async function create(ctx, input) {
 }
 
 /**
+ * A Credits top-up intent (D9). Created only by the signed-in person's own route (ops/topups.js), never by
+ * /api/v1: the amount and the fee were validated against the owner's configured list first. amount_cents is
+ * what the provider charges (the top-up plus the fee); the top-up itself is metadata.topup_amount_cents.
+ */
+async function createCreditsTopup(ctx, { provider, subject, projectId, amountCents, feeCents, feeBps }) {
+    const ms = ctx.now();
+    const nowIso = iso(ms);
+    const id = prefixedId('pi', ms);
+    const metadata = { project_id: projectId, topup_amount_cents: amountCents, topup_fee_cents: feeCents, topup_fee_bps: feeBps };
+    await ctx.db.prepare(`INSERT INTO payment_intents (id, provider, provider_ref, kind, subject, streamer_subject, amount_cents, fee_cents, bits, route,
+            auto_renew, status, metadata, created_at, updated_at)
+        VALUES (?, ?, NULL, 'credits_topup', ?, NULL, ?, ?, 0, NULL, 0, 'created', ?, ?, ?)`)
+        .run(id, provider, subject, amountCents + feeCents, feeCents, JSON.stringify(metadata), nowIso, nowIso);
+    return await find(ctx.db, id);
+}
+
+/**
  * An intent imported from a Live payment order that Live had already credited before the cutover.
  * Its money effect lives in the imported history/opening balances, not in a Billing settlement, so
  * a provider delivery for it that reaches Billing afterwards (a retry of a delivery Live had
@@ -115,15 +133,24 @@ async function markSettled(ctx, id, txnId) {
 
 function present(i) {
     if (!i) return null;
+    const m = i.metadata || {};
     return {
         id: i.id, provider: i.provider, provider_ref: i.provider_ref, kind: i.kind,
         subject: { type: 'user', id: i.subject }, streamer: i.streamer_subject ? { type: 'user', id: i.streamer_subject } : null,
         amount_cents: i.amount_cents, fee_cents: i.fee_cents, bits: i.bits, route: i.route, auto_renew: i.auto_renew,
         status: i.status, settled_txn: i.settled_txn || null, created_at: i.created_at,
         ...(i.kind === 'subscription' ? { tier: Number((i.metadata && i.metadata.tier) || 1) } : {}),
+        // A Credits top-up: the project it funds, the amount that becomes Credits and the fee the person pays on top.
+        ...(i.kind === 'credits_topup' ? {
+            project_id: m.project_id || null,
+            topup: {
+                amount_cents: Number(m.topup_amount_cents || 0), fee_cents: Number(m.topup_fee_cents || 0),
+                fee_bps: Number(m.topup_fee_bps || 0), amount_nano_usd: String(BigInt(m.topup_amount_cents || 0) * NANO_PER_CENT),
+            },
+        } : {}),
         // PowerChat checkouts carry this in app_ref; the webhook echoes it back.
         checkout_ref: i.provider === 'powerchat' ? `${i.kind === 'purchase' ? 'pcorder' : 'pcsub'}:${i.id}` : undefined,
     };
 }
 
-module.exports = { find, findByProviderRef, create, setProviderRef, mergeMetadata, setStatus, markSettled, present, parse, settledInLive, refuseIfSettledInLive };
+module.exports = { find, findByProviderRef, create, createCreditsTopup, setProviderRef, mergeMetadata, setStatus, markSettled, present, parse, settledInLive, refuseIfSettledInLive };

@@ -28,7 +28,8 @@
  *                           every period revoked for a refund or chargeback has the reversal of its payment
  * Warnings (reported, do not fail): negative user balances, unprocessed/rejected events, events and
  * transactions flagged for review (chargebacks on donated credit, unattributed site tips, EXTERNAL
- * tips on unmapped accounts), import holds. Totals exclude test transactions (ADR-012 rule 9).
+ * tips on unmapped accounts), credit debts from refunded top-ups already spent, import holds. Totals
+ * exclude test transactions (ADR-012 rule 9).
  *
  * Runs on demand (API, console, scripts/reconcile.js, after an import) and on a schedule
  * (runScheduled, server/index.js); every run is stored in reconciliation_runs with its trigger.
@@ -86,12 +87,18 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
 
     const rcpt = await db.prepare(`SELECT t.id, t.type, t.provider, t.receipt_ref, p.id AS event, p.provider AS event_provider,
             json_extract(t.metadata, '$.paid_cents')::bigint AS paid_cents, json_extract(t.metadata, '$.cents')::bigint AS reversed_cents,
+            json_extract(t.metadata, '$.credit') AS credit_kind,
             (SELECT COUNT(*) FROM ledger_entries e WHERE e.txn_id = t.id) AS entries,
             COALESCE((SELECT SUM(e.amount) FROM ledger_entries e JOIN accounts a ON a.id = e.account_id
                 WHERE e.txn_id = t.id AND a.kind = 'provider_clearing' AND a.owner_subject = p.provider), 0)::bigint AS clearing
         FROM transactions t JOIN provider_events p ON p.id = t.source_event_id`).all();
+    // A Credits top-up and its reversal move nano-USD through the provider clearing (1 cent = 10,000,000 nano-USD),
+    // not usd-cents; the paid or reversed cents metadata is still the receipt-side truth.
+    const NANO_PER_CENT = 10_000_000;
     const rcptBad = rcpt.filter((r) => {
         if (r.provider !== r.event_provider) return true;
+        if (r.credit_kind === 'topup') return !r.receipt_ref || (r.entries > 0 && r.clearing !== -Number(r.paid_cents) * NANO_PER_CENT);
+        if (r.credit_kind === 'topup_refund') return r.entries > 0 && r.clearing !== Number(r.reversed_cents) * NANO_PER_CENT;
         if (SETTLING.includes(r.type)) return !r.receipt_ref || (r.entries > 0 && r.clearing !== -Number(r.paid_cents));
         if (REVERSING.includes(r.type)) return r.entries > 0 && r.clearing !== Number(r.reversed_cents);
         return false;
@@ -143,6 +150,9 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
             .all()).map((r) => ({ ...r, result: JSON.parse(r.result) })),
         transactions_for_review: (await db.prepare("SELECT id, type, reverses_txn, created_at, metadata FROM transactions WHERE json_extract(metadata, '$.review') = 'required' ORDER BY created_at")
             .all()).map((r) => ({ ...r, metadata: JSON.parse(r.metadata) })),
+        // A refunded top-up whose credit was already spent: the person owes it, and it is never written off silently.
+        credit_debts: await db.prepare('SELECT id, subject, project_id, provider, transaction_id, topup_txn_id, amount_nano_usd::text AS amount_nano_usd, reason, created_at FROM credit_topup_debts ORDER BY created_at')
+            .all(),
         import_holds: await db.prepare('SELECT live_user_id, owner, reason, credit_bits, payable_bits FROM import_holds WHERE resolved_subject IS NULL').all(),
     };
 
@@ -159,6 +169,9 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
         payable_outstanding_bits: await sumKind('creator_payable', 'vibes-bits', false),
         payouts_pending_bits: await sumKind('payouts_pending', 'vibes-bits', false),
         import_adjustment_bits: await sumKind('import_adjustment', 'vibes-bits', false),
+        credit_outstanding_nano_usd: (await db.prepare("SELECT COALESCE(SUM(b.balance), 0)::text AS n FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'usd_credit'").get()).n,
+        // The spent part of refunded top-ups, reported as money the person owes (never netted out of the balance).
+        credit_topup_debt_nano_usd: (await db.prepare('SELECT COALESCE(SUM(amount_nano_usd), 0)::text AS n FROM credit_topup_debts').get()).n,
         external_receipts: (await db.prepare('SELECT COUNT(*) AS n FROM external_receipts WHERE test = 0').get()).n,
         external_announced: (await db.prepare("SELECT COUNT(*) AS n FROM external_receipts WHERE test = 0 AND status = 'announced'").get()).n,
         external_cents: (await db.prepare('SELECT COALESCE(SUM(amount_cents), 0)::bigint AS n FROM external_receipts WHERE test = 0').get()).n,

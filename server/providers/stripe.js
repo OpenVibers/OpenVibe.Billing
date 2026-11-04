@@ -15,6 +15,7 @@
  */
 const crypto = require('crypto');
 const intents = require('../ops/intents');
+const topups = require('../ops/topups');
 const subscriptions = require('../ops/subscriptions');
 
 function createStripe(cfg, { fetchImpl = globalThis.fetch } = {}) {
@@ -67,6 +68,14 @@ function createStripe(cfg, { fetchImpl = globalThis.fetch } = {}) {
                     return { effect: 'update', reason: 'linked Stripe subscription', apply: async (c) => await intents.mergeMetadata(c, intent.id, { stripe_subscription: obj.subscription }) };
                 }
                 if (obj.payment_status && obj.payment_status !== 'paid') return { effect: 'none', reason: `checkout ${obj.payment_status}` };
+                // A Credits top-up (D9) credits usd_credit instead of Vibes bits; ops/topups.js checks the feature and
+                // the intent's amount, so a paid top-up can never fall through to a purchase or subscription.
+                if (intent.kind === 'credits_topup') {
+                    return topups.plan(ctx, intent, {
+                        provider: 'stripe', receiptRef: `stripe:${obj.payment_intent || obj.id}`, paidCents: obj.amount_total,
+                        idempotencyKey: key, actor,
+                    });
+                }
                 return { effect: 'purchase', args: { provider: 'stripe', receiptRef: `stripe:${obj.payment_intent || obj.id}`, intentId: intent.id, paidCents: obj.amount_total, idempotencyKey: key, actor } };
             }
             case 'invoice.paid':

@@ -71,6 +71,47 @@ A signed-in person reads their own statement for a project with `GET /api/me/cre
 
 There is never any prompt or answer: Billing never receives them.
 
+## Top-up: a person funds their own Credits
+
+Behind `BILLING_CREDITS_TOPUP` (off, and only meaningful with `BILLING_CREDITS=1`). The owner sets every amount and
+the fee; the code has no default amount and no default fee:
+
+- `BILLING_CREDITS_TOPUP_AMOUNTS_CENTS`: a comma-separated list of whole USD cents. These are the only amounts a
+  person may buy.
+- `BILLING_CREDITS_TOPUP_FEE_BPS`: the fee in integer basis points, charged on top of the amount. `0` is a real,
+  configured fee (free); leaving it unset is not.
+
+Both are required. With either unset or malformed, `POST /api/me/credits/topups` refuses with
+`503 billing.topup_unconfigured` before creating an intent or opening a provider checkout.
+
+1. **Start.** A signed-in person (`Authorization: Bearer <user token>`) calls
+   `POST /api/me/credits/topups` with `{ provider, project_id, amount_cents }`.
+   - The amount must be one the owner listed, otherwise `422 billing.amount_not_allowed`.
+   - The fee is `ceil(amount_cents × fee_bps / 10000)` cents, rounded once; the provider charges amount + fee.
+   - Billing creates a `payment_intents` row with `kind='credits_topup'` (the project, amount and fee in its
+     metadata) and opens the provider's existing checkout with the same `intent_id` metadata as a purchase.
+2. **Paid.** The provider's paid webhook for that intent credits the person's
+   `usd_credit:<subject>:<project_id>` account with the intent's amount at `1 cent = 10,000,000 nano-USD`, and
+   books the fee (and any overpayment) to `platform_revenue`. The journal, all in `nano-usd`:
+   - `provider_clearing:<provider>` −(what was paid);
+   - `usd_credit:<subject>:<project_id>` +amount;
+   - `platform_revenue` +fee.
+3. **Once.** The provider event is stored once by its event id, and the settled transaction's receipt reference is
+   unique. A redelivery returns `duplicate_receipt`; a second event for the same payment credits nothing further. The
+   intent is marked `settled` in the same transaction.
+4. **Statement.** `GET /api/me/credits?project_id=prj_…` lists `topups` beside `charges`: amount, fee, what was paid,
+   the reversal and any debt.
+5. **Refund or chargeback** (the provider's receipt reversal, `ops/reversals.js`):
+   - the credited part the refund covers is debited from `usd_credit` by what the account still holds, never below
+     zero;
+   - the part already spent is a debt of the person: a `credit_topup_debts` row, the reversal transaction is flagged
+     for review, and reconciliation lists it under `warnings.credit_debts` and totals it as
+     `credit_topup_debt_nano_usd`. It is never written off silently;
+   - the fee portion is taken back from `platform_revenue`; the reversal's clearing entry is the refunded cents in
+     nano-USD, so the journal stays balanced.
+6. **Off.** `BILLING_CREDITS_TOPUP=0` answers `404 billing.topup_disabled`, creates no intent and opens no checkout. A
+   paid event that arrives while the feature is off or unconfigured is recorded for review and moves no money.
+
 ## Launch runbook (each step needs the owner's go-ahead)
 
 1. **Canary.** In a staging copy: `BILLING_CREDITS=1` and `BILLING_CREDITS_SANDBOX=1`.
@@ -85,7 +126,9 @@ There is never any prompt or answer: Billing never receives them.
    - Turn the flag on for staff projects only. Funding is still off, so real balances are zero: staff try the flow
      with sandbox tokens on sandbox credit, which pays for nothing real.
 3. **Funding.** Add the checkout top-up into `usd_credit`; this is a separate change, and the owner sets the prices
-   and terms.
+   and terms. Turn on `BILLING_CREDITS_TOPUP` only after the owner sets
+   `BILLING_CREDITS_TOPUP_AMOUNTS_CENTS` and `BILLING_CREDITS_TOPUP_FEE_BPS` (no default exists), and confirm
+   `POST /api/me/credits/topups` is reachable through the vhost. Reconcile before and after the first real payment.
 4. **Kill switch.** `BILLING_CREDITS=0` refuses every hold (503). OpenVibe AI then refuses paid requests with a clear
    error, while BYOK, the person's own machine and sandbox keep working. `money_writes_frozen` freezes the whole
    economy, Credits included.

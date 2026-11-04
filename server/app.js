@@ -119,7 +119,7 @@ async function createApp(opts = {}) {
     const limits = createActorLimits({ config, db, now: opts.limitsNow || (() => Date.now()), registry: metrics.registry, log, valkey });
     app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters, limits }));
     // A signed-in person's own Vibes, for the shared navbar on every OpenVibe site (api/me.js; user tokens, CORS for owned sites).
-    app.use('/api/me', require('./api/me').meRouter({ ctx, config, keys, limits }));
+    app.use('/api/me', require('./api/me').meRouter({ ctx, config, keys, limits, adapters }));
 
     // The billing policy is public and indexable; the staff console and the API are not.
     app.get('/robots.txt', (req, res) => res.type('text/plain').send('User-agent: *\nAllow: /policy\nDisallow: /\n'));

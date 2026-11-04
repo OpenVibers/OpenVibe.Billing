@@ -26,5 +26,8 @@ assert.ok(tls.indexOf(me[0]) < tls.indexOf('location ^~ /api/ { return 404; }'),
 const credits = tls.match(/location = \/api\/me\/credits \{([^}]*)\}/);
 assert.ok(credits && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(credits[1]) && /limit_req /.test(credits[1]), 'a rate-limited location for /api/me/credits');
 assert.ok(tls.indexOf(credits[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
+const topups = tls.match(/location = \/api\/me\/credits\/topups \{([^}]*)\}/);
+assert.ok(topups && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(topups[1]) && /limit_req /.test(topups[1]), 'a rate-limited location for POST /api/me/credits/topups');
+assert.ok(tls.indexOf(topups[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
 assert.match(tls, /location \^~ \/api\/v1 \{ deny all; \}/);
-console.log('nginx vhost: the policy is indexable, the rest noindex; /api/me/vibes and /api/me/credits public, /api/v1 loopback only');
+console.log('nginx vhost: the policy is indexable, the rest noindex; /api/me/vibes, /api/me/credits and /api/me/credits/topups public, /api/v1 loopback only');

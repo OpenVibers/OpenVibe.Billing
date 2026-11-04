@@ -20,6 +20,7 @@ const contracts = require('openvibe-contracts');
 const { verifyUserToken } = require('openvibe-sdk/auth');
 const { balance } = require('../ledger');
 const { A } = require('../ops/common');
+const topups = require('../ops/topups');
 
 const HOST_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 let origins = null;
@@ -36,7 +37,7 @@ function firstPartyOrigins() {
     return out;
 }
 
-function meRouter({ ctx, config, keys, limits }) {
+function meRouter({ ctx, config, keys, limits, adapters }) {
     const r = express.Router();
     const problem = (res, status, code, detail) => contracts.http.sendProblem(res, status, code, { detail });
 
@@ -44,7 +45,7 @@ function meRouter({ ctx, config, keys, limits }) {
         const origin = req.get('origin');
         res.set({ 'Cache-Control': 'private, no-store', Vary: 'Origin' });
         if (origin && firstPartyOrigins().has(origin)) {
-            res.set({ 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Headers': 'Authorization', 'Access-Control-Allow-Methods': 'GET', 'Access-Control-Max-Age': '600' });
+            res.set({ 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Max-Age': '600' });
         }
         if (req.method === 'OPTIONS') return res.status(204).end();
         return next();
@@ -74,13 +75,32 @@ function meRouter({ ctx, config, keys, limits }) {
         });
     });
 
-    // A signed-in person's Credits for one project (D9): balance, held, available, the last charges. Off with the ledger.
+    // A signed-in person's Credits for one project (D9): balance, held, available, top-ups beside charges. Off with the ledger.
     r.get('/credits', person, limits.selfRead, async (req, res) => {
         if (!config.credits || !config.credits.enabled) return problem(res, 404, 'billing.not_enabled', 'Credits are not open yet');
         const projectId = String(req.query.project_id || '');
         if (!/^prj_[0-9A-HJKMNP-TV-Z]{26}$/.test(projectId)) return problem(res, 422, 'billing.invalid_input', 'project_id is a project id');
         res.json(await require('../ops/credits').statement(ctx, req.person.subject, projectId));
     });
+
+    // Start a Credits top-up (D9) with the person's own token: one of the owner's configured amounts, the owner's fee,
+    // and the existing provider checkout. With the feature or its configuration off it refuses before any intent.
+    r.post('/credits/topups', express.json({ limit: '16kb' }), person,
+        limits.budget('billing.credits.topup.create', (req) => req.person && req.person.subject), async (req, res) => {
+            if (!config.credits || !config.credits.enabled) return problem(res, 404, 'billing.not_enabled', 'Credits are not open yet');
+            try {
+                const out = await topups.startTopup(ctx, adapters, { ...(req.body || {}), subject: req.person.subject });
+                return res.status(201).json(out);
+            } catch (e) {
+                if (e && e.status && e.code) {
+                    return contracts.http.sendProblem(res, e.status, e.code, {
+                        detail: e.detail || e.message, ctx: req.ov, extra: e.extra && e.status < 500 ? { details: e.extra } : undefined,
+                    });
+                }
+                (ctx.log || console).error('[Billing] /api/me/credits/topups error:', e);
+                return problem(res, 500, 'billing.internal', 'internal error');
+            }
+        });
 
     return r;
 }
