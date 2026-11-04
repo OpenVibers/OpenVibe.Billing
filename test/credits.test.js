@@ -246,7 +246,7 @@ async function assertJournalBalances(db, label) {
         await grant({ subject: { type: 'user', id: lena.id }, project_id: PRJ, amount_nano_usd: '100000' });
         const open = await create(holdBody(lena, 20000));
         const done = await create(holdBody(lena, 10000));
-        await settle(done.json.hold_id, settleBody({ input_tokens: 1000, output_tokens: 1000 }, { attempts: [{ provider: 'own', model: 'qwen/qwen3-4b:q4_k_m@3f2a1c9' }] }));
+        await settle(done.json.hold_id, settleBody({ input_tokens: 1000, output_tokens: 1000 }, { attempts: [{ deployment_id: 'own:qwen/qwen3-4b:q4_k_m@3f2a1c9', provider_access: 'OWN_DEPLOYMENT', started_at: new Date().toISOString(), ended_at: new Date().toISOString() }] }));
         const token = t.network.signUser({ subject_id: lena.id, username: 'lena' });
         const read = (q, tok = token) => fetch(`${t.base}/api/me/credits${q}`, { headers: tok ? { Authorization: `Bearer ${tok}` } : {} });
         const r = await read(`?project_id=${PRJ}`);
@@ -265,6 +265,22 @@ async function assertJournalBalances(db, label) {
         const other = t.network.signUser({ subject_id: t.user(14).id, username: 'mo' });
         const theirs = await (await read(`?project_id=${PRJ}`, other)).json();
         assert.strictEqual(theirs.balance_nano_usd, '0', 'another person sees only their own (empty) account');
+    });
+
+    await check('a body that is not the contract\'s is refused with 422 before anything is held', async () => {
+        const kim = t.user(14);
+        await grant({ subject: { type: 'user', id: kim.id }, project_id: PRJ, amount_nano_usd: '100000' });
+        const before = await t.db.prepare('SELECT COUNT(*)::int AS n FROM credit_holds').get();
+        const bad = await create({ ...holdBody(kim, 1000), max_nano_usd: 1000 });   // a number, not a decimal string
+        assert.strictEqual(bad.status, 422, JSON.stringify(bad.json));
+        assert.strictEqual(bad.json.code, 'billing.invalid_request');
+        const extra = await create({ ...holdBody(kim, 1000), surprise: true });
+        assert.strictEqual(extra.status, 422, 'an unknown field is refused');
+        const after = await t.db.prepare('SELECT COUNT(*)::int AS n FROM credit_holds').get();
+        assert.strictEqual(after.n, before.n, 'nothing was held');
+        const ok = await create(holdBody(kim, 1000));
+        const settled = await settle(ok.json.hold_id, settleBody({ output_tokens: 10 }, { attempts: [{ provider: 'own', model: 'x' }] }));
+        assert.strictEqual(settled.status, 422, 'attempts carry the contract fields only (deployment_id, provider_access, times)');
     });
 
     await check('the journal balances after all inference operations', async () => {

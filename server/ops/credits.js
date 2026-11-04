@@ -407,12 +407,20 @@ async function statement(ctx, subject, projectId, { limit = 50 } = {}) {
             const attempts = Array.isArray(r.attempts) ? r.attempts : [];
             const last = attempts.length ? attempts[attempts.length - 1] : null;
             return {
-                at: r.created_at, settlement_id: r.id, service: r.service || 'ai', model: last && last.model ? String(last.model).slice(0, 160) : null,
+                at: r.created_at, settlement_id: r.id, service: r.service || 'ai', model: modelOfAttempt(last),
                 charge_nano_usd: String(r.charge_nano_usd), shortfall_nano_usd: String(r.shortfall_nano_usd || 0), byok: !!r.byok,
                 usage: r.usage, rate_version: r.retail && r.retail.version ? String(r.retail.version) : null,
             };
         }),
     };
+}
+
+/** The model of a settle attempt: the contract's deployment_id is "<provider>:<model>" (AI's form). */
+function modelOfAttempt(a) {
+    if (!a || typeof a.deployment_id !== 'string') return null;
+    const i = a.deployment_id.indexOf(':');
+    const model = i >= 0 ? a.deployment_id.slice(i + 1) : '';
+    return model ? model.slice(0, 160) : null;
 }
 
 /** Read a hold by id. */

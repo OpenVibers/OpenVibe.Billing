@@ -6,7 +6,7 @@
  * OpenVibe.AI calls to reserve, extend, settle and release inference credit.
  */
 const express = require('express');
-const { http } = require('openvibe-contracts');
+const { http, validate } = require('openvibe-contracts');
 const { BillingError } = require('../ledger');
 const { isFrozen } = require('../ops/common');
 const { actorOf } = require('./auth');
@@ -21,23 +21,36 @@ const CAP = {
     sandbox: 'billing.credit.sandbox.grant',
 };
 
+/**
+ * The request body must be the contract's (openvibe-contracts v0.284.0, D9): a caller that sends another shape gets 422
+ * before anything is held or charged, and the ledger code only ever sees validated input.
+ */
+function body(schemaId) {
+    return (req, res, next) => {
+        const v = validate(schemaId, req.body == null ? {} : req.body);
+        if (v.valid) return next();
+        const detail = v.errors.slice(0, 5).map((e) => `${e.path || '/'} ${e.message}`).join('; ');
+        return http.sendProblem(res, 422, 'billing.invalid_request', { detail: `not a ${schemaId}: ${detail}`, ctx: req.ov });
+    };
+}
+
 function internalRouter({ ctx, auth }) {
     const r = express.Router();
     const notFrozen = async (req, res, next) => (await isFrozen(ctx.db)
         ? http.sendProblem(res, 503, 'billing.frozen', { detail: 'the economy is frozen', ctx: req.ov })
         : next());
 
-    r.post('/holds', auth.needs(CAP.create), notFrozen, wrap(async (req, res) => {
+    r.post('/holds', auth.needs(CAP.create), body('billing.credit-hold-create-request@1'), notFrozen, wrap(async (req, res) => {
         const out = await inference.createHold(ctx, { ...req.body, actor: actorOf(req) });
         res.status(out.replay ? 200 : 201).json(out.hold);
     }));
 
-    r.post('/holds/:id/extend', auth.needs(CAP.extend), notFrozen, wrap(async (req, res) => {
+    r.post('/holds/:id/extend', auth.needs(CAP.extend), body('billing.credit-hold-extend-request@1'), notFrozen, wrap(async (req, res) => {
         const out = await inference.extendHold(ctx, { hold_id: req.params.id, add_nano_usd: req.body.add_nano_usd, actor: actorOf(req) });
         res.json(out.hold);
     }));
 
-    r.post('/holds/:id/settle', auth.needs(CAP.settle), notFrozen, wrap(async (req, res) => {
+    r.post('/holds/:id/settle', auth.needs(CAP.settle), body('billing.credit-hold-settle-request@1'), notFrozen, wrap(async (req, res) => {
         const out = await inference.settleHold(ctx, { hold_id: req.params.id, ...req.body, actor: actorOf(req) });
         res.status(out.replay ? 200 : 201).json(out.settlement);
     }));
@@ -47,7 +60,7 @@ function internalRouter({ ctx, auth }) {
         res.json(out);
     }));
 
-    r.post('/sandbox/grants', auth.needs(CAP.sandbox), notFrozen, wrap(async (req, res) => {
+    r.post('/sandbox/grants', auth.needs(CAP.sandbox), body('billing.credit-sandbox-grant-request@1'), notFrozen, wrap(async (req, res) => {
         const out = await inference.sandboxGrant(ctx, { ...req.body, actor: actorOf(req) });
         res.status(201).json(out);
     }));
