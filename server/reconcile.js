@@ -45,17 +45,17 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
     const checks = [];
     const check = (id, ok, detail) => checks.push({ id, ok, ...(detail ? { detail } : {}) });
 
-    const sums = await db.prepare('SELECT a.currency, SUM(e.amount)::bigint AS total, COUNT(*) AS n FROM ledger_entries e JOIN accounts a ON a.id = e.account_id GROUP BY a.currency').all();
-    check('journal.zero_sum', sums.every((s) => s.total === 0), { per_currency: sums.map((s) => ({ currency: s.currency, sum: s.total, entries: s.n })) });
+    const sums = await db.prepare('SELECT a.currency, SUM(e.amount)::text AS total, COUNT(*) AS n FROM ledger_entries e JOIN accounts a ON a.id = e.account_id GROUP BY a.currency').all();
+    check('journal.zero_sum', sums.every((s) => String(s.total) === '0'), { per_currency: sums.map((s) => ({ currency: s.currency, sum: s.total, entries: s.n })) });
 
-    const unbalanced = await db.prepare(`SELECT e.txn_id, a.currency, SUM(e.amount)::bigint AS total FROM ledger_entries e JOIN accounts a ON a.id = e.account_id
+    const unbalanced = await db.prepare(`SELECT e.txn_id, a.currency, SUM(e.amount)::text AS total FROM ledger_entries e JOIN accounts a ON a.id = e.account_id
         GROUP BY e.txn_id, a.currency HAVING SUM(e.amount) <> 0 LIMIT 100`).all();
     check('journal.txn_balanced', !unbalanced.length, unbalanced.length ? { offenders: unbalanced } : null);
 
-    const cache = await db.prepare(`SELECT a.id, a.kind, a.owner_subject AS owner, a.currency, COALESCE(b.balance, 0) AS cached,
-            COALESCE((SELECT SUM(amount) FROM ledger_entries WHERE account_id = a.id), 0)::bigint AS derived
+    const cache = await db.prepare(`SELECT a.id, a.kind, a.owner_subject AS owner, a.currency, COALESCE(b.balance, 0)::text AS cached,
+            COALESCE((SELECT SUM(amount) FROM ledger_entries WHERE account_id = a.id), 0)::text AS derived
         FROM accounts a LEFT JOIN account_balances b ON b.account_id = a.id`).all();
-    const mismatches = cache.filter((r) => r.cached !== r.derived);
+    const mismatches = cache.filter((r) => String(r.cached) !== String(r.derived));
     check('balances.cache', !mismatches.length, mismatches.length ? { mismatches } : { accounts: cache.length });
 
     const fxRows = await db.prepare(`SELECT t.id, json_extract(t.metadata, '$.rates.bits_per_usd')::float8 AS rate,
@@ -134,8 +134,8 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
     check('receipts.stale', !stale.length, stale.length ? { offenders: stale, older_than_min: staleMin } : { older_than_min: staleMin, ...(frozen ? { frozen: true } : {}) });
 
     const warnings = {
-        negative_balances: await db.prepare(`SELECT a.kind, a.owner_subject AS owner, a.currency, b.balance FROM accounts a JOIN account_balances b ON b.account_id = a.id
-            WHERE a.kind IN ('user_credit', 'creator_payable', 'payouts_pending', 'promo_credit') AND b.balance < 0`).all(),
+        negative_balances: await db.prepare(`SELECT a.kind, a.owner_subject AS owner, a.currency, b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id
+            WHERE a.kind IN ('user_credit', 'creator_payable', 'payouts_pending', 'promo_credit', 'inference_credit') AND b.balance < 0`).all(),
         unprocessed_events: await db.prepare('SELECT id, provider, provider_event_id, type, received_at, attempts, last_error FROM provider_events WHERE processed_at IS NULL ORDER BY id').all(),
         rejected_events: (await db.prepare("SELECT id, provider, provider_event_id, type, result FROM provider_events WHERE json_extract(result, '$.effect') = 'rejected'").all())
             .map((r) => ({ ...r, result: JSON.parse(r.result) })),

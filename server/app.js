@@ -25,6 +25,7 @@ const { createRates } = require('./rates');
 const { createKeyProvider, createIdentity } = require('./network');
 const { createAuth } = require('./api/auth');
 const { v1Router } = require('./api/v1');
+const { internalRouter } = require('./api/internal');
 const { createActorLimits } = require('./api/actor-limits');
 const { webhooksRouter } = require('./api/webhooks');
 const { consoleRouter } = require('./console');
@@ -110,6 +111,10 @@ async function createApp(opts = {}) {
     app.post('/internal/events', accountData.consumer({ secrets: config.events.webhookSecrets, send: accountSend }));
     app.locals.accountData = accountData;
     app.locals.accountSend = accountSend;
+    // Inference subledger (AI Exchange D2): only when BILLING_INFERENCE_SUBLEDGER=1.
+    if (config.inference.enabled) {
+        app.use('/internal/inference', express.json({ limit: '64kb' }), internalRouter({ ctx, auth }));
+    }
     // Per-person limits on the money-creating routes (api/actor-limits.js); the webhooks above never are.
     const limits = createActorLimits({ config, db, now: opts.limitsNow || (() => Date.now()), registry: metrics.registry, log, valkey });
     app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters, limits }));

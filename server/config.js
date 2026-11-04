@@ -187,6 +187,16 @@ function loadConfig(env = process.env) {
             // fails reconciliation: the provider was paid and the ledger does not show it yet.
             staleReceiptMin: int(env.BILLING_RECONCILE_STALE_RECEIPT_MIN, 60),
         },
+        inference: {
+            // AI Exchange D2: high-precision inference subledger. Off by default; no inference money moves without it.
+            enabled: bool(env.BILLING_INFERENCE_SUBLEDGER),
+            // Synthetic inference credit grants, for development and integration tests only.
+            sandbox: bool(env.BILLING_INFERENCE_SANDBOX),
+            // Default hold lease duration in seconds; extended holds get at least one extra minute.
+            leaseSeconds: Math.max(1, Math.min(86400, int(env.BILLING_INFERENCE_LEASE_SECONDS, 300))),
+            // Background sweeper interval for expired holds (0 = off, default off until the subledger is enabled).
+            sweepIntervalMs: int(env.BILLING_INFERENCE_SWEEP_MS, 0),
+        },
 
         // Staff console (server/console): Network SSO (authorization code + PKCE S256, OAuth
         // client `billing`), only for Network admins listed in BILLING_STAFF_SUBJECTS.
