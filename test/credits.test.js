@@ -226,6 +226,32 @@ async function assertJournalBalances(db, label) {
         assert.ok(holds.every((r) => r.status === 201 || r.json.code === 'billing.insufficient_funds'));
     });
 
+    await check('a person reads their own Credits statement: balance, held, available, charges without content', async () => {
+        const lena = t.user(13);
+        await grant({ subject: { type: 'user', id: lena.id }, project_id: PRJ, amount_nano_usd: '100000' });
+        const open = await create(holdBody(lena, 20000));
+        const done = await create(holdBody(lena, 10000));
+        await settle(done.json.hold_id, settleBody({ input_tokens: 1000, output_tokens: 1000 }, { attempts: [{ provider: 'own', model: 'qwen/qwen3-4b:q4_k_m@3f2a1c9' }] }));
+        const token = t.network.signUser({ subject_id: lena.id, username: 'lena' });
+        const read = (q, tok = token) => fetch(`${t.base}/api/me/credits${q}`, { headers: tok ? { Authorization: `Bearer ${tok}` } : {} });
+        const r = await read(`?project_id=${PRJ}`);
+        assert.strictEqual(r.status, 200, await r.clone().text());
+        const doc = await r.json();
+        assert.strictEqual(doc.balance_nano_usd, String(100000 - 104));
+        assert.strictEqual(doc.held_nano_usd, '20000', 'the open hold is held');
+        assert.strictEqual(doc.available_nano_usd, String(100000 - 104 - 20000));
+        assert.strictEqual(doc.charges.length, 1);
+        assert.strictEqual(doc.charges[0].charge_nano_usd, '104');
+        assert.strictEqual(doc.charges[0].model, 'qwen/qwen3-4b:q4_k_m@3f2a1c9');
+        assert.strictEqual(doc.charges[0].service, 'ai');
+        assert.ok(open.json.hold_id);
+        assert.strictEqual((await read(`?project_id=${PRJ}`, null)).status, 401, 'a token is needed');
+        assert.strictEqual((await read('?project_id=nope')).status, 422);
+        const other = t.network.signUser({ subject_id: t.user(14).id, username: 'mo' });
+        const theirs = await (await read(`?project_id=${PRJ}`, other)).json();
+        assert.strictEqual(theirs.balance_nano_usd, '0', 'another person sees only their own (empty) account');
+    });
+
     await check('the journal balances after all inference operations', async () => {
         await assertJournalBalances(t.db, 'end of inference tests');
     });

@@ -74,6 +74,14 @@ function meRouter({ ctx, config, keys, limits }) {
         });
     });
 
+    // A signed-in person's Credits for one project (D9): balance, held, available, the last charges. Off with the ledger.
+    r.get('/credits', person, limits.selfRead, async (req, res) => {
+        if (!config.credits || !config.credits.enabled) return problem(res, 404, 'billing.not_enabled', 'Credits are not open yet');
+        const projectId = String(req.query.project_id || '');
+        if (!/^prj_[0-9A-HJKMNP-TV-Z]{26}$/.test(projectId)) return problem(res, 422, 'billing.invalid_input', 'project_id is a project id');
+        res.json(await require('../ops/credits').statement(ctx, req.person.subject, projectId));
+    });
+
     return r;
 }
 

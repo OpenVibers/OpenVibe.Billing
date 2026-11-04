@@ -385,6 +385,36 @@ async function sandboxGrant(ctx, input) {
     });
 }
 
+/**
+ * A person's statement for one project (GET /api/me/credits): the balance, what is held now, what is available, and the
+ * last 50 charges with their usage (no prompt or answer is ever here: only counts, prices and ids).
+ */
+async function statement(ctx, subject, projectId, { limit = 50 } = {}) {
+    const { db, config } = ctx;
+    assertEnabled(config);
+    const owner = `${subject}:${projectId}`;
+    const acct = await db.prepare(`SELECT a.id, b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id
+        WHERE a.kind = 'usd_credit' AND a.owner_subject = ? AND a.currency = 'nano-usd'`).get(owner);
+    if (!acct) return { project_id: projectId, balance_nano_usd: '0', held_nano_usd: '0', available_nano_usd: '0', charges: [] };
+    const held = await heldOnAccount(db, acct.id);
+    const rows = await db.prepare(`SELECT s.*, h.service FROM credit_settlements s JOIN credit_holds h ON h.id = s.hold_id
+        WHERE s.account_id = ? ORDER BY s.created_at DESC, s.id DESC LIMIT ?`).all(acct.id, Math.max(1, Math.min(200, limit)));
+    const bal = BigInt(String(acct.balance));
+    return {
+        project_id: projectId,
+        balance_nano_usd: String(bal), held_nano_usd: String(held), available_nano_usd: String(bal - held < 0n ? 0n : bal - held),
+        charges: rows.map((r) => {
+            const attempts = Array.isArray(r.attempts) ? r.attempts : [];
+            const last = attempts.length ? attempts[attempts.length - 1] : null;
+            return {
+                at: r.created_at, settlement_id: r.id, service: r.service || 'ai', model: last && last.model ? String(last.model).slice(0, 160) : null,
+                charge_nano_usd: String(r.charge_nano_usd), shortfall_nano_usd: String(r.shortfall_nano_usd || 0), byok: !!r.byok,
+                usage: r.usage, rate_version: r.retail && r.retail.version ? String(r.retail.version) : null,
+            };
+        }),
+    };
+}
+
 /** Read a hold by id. */
 async function findHold(db, id) {
     const row = await db.prepare('SELECT * FROM credit_holds WHERE id = ?').get(id);
@@ -400,6 +430,6 @@ async function findSettlement(db, { holdId, id } = {}) {
 }
 
 module.exports = {
-    createHold, extendHold, settleHold, releaseHold, sweepExpired, sandboxGrant,
+    createHold, extendHold, settleHold, releaseHold, sweepExpired, sandboxGrant, statement,
     findHold, findSettlement, computeCharge, available, A_INF, CURRENCY,
 };
