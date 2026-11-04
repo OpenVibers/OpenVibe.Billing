@@ -232,27 +232,30 @@ const nanoBalance = async (t, kind) => (await t.db.prepare(`SELECT COALESCE(SUM(
     });
 
     await check('a paid event while the top-up switch is off is recorded for review and moves no money', async () => {
-        const dave = t.user(204);
-        const daveToken = t.network.signUser({ subject_id: dave.id, username: 'dave' });
-        const r = await start({ provider: 'stripe', project_id: PRJ, amount_cents: 1000 }, daveToken);
-        assert.strictEqual(r.status, 201, r.text);
-        const saved = t.ctx.env.BILLING_CREDITS_TOPUP;
-        t.ctx.env.BILLING_CREDITS_TOPUP = '0';
+        // The owner sets the terms live (no env pin): turn the top-up on, open a checkout, then turn it off
+        // before the provider's paid delivery arrives.
+        const off = await boot({ stripe: true, env: { BILLING_CREDITS: '1' } });
+        const dave = off.user(204);
+        const daveToken = off.network.signUser({ subject_id: dave.id, username: 'dave' });
+        const actor = { type: 'user', id: dave.id };
         try {
-            const paid = await t.stripeEvent(evt('evt_topup_off', 'checkout.session.completed', {
+            await off.ctx.configStore.apply({ topup: true, topup_amounts_cents: [1000], topup_fee_bps: 250 }, { actor, reason: 'top-up test terms' });
+            const r = await off.call('POST', '/api/me/credits/topups', { token: daveToken, body: { provider: 'stripe', project_id: PRJ, amount_cents: 1000 } });
+            assert.strictEqual(r.status, 201, r.text);
+            await off.ctx.configStore.apply({ topup: false }, { merge: true, actor, reason: 'switch the top-up off' });
+            const paid = await off.stripeEvent(evt('evt_topup_off', 'checkout.session.completed', {
                 id: 'cs_topup_off', mode: 'payment', payment_status: 'paid', payment_intent: 'pi_topup_off', amount_total: 1025,
                 metadata: { intent_id: r.json.intent.id },
             }));
             assert.strictEqual(paid.status, 200, JSON.stringify(paid));
             assert.strictEqual(paid.json.result.effect, 'none', JSON.stringify(paid.json));
             assert.strictEqual(paid.json.result.review, true);
-            assert.strictEqual((await read(daveToken)).topups.length, 0, 'no credit and no charge');
-            const txns = await t.db.prepare("SELECT COUNT(*)::int AS n FROM transactions WHERE json_extract(metadata, '$.intent_id') = ?").get(r.json.intent.id);
+            const statement = await (await fetch(`${off.base}/api/me/credits?project_id=${PRJ}`, { headers: { Authorization: `Bearer ${daveToken}` } })).json();
+            assert.strictEqual(statement.topups.length, 0, 'no credit and no charge');
+            const txns = await off.db.prepare("SELECT COUNT(*)::int AS n FROM transactions WHERE json_extract(metadata, '$.intent_id') = ?").get(r.json.intent.id);
             assert.strictEqual(txns.n, 0);
-        } finally {
-            t.ctx.env.BILLING_CREDITS_TOPUP = saved;
-        }
-        await t.assertReconciled('after a refused paid top-up');
+            await off.assertReconciled('after a refused paid top-up');
+        } finally { await off.close(); }
     });
 
     await check('the economy freeze refuses a top-up before any intent or checkout', async () => {

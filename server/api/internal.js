@@ -2,7 +2,8 @@
 
 /**
  * Internal credits ledger API (AI Exchange D2). Service-token authenticated (audience openvibe.billing),
- * mounted under /internal/credits only when BILLING_CREDITS=1. This is the authority surface
+ * mounted under /internal/credits always, each handler refusing while the `credits` owner setting is off.
+ * This is the authority surface
  * OpenVibe.AI calls to reserve, extend, settle and release inference credit.
  */
 const express = require('express');

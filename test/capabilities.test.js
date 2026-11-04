@@ -2,7 +2,8 @@
 /**
  * Billing's capability declarations are the estate's: every `docs/capabilities-proposal/<id>.json` is
  * the capability of that id in the pinned openvibe-contracts, it is listed by that package's billing
- * service manifest, and each `implementedBy` is a real route in `server/api/v1.js`.
+ * service manifest, and each `implementedBy` is a real route in `server/api/v1.js`, the Credits
+ * router (`server/api/internal.js`) or the owner-settings router (`server/internal-config.js`).
  *
  * This is the check a Network grant needs. A default grant naming a capability that exists nowhere in
  * the estate is inert — `auth.needs()` never matches it and a producer's posts 401 — so a capability
@@ -22,6 +23,8 @@ const service = JSON.parse(fs.readFileSync(path.join(contractsDir, 'manifests', 
 const routes = fs.readFileSync(path.join(root, 'server', 'api', 'v1.js'), 'utf8');
 // The Credits capabilities (D9) are served by the /internal/credits router (server/api/internal.js), not /api/v1.
 const internalRoutes = fs.readFileSync(path.join(root, 'server', 'api', 'internal.js'), 'utf8');
+// The owner-settings capability (D11) is served by /internal/config (server/internal-config.js).
+const configRoutes = fs.readFileSync(path.join(root, 'server', 'internal-config.js'), 'utf8');
 
 assert.ok(proposals.length > 0, 'docs/capabilities-proposal has no capability declarations');
 
@@ -38,11 +41,13 @@ for (const p of proposals) {
     for (const impl of p.implementedBy) {
         // 'POST /api/v1/usage' or 'GET|POST /api/v1/admin/freeze'.
         const [methods, url] = impl.split(' ');
-        const internal = /^\/internal\/credits(\/|$)/.test(url);
-        const route = internal ? url.replace(/^\/internal\/credits/, '') : url.replace(/^\/api\/v1/, '');
-        const source = internal ? internalRoutes : routes;
+        const credits = /^\/internal\/credits(\/|$)/.test(url);
+        const config = /^\/internal\/config(\/|$)/.test(url);
+        const route = credits ? url.replace(/^\/internal\/credits/, '') : config ? url : url.replace(/^\/api\/v1/, '');
+        const source = credits ? internalRoutes : config ? configRoutes : routes;
+        const where = credits ? 'server/api/internal.js' : config ? 'server/internal-config.js' : 'server/api/v1.js';
         for (const m of methods.split('|')) {
-            assert.ok(source.includes(`r.${m.toLowerCase()}('${route}'`), `${p.id}: ${impl} is not a route in server/api/${internal ? 'internal' : 'v1'}.js`);
+            assert.ok(source.includes(`r.${m.toLowerCase()}('${route}'`), `${p.id}: ${impl} is not a route in ${where}`);
         }
     }
 }

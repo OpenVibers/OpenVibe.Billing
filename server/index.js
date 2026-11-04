@@ -54,8 +54,10 @@ const { createPgTelemetrySink, startTelemetryRetention } = require('openvibe-sdk
                 if (out.rated || out.skipped || out.failed) console.log(`[Billing] rating: ${out.rated} rated, ${out.skipped} left unrated, ${out.failed} failed`);
             });
         }
-        if (config.credits.enabled && config.credits.sweepIntervalMs > 0) {
+        if (config.credits.sweepIntervalMs > 0) {
             every(config.credits.sweepIntervalMs, async () => {
+                // The owner may open the ledger live; the sweep follows the current setting.
+                if (!ctx.config.credits.enabled) return;
                 const out = await inference.sweepExpired(ctx);
                 if (out.released) console.log(`[Billing] inference lease sweep: ${out.released} expired holds released`);
             });

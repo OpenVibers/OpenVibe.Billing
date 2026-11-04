@@ -64,7 +64,7 @@ promo write changes both in one transaction.
 - OpenVibe.Network (JWKS for service tokens; SSO with PKCE for the staff console; `identity.subject.resolve` for the Live import)
 - OpenVibe.Events (the SDK outbox relay, when `EVENTS_URL` and the OAuth client secret are set)
 - the payment providers whose secrets are configured (none in production today)
-- `openvibe-contracts` v0.287.0, `openvibe-sdk` v0.82.0 (service tokens, per-person limits, `openvibe-sdk/db`, `openvibe-sdk/service`), `openvibe-shared` v4.109.2, pinned by release tarball
+- `openvibe-contracts` v0.288.0, `openvibe-sdk` v0.82.0 (service tokens, per-person limits, `openvibe-sdk/db`, `openvibe-sdk/service`), `openvibe-shared` v4.110.0, pinned by release tarball
 - **PostgreSQL 18 and Valkey 9** (OpenVibe.Host `roles/data/`, ADR-035): every read and write is async through
   `openvibe-sdk/db`; Valkey holds the per-person limit counters (optional: without `VALKEY_URL` they count in the process)
 
@@ -119,7 +119,19 @@ Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
   settles once whatever event, retry or API call carries it.
 - **Freeze** (ADR-012 rule 11): `settings.freeze`; while on, every mutating endpoint answers
   `503 billing.frozen`, reads work, webhooks are stored (202) and processed in arrival order after
-  unfreeze. Jobs pause.
+  unfreeze. Jobs pause. The owner's `money_writes_frozen` switch keeps its own audited path
+  (`/api/admin/money`); it is not configuration and no rollback may move it.
+- **Owner settings (D11)** ([server/config-store.js](server/config-store.js)): the namespace
+  `billing.credits` holds the Credits switch, the sandbox grants, the top-up switch, its amounts and
+  fee, and the hold lease, through openvibe-shared/config. Each key keeps the environment variable it
+  had as an `x-env` pin: while that variable is set its value wins and a write is `409
+  config.pinned_in_env`; otherwise the owner sets it from Network's AI tab and it applies live. The
+  routes are `/internal/config` (capability `billing.config.manage`, Network's service token), with the
+  owner's `usr_` id in `X-OV-Subject` and `X-OV-Fresh: 1` for the danger keys (`credits`, `topup`,
+  `topup_amounts_cents`, `topup_fee_bps`). Every activation writes a `staff_audit` row with the keys,
+  actor and revision, never a value. With `OV_CONFIG_KEKS` set the store seals secrets and reseals old
+  plaintext rows at boot; this namespace has no secret-class keys, so it reports `sealed` but exposes no
+  value.
 - **Outbox**: openvibe-sdk/events stores pending envelopes in `service_outbox` and relays them with Billing's service token. The legacy `outbox` table stays through the N-1 rollback window. Events include `billing.transaction.settled|reversed`, `billing.entitlement.changed`,
   `billing.subscription.canceled`, `billing.cashout.requested|paid|denied`, `billing.staff.action`,
   `billing.receipt.external`, written in the same transaction as the effect (events.event-envelope@1,
@@ -228,6 +240,7 @@ Contracts service manifests name (never a wildcard), never cached, limited to 30
 | `POST /api/v1/admin/sweep`, `GET /api/v1/admin/import-holds` | `billing.ledger.admin` | renewal sweep now; unmapped import users |
 | `POST /webhooks/<provider>` | provider signature | `powerchat`, `stripe`, `paypal`, `ccbill` (GET too), `nowpayments` |
 | `GET /metrics` | direct loopback caller | Prometheus text (openvibe-shared/metrics): HTTP golden signals, process, `release_info`, and `billing_*` gauges — freeze, authority, receipts by state, oldest pending receipt, EXTERNAL receipts, outbox backlog, cashouts, the latest reconciliation. 404 to anything a proxy relayed; nginx answers 404 on the public host |
+| `GET\|POST /internal/config[/:namespace[/history\|rollback]]`, `PUT\|DELETE …/secrets/:key` | `billing.config.manage` | owner settings (D11): namespace summaries with the schema, values, pins and `sealed`; apply a change (danger keys need `X-OV-Fresh: 1`); history and rollback. Network's AI tab is the only caller; nginx 404s `/internal/` on the public host |
 
 The existing capabilities and service manifest are released in openvibe-contracts (v0.8.0;
 `billing.staff.action` since v0.17.0). `billing.usage.record` is released in Contracts v0.85.0: input is

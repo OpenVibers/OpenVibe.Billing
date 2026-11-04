@@ -13,6 +13,7 @@ const { ids } = require('openvibe-contracts');
 const { enqueue } = require('../outbox');
 const { post, balance, requireFunds, money, iso, prefixedId } = require('../ledger');
 const { A, entry, fail, userSubject, positiveInt, text, isFrozen, MAX_RECEIPT_CENTS } = require('./common');
+const { valuesFromEnv, parseAmounts } = require('../config-store');
 
 const CURRENCY = 'nano-usd';
 // D9: 1 cent = 10,000,000 nano-USD. The checkout top-up is priced in whole cents at the edge.
@@ -24,40 +25,34 @@ const TERMINAL_STATUSES = ['settled', 'released', 'expired'];
 /**
  * The owner's Credits top-up terms: the only reader of the amounts, the fee and the top-up switch.
  *
- * Today they come from the environment. D11 moves this one function to Billing's own config namespace
- * `billing.credits`, so the owner sets them from Network's AI tab; no other code reads the env directly.
- * There is no default amount and no default fee: with either unset or invalid the result is
- * `configured: false` and the person's route refuses (503 billing.topup_unconfigured).
+ * D11: they come from Billing's own config namespace `billing.credits`, through the store on ctx, so the
+ * owner sets them from Network's AI tab and a change applies live. There is no default amount and no
+ * default fee: with either unset or invalid the result is `configured: false` and the person's route
+ * refuses (503 billing.topup_unconfigured). A context without a store (a unit test) reads the old env
+ * names, which are also the namespace's x-env pins while they are set.
  *
  * Returns { enabled, amountsCents: number[], feeBps: number|null, configured, problem }.
  */
 function topupTerms(ctx) {
-    const env = (ctx && ctx.env) || process.env;
+    const values = ctx && ctx.configStore ? ctx.configStore.get() : valuesFromEnv(ctx && ctx.env);
     const problems = [];
-    const enabled = ['1', 'true', 'yes', 'on'].includes(String(env.BILLING_CREDITS_TOPUP || '').toLowerCase());
+    const enabled = values.topup === true;
     let amountsCents = [];
-    const rawAmounts = String(env.BILLING_CREDITS_TOPUP_AMOUNTS_CENTS == null ? '' : env.BILLING_CREDITS_TOPUP_AMOUNTS_CENTS).trim();
-    if (!rawAmounts) {
-        problems.push('BILLING_CREDITS_TOPUP_AMOUNTS_CENTS is not set');
+    const raw = values.topup_amounts_cents;
+    if (raw == null || (Array.isArray(raw) && !raw.length)) {
+        problems.push('topup_amounts_cents is not set');
     } else {
-        const seen = new Set();
-        for (const part of rawAmounts.split(',')) {
-            const s = part.trim();
-            const n = Number(s);
-            if (!/^[0-9]+$/.test(s) || !Number.isSafeInteger(n) || n <= 0 || n > MAX_RECEIPT_CENTS) {
-                problems.push(`BILLING_CREDITS_TOPUP_AMOUNTS_CENTS has an invalid amount "${s}"`);
-                continue;
-            }
-            seen.add(n);
-        }
-        amountsCents = [...seen].sort((a, b) => a - b);
+        const parsed = parseAmounts(raw);
+        if (parsed.empty) problems.push('topup_amounts_cents is not set');
+        else for (const s of parsed.invalid) problems.push(`topup_amounts_cents has an invalid amount "${s}"`);
+        amountsCents = parsed.values;
     }
     let feeBps = null;
-    const rawFee = String(env.BILLING_CREDITS_TOPUP_FEE_BPS == null ? '' : env.BILLING_CREDITS_TOPUP_FEE_BPS).trim();
+    const rawFee = values.topup_fee_bps == null ? '' : String(values.topup_fee_bps).trim();
     if (!rawFee) {
-        problems.push('BILLING_CREDITS_TOPUP_FEE_BPS is not set');
+        problems.push('topup_fee_bps is not set');
     } else if (!/^[0-9]+$/.test(rawFee) || !Number.isSafeInteger(Number(rawFee)) || Number(rawFee) > 10_000) {
-        problems.push(`BILLING_CREDITS_TOPUP_FEE_BPS must be an integer from 0 to 10000 (got "${rawFee}")`);
+        problems.push(`topup_fee_bps must be an integer from 0 to 10000 (got "${rawFee}")`);
     } else {
         feeBps = Number(rawFee);
     }

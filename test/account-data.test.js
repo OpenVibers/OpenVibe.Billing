@@ -39,7 +39,10 @@ const envelope = (id, type, payload) => ({ event_id: id, event_type: type, sourc
         try {
             const missing = await uncovered(d, {
                 tables: TABLES,
-                               exempt: {"account_data_events":"the ledger of requests itself: which export and deletion Billing applied"},
+                exempt: {
+                    "account_data_events": "the ledger of requests itself: which export and deletion Billing applied",
+                    "config_snapshots": "the owner-settings journal: the acting operator and key names, a configuration history rather than the account's own data",
+                },
             });
             assert.deepStrictEqual(missing, [], `a table with a person column is neither covered nor exempted: ${missing.join(', ')}`);
         } finally { await d.close(); }

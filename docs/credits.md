@@ -75,13 +75,18 @@ There is never any prompt or answer: Billing never receives them.
 
 Behind `BILLING_CREDITS_TOPUP` (off, and only meaningful with `BILLING_CREDITS=1`). The owner sets every amount and
 the fee; the code has no default amount and no default fee. **One function reads the terms**:
-`topupTerms(ctx)` in `server/ops/credits.js`. Today it reads these env vars; D11 moves it to Billing's own config
-namespace `billing.credits`, so the owner sets them from Network's AI tab. No other code reads them directly.
+`topupTerms(ctx)` in `server/ops/credits.js`. Since D11 they are the `billing.credits` namespace of Billing's
+owner settings (`server/config-store.js`), set from Network's AI tab and applied live:
 
-- `BILLING_CREDITS_TOPUP_AMOUNTS_CENTS`: a comma-separated list of whole USD cents. These are the only amounts a
-  person may buy.
-- `BILLING_CREDITS_TOPUP_FEE_BPS`: the fee in integer basis points, charged on top of the amount. `0` is a real,
-  configured fee (free); leaving it unset is not.
+- `topup_amounts_cents` (env pin `BILLING_CREDITS_TOPUP_AMOUNTS_CENTS`): whole USD cents. These are the only
+  amounts a person may buy. The env pin still takes a comma-separated list; the owner writes a JSON array.
+- `topup_fee_bps` (env pin `BILLING_CREDITS_TOPUP_FEE_BPS`): the fee in integer basis points, charged on top of
+  the amount. `0` is a real, configured fee (free); leaving it unset is not.
+
+The same namespace holds `credits` (`BILLING_CREDITS`), `sandbox` (`BILLING_CREDITS_SANDBOX`), `topup`
+(`BILLING_CREDITS_TOPUP`) and `hold_lease_seconds` (`BILLING_INFERENCE_LEASE_SECONDS`). While an env pin is set
+it wins and the owner's write is `409 config.pinned_in_env`; nothing changes until the owner sets a value.
+`money_writes_frozen` is **not** in the namespace: it keeps its own audited switch at `/api/admin/money`.
 
 Both are required. With either unset or malformed, `POST /api/me/credits/topups` refuses with
 `503 billing.topup_unconfigured` before creating an intent or opening a provider checkout.
@@ -146,9 +151,11 @@ listed here before it is offered.
    - Turn the flag on for staff projects only. Funding is still off, so real balances are zero: staff try the flow
      with sandbox tokens on sandbox credit, which pays for nothing real.
 3. **Funding.** Add the checkout top-up into `usd_credit`; this is a separate change, and the owner sets the prices
-   and terms. Turn on `BILLING_CREDITS_TOPUP` only after the owner sets
-   `BILLING_CREDITS_TOPUP_AMOUNTS_CENTS` and `BILLING_CREDITS_TOPUP_FEE_BPS` (no default exists), and confirm
-   `POST /api/me/credits/topups` is reachable through the vhost. Reconcile before and after the first real payment.
+   and terms in `billing.credits` from Network's AI tab (or through the old env pins
+   `BILLING_CREDITS_TOPUP`, `BILLING_CREDITS_TOPUP_AMOUNTS_CENTS` and `BILLING_CREDITS_TOPUP_FEE_BPS` while the
+   deployment still sets them; an env pin wins and the owner's write is 409). Turn the top-up on only after the
+   owner sets the amounts and the fee (no default exists), and confirm `POST /api/me/credits/topups` is reachable
+   through the vhost. Reconcile before and after the first real payment.
 4. **Kill switch.** `BILLING_CREDITS=0` refuses every hold (503). OpenVibe AI then refuses paid requests with a clear
    error, while BYOK, the person's own machine and sandbox keep working. `money_writes_frozen` freezes the whole
    economy, Credits included.

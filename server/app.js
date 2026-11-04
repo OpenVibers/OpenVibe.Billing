@@ -26,6 +26,8 @@ const { createKeyProvider, createIdentity } = require('./network');
 const { createAuth } = require('./api/auth');
 const { v1Router } = require('./api/v1');
 const { internalRouter } = require('./api/internal');
+const { createBillingConfig, applyValues } = require('./config-store');
+const { internalConfigRouter } = require('./internal-config');
 const { createActorLimits } = require('./api/actor-limits');
 const { webhooksRouter } = require('./api/webhooks');
 const { consoleRouter } = require('./console');
@@ -52,9 +54,13 @@ async function createApp(opts = {}) {
         validate: (env) => contracts.validate('events.event-envelope@1', env),
         ...(opts.fetchImpl ? { fetch: fetchImpl } : {}),
     });
-    // ctx.env is the raw environment for the few settings read at the edge instead of loadConfig(): today only
-    // topupTerms() (D11 will read Billing's config namespace instead). Tests pass their own env through here.
+    // ctx.env is the raw environment the owner-settings store reads its x-env pins from; the service reads the
+    // settings themselves through ctx.configStore (D11). Tests pass their own env through here.
     const ctx = { db, config, env: opts.env || process.env, rates: createRates(config.rates), now: opts.now || (() => Date.now()), network: identity, log, outbox };
+    // D11 owner settings: `billing.credits` is the source of the Credits switches, the top-up terms and the
+    // hold lease. The env pins keep today's variables winning while they are set; a change applies live.
+    ctx.configStore = await createBillingConfig({ db, env: ctx.env, log, onActivate: (values) => applyValues(config, values) });
+    applyValues(config, ctx.configStore.get());
     const adapters = opts.adapters || providers.createAdapters(config, { fetchImpl, network: identity });
     const auth = createAuth({ config, keys });
 
@@ -102,6 +108,8 @@ async function createApp(opts = {}) {
     });
     app.get('/api/ready', readiness.handler);
 
+    // Owner settings (D11): Network's service token, capability billing.config.manage. Before every public route.
+    app.use(internalConfigRouter({ ctx, auth }));
     app.use('/webhooks', webhooksRouter({ ctx, adapters }));
     // Account export and deletion (ADR-033, server/account-data.js): OpenVibe.Events delivers network.account.* to
     // 127.0.0.1:4600 directly (the consumer refuses anything that came through a proxy; nginx 404s /internal/ too), and
@@ -113,10 +121,9 @@ async function createApp(opts = {}) {
     app.post('/internal/events', accountData.consumer({ secrets: config.events.webhookSecrets, send: accountSend }));
     app.locals.accountData = accountData;
     app.locals.accountSend = accountSend;
-    // Inference subledger (AI Exchange D2): only when BILLING_CREDITS=1.
-    if (config.credits.enabled) {
-        app.use('/internal/credits', express.json({ limit: '64kb' }), internalRouter({ ctx, auth }));
-    }
+    // Inference subledger (AI Exchange D2): mounted always, each handler refuses with 503 billing.not_enabled
+    // while the `credits` setting is off, so the owner can open it live from Network's AI tab.
+    app.use('/internal/credits', express.json({ limit: '64kb' }), internalRouter({ ctx, auth }));
     // Per-person limits on the money-creating routes (api/actor-limits.js); the webhooks above never are.
     const limits = createActorLimits({ config, db, now: opts.limitsNow || (() => Date.now()), registry: metrics.registry, log, valkey });
     app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters, limits }));
