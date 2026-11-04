@@ -32,6 +32,9 @@ assert.ok(tls.indexOf(transfers[0]) < tls.indexOf('location ^~ /api/ { return 40
 const fromBalance = tls.match(/location = \/api\/me\/vibes\/from-balance \{([^}]*)\}/);
 assert.ok(fromBalance && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(fromBalance[1]) && /limit_req /.test(fromBalance[1]), 'a rate-limited location for POST /api/me/vibes/from-balance');
 assert.ok(tls.indexOf(fromBalance[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
+const activity = tls.match(/location = \/api\/me\/activity \{([^}]*)\}/);
+assert.ok(activity && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(activity[1]) && /limit_req /.test(activity[1]), 'a rate-limited location for /api/me/activity');
+assert.ok(tls.indexOf(activity[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
 const credits = tls.match(/location = \/api\/me\/credits \{([^}]*)\}/);
 assert.ok(credits && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(credits[1]) && /limit_req /.test(credits[1]), 'a rate-limited location for /api/me/credits');
 assert.ok(tls.indexOf(credits[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
@@ -39,4 +42,4 @@ const topups = tls.match(/location = \/api\/me\/credits\/topups \{([^}]*)\}/);
 assert.ok(topups && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(topups[1]) && /limit_req /.test(topups[1]), 'a rate-limited location for POST /api/me/credits/topups');
 assert.ok(tls.indexOf(topups[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
 assert.match(tls, /location \^~ \/api\/v1 \{ deny all; \}/);
-console.log('nginx vhost: the policy is indexable, the rest noindex; /api/me/vibes, /api/me/balance, /api/me/balance/transfers, /api/me/vibes/from-balance, /api/me/credits and /api/me/credits/topups public, /api/v1 loopback only');
+console.log('nginx vhost: the policy is indexable, the rest noindex; /api/me/vibes, /api/me/balance, /api/me/balance/transfers, /api/me/vibes/from-balance, /api/me/activity, /api/me/credits and /api/me/credits/topups public, /api/v1 loopback only');

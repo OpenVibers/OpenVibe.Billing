@@ -87,6 +87,22 @@ The `projects` are the ones the person administers: Billing asks Network with it
 
 There is never any prompt or answer: Billing never receives them.
 
+## Activity
+
+`GET /api/me/activity?limit=50&before=<transaction id>` (the same person token and CORS as `/api/me/balance`,
+rate limited) is the person's own movement list for Network's wallet:
+
+- one row per currency part of a transaction: `{ id, at, kind, label, detail, amount }`;
+- `kind` is `balance` (signed nano-USD decimal string) or `vibes` (signed whole integer);
+- a transaction that moves both (Get Vibes with Balance) has two rows with the same `id`, so the client groups them;
+- labels are plain words: Added money (the provider in detail), AI usage (the model and request count from the
+  settlement), Got Vibes, Tipped @name (the creator's public name only), Paid <app> (Vibes Pay), Moved to <project>,
+  Refund;
+- only Balance (`usd_credit user:<usr_id>`) and spendable Vibes (`user_credit`) are read: never sandbox, another
+  person's account, a project secret or an email.
+
+The answer is `{ activity: [...], next_before: <transaction id>|null }`; pass `next_before` back as `before`.
+
 ## Moving Balance
 
 `POST /api/me/balance/transfers` with `{ to_project_id, amount_nano_usd, idempotency_key }` moves money from the

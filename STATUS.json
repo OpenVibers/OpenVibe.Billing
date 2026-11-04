@@ -35,6 +35,7 @@
     "Balance held by a person (usd_credit: user:<usr_id>) or a project (project:<prj_id>), with personal and project holds",
     "GET /api/me/balance (and the /api/me/credits alias): the person's Balance plus every project they administer, read from Network with Billing's service token",
     "moving personal Balance to a project (atomic, idempotent, admin only) and getting Vibes with Balance at the pack value rate",
+    "GET /api/me/activity: the person's own Balance and Vibes movements with plain labels, two rows for a two-currency transaction, and cursor pagination",
     "owner settings: billing.vibes (Vibes Pay, the largest charge, the daily app spend per person and from_balance)",
     "network-wide money counts with no person in them, for products' public stats (billing.stats.read)",
     "account export and deletion (ADR-033)",

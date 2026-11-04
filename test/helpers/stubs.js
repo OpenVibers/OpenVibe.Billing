@@ -28,7 +28,8 @@ async function startNetwork() {
     const legacy = {};          // live user id → subject id
     const resolveCalls = [];
     const grants = [];
-    const memberships = [];      // { project_id, subject, role, archived }
+    const memberships = [];      // { project_id, subject, role, archived, name }
+    const publicNames = new Map(); // subject id -> username (the public name only)
     let issuer = 'http://network.test';
     const state = { down: false };
 
@@ -53,16 +54,17 @@ async function startNetwork() {
             iss: issuer, aud: ['openvibe.live', 'openvibe.tools', 'openvibe.games', 'openvibe.media', 'openvibe.network'], iat: now, exp: now + 86400,
         }, privatePem);
     }
-    function addUser(liveId) {
+    function addUser(liveId, username = null) {
         const subject = ids.newId('user');
         if (liveId != null) legacy[String(liveId)] = subject;
+        if (username) publicNames.set(subject, username);
         return subject;
     }
     /** Record a project membership; the D12 reads return it. */
-    function addMembership(projectId, subject, role = 'owner', archived = false) {
+    function addMembership(projectId, subject, role = 'owner', archived = false, name = null) {
         const existing = memberships.find((m) => m.project_id === projectId && m.subject === subject);
-        if (existing) Object.assign(existing, { role, archived });
-        else memberships.push({ project_id: projectId, subject, role, archived });
+        if (existing) Object.assign(existing, { role, archived, name });
+        else memberships.push({ project_id: projectId, subject, role, archived, name });
         return memberships[memberships.length - 1];
     }
 
@@ -111,9 +113,17 @@ async function startNetwork() {
             const body = JSON.parse(raw || '{}');
             resolveCalls.push(body);
             const results = {};
-            for (const id of body.ids || []) {
-                const s = body.system === 'live' ? legacy[String(id)] : null;
-                results[String(id)] = s ? { subject: { type: 'user', id: s }, username: `u${id}` } : null;
+            if (Array.isArray(body.subject_ids)) {
+                for (const id of body.subject_ids) {
+                    results[String(id)] = publicNames.has(String(id))
+                        ? { subject: { type: 'user', id: String(id) }, username: publicNames.get(String(id)), display_name: publicNames.get(String(id)) }
+                        : null;
+                }
+            } else {
+                for (const id of body.ids || []) {
+                    const s = body.system === 'live' ? legacy[String(id)] : null;
+                    results[String(id)] = s ? { subject: { type: 'user', id: s }, username: `u${id}` } : null;
+                }
             }
             return send(res, 200, { results });
         }
@@ -123,7 +133,7 @@ async function startNetwork() {
     issuer = url;
     // A person's Network session token, as the browser holds it (the shared navbar sends it).
     const signUser = (u) => userToken({ role: 'user', username: 'someone', nowMs: Date.now(), ...u });
-    return { url, publicPem, signService, signUser, addUser, addMembership, memberships, authorize, revoked, legacy, resolveCalls, grants, state, close: () => new Promise((r) => server.close(r)) };
+    return { url, publicPem, signService, signUser, addUser, addMembership, memberships, publicNames, authorize, revoked, legacy, resolveCalls, grants, state, close: () => new Promise((r) => server.close(r)) };
 }
 
 async function startStripe() {

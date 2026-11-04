@@ -13,6 +13,7 @@
  *
  *   GET /api/me/balance    the person's Balance plus the Balance of every project they administer
  *   GET /api/me/credits    the same answer (the old wire path stays an alias)
+ *   GET /api/me/activity   the person's own Balance and Vibes movements, newest first (before=<txn id>)
  *   POST /api/me/balance/transfers  { to_project_id, amount_nano_usd, idempotency_key }
  *   POST /api/me/vibes/from-balance { vibes, idempotency_key }
  *
@@ -28,6 +29,7 @@ const { balance } = require('../ledger');
 const { A } = require('../ops/common');
 const topups = require('../ops/topups');
 const balances = require('../ops/balance');
+const activity = require('../ops/activity');
 
 const HOST_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 let origins = null;
@@ -105,6 +107,15 @@ function meRouter({ ctx, config, keys, limits, adapters }) {
             return res.json(await require('../ops/credits').statement(ctx, req.person.subject, projectId));
         } catch (e) {
             return failure(req, res, e, 'the project is unavailable');
+        }
+    });
+
+    // The person's own movements over Balance and Vibes (D12, Network's /wallet). Their token, their accounts only.
+    r.get('/activity', person, limits.selfRead, async (req, res) => {
+        try {
+            return res.json(await activity.activity(ctx, req.person.subject, { limit: req.query.limit, before: req.query.before }));
+        } catch (e) {
+            return failure(req, res, e, 'the activity is unavailable');
         }
     });
 

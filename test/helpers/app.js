@@ -93,7 +93,7 @@ async function boot(opts = {}) {
         return r.json;
     }
 
-    const user = (liveId) => ({ type: 'user', id: network.addUser(liveId) });
+    const user = (liveId, username = null) => ({ type: 'user', id: network.addUser(liveId, username) });
 
     return {
         app, base, call, ctx, db: ctx.db, config, clock, network, stripe, powerchat, stripeEvent, assertReconciled, balances, user, logs, dir,

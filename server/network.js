@@ -6,8 +6,8 @@
  *   keys      the Network's RS256 signing keys: openvibe-sdk/auth createNetworkKeys (OV_NETWORK_PUBLIC_KEY pinned,
  *             else the JWKS, retried every 30 s until it loads, refreshed every 15 minutes, a rotation followed on
  *             an unknown kid) — verifies service tokens and the console's sign-in
- *   identity  Live user ids → canonical subjects via POST /internal/identity/resolve-batch
- *             { system: 'live', type: 'user', ids } with a client-credentials token
+ *   identity  Live user ids → canonical subjects, and subject ids → their public names, via
+ *             POST /internal/identity/resolve-batch with a client-credentials token
  *             (audience openvibe.network, capability identity.subject.resolve)
  *   projects  the projects a person administers (GET /internal/projects?subject=usr_…, capability
  *             network.project.member.read) and one membership (GET /internal/projects/:id/members/:subject),
@@ -47,6 +47,23 @@ function createIdentity(config, { fetchImpl = globalThis.fetch } = {}) {
         return data.results;
     }
 
+    /** Subject ids → Map(subject id → { username, display_name } | null), for public names only. */
+    async function profiles(subjectIds) {
+        const out = new Map();
+        const list = [...new Set(subjectIds.map(String))];
+        for (let i = 0; i < list.length; i += BATCH) {
+            const chunk = list.slice(i, i + BATCH);
+            const results = await post({ subject_ids: chunk });
+            for (const k of chunk) {
+                const p = results[k];
+                out.set(k, p && p.subject && p.subject.type === 'user'
+                    ? { username: typeof p.username === 'string' ? p.username : null, display_name: typeof p.display_name === 'string' ? p.display_name : null }
+                    : null);
+            }
+        }
+        return out;
+    }
+
     /** Live user ids → Map(String(id) → subject id | null). */
     async function resolveLiveUsers(liveIds) {
         const out = new Map();
@@ -61,7 +78,7 @@ function createIdentity(config, { fetchImpl = globalThis.fetch } = {}) {
         }
         return out;
     }
-    return { resolveLiveUsers };
+    return { resolveLiveUsers, profiles };
 }
 
 /**

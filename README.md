@@ -133,7 +133,8 @@ Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
   plaintext rows at boot; this namespace has no secret-class keys, so it reports `sealed` but exposes no
   value. `billing.vibes` holds the Vibes Pay switch and limit, the daily app spend per person and the
   `from_balance` switch (`vibes_pay` and `from_balance` are danger keys); `GET /api/me/balance`, the transfer
-  and the Vibes purchase are in [docs/balance.md](docs/balance.md).
+  and the Vibes purchase are in [docs/balance.md](docs/balance.md); `GET /api/me/activity` is the person's own
+  movement list for Network's wallet.
 - **Outbox**: openvibe-sdk/events stores pending envelopes in `service_outbox` and relays them with Billing's service token. The legacy `outbox` table stays through the N-1 rollback window. Events include `billing.transaction.settled|reversed`, `billing.entitlement.changed`,
   `billing.subscription.canceled`, `billing.cashout.requested|paid|denied`, `billing.staff.action`,
   `billing.receipt.external`, written in the same transaction as the effect (events.event-envelope@1,

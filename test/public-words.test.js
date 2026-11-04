@@ -8,7 +8,7 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
 const docFiles = ['README.md', 'STATUS.json', 'docs/balance.md', 'docs/service-manifest-proposal.json', 'deploy/nginx/billing.openvibe.network.conf'];
-const textFiles = ['server/policy.js', 'server/console/views.js', 'server/config-store.js', 'server/api/me.js', 'server/ops/credits.js', 'server/ops/topups.js', 'server/ops/balance.js', 'server/ops/intents.js', 'server/ops/reversals.js', 'server/api/internal.js'];
+const textFiles = ['server/policy.js', 'server/console/views.js', 'server/config-store.js', 'server/api/me.js', 'server/ops/credits.js', 'server/ops/topups.js', 'server/ops/balance.js', 'server/ops/activity.js', 'server/ops/intents.js', 'server/ops/reversals.js', 'server/api/internal.js'];
 
 for (const f of docFiles) assert.ok(!/Credits/.test(read(f)), `${f} has no "Credits"`);
 for (const f of textFiles) {
