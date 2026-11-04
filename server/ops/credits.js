@@ -12,7 +12,7 @@
 const { ids } = require('openvibe-contracts');
 const { enqueue } = require('../outbox');
 const { post, balance, requireFunds, money, iso, prefixedId } = require('../ledger');
-const { A, entry, fail, userSubject, positiveInt, text, isFrozen } = require('./common');
+const { A, entry, fail, userSubject, positiveInt, text, isFrozen, MAX_RECEIPT_CENTS } = require('./common');
 
 const CURRENCY = 'nano-usd';
 // D9: 1 cent = 10,000,000 nano-USD. The checkout top-up is priced in whole cents at the edge.
@@ -20,6 +20,49 @@ const NANO_PER_CENT = 10_000_000n;
 const ACTOR = { type: 'service', id: 'billing' };
 const ACTIVE_STATUSES = ['active', 'extended'];
 const TERMINAL_STATUSES = ['settled', 'released', 'expired'];
+
+/**
+ * The owner's Credits top-up terms: the only reader of the amounts, the fee and the top-up switch.
+ *
+ * Today they come from the environment. D11 moves this one function to Billing's own config namespace
+ * `billing.credits`, so the owner sets them from Network's AI tab; no other code reads the env directly.
+ * There is no default amount and no default fee: with either unset or invalid the result is
+ * `configured: false` and the person's route refuses (503 billing.topup_unconfigured).
+ *
+ * Returns { enabled, amountsCents: number[], feeBps: number|null, configured, problem }.
+ */
+function topupTerms(ctx) {
+    const env = (ctx && ctx.env) || process.env;
+    const problems = [];
+    const enabled = ['1', 'true', 'yes', 'on'].includes(String(env.BILLING_CREDITS_TOPUP || '').toLowerCase());
+    let amountsCents = [];
+    const rawAmounts = String(env.BILLING_CREDITS_TOPUP_AMOUNTS_CENTS == null ? '' : env.BILLING_CREDITS_TOPUP_AMOUNTS_CENTS).trim();
+    if (!rawAmounts) {
+        problems.push('BILLING_CREDITS_TOPUP_AMOUNTS_CENTS is not set');
+    } else {
+        const seen = new Set();
+        for (const part of rawAmounts.split(',')) {
+            const s = part.trim();
+            const n = Number(s);
+            if (!/^[0-9]+$/.test(s) || !Number.isSafeInteger(n) || n <= 0 || n > MAX_RECEIPT_CENTS) {
+                problems.push(`BILLING_CREDITS_TOPUP_AMOUNTS_CENTS has an invalid amount "${s}"`);
+                continue;
+            }
+            seen.add(n);
+        }
+        amountsCents = [...seen].sort((a, b) => a - b);
+    }
+    let feeBps = null;
+    const rawFee = String(env.BILLING_CREDITS_TOPUP_FEE_BPS == null ? '' : env.BILLING_CREDITS_TOPUP_FEE_BPS).trim();
+    if (!rawFee) {
+        problems.push('BILLING_CREDITS_TOPUP_FEE_BPS is not set');
+    } else if (!/^[0-9]+$/.test(rawFee) || !Number.isSafeInteger(Number(rawFee)) || Number(rawFee) > 10_000) {
+        problems.push(`BILLING_CREDITS_TOPUP_FEE_BPS must be an integer from 0 to 10000 (got "${rawFee}")`);
+    } else {
+        feeBps = Number(rawFee);
+    }
+    return { enabled, amountsCents, feeBps, configured: problems.length === 0, problem: problems.length ? problems.join('; ') : null };
+}
 
 const A_INF = {
     credit: (subject, projectId) => ({ kind: 'usd_credit', owner: `${subject}:${projectId}`, currency: CURRENCY }),
@@ -528,5 +571,5 @@ async function findSettlement(db, { holdId, id } = {}) {
 
 module.exports = {
     createHold, extendHold, settleHold, releaseHold, sweepExpired, sandboxGrant, statement,
-    findHold, findSettlement, computeCharge, available, A_INF, CURRENCY, NANO_PER_CENT,
+    findHold, findSettlement, computeCharge, available, topupTerms, A_INF, CURRENCY, NANO_PER_CENT,
 };

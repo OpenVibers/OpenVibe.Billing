@@ -74,7 +74,9 @@ There is never any prompt or answer: Billing never receives them.
 ## Top-up: a person funds their own Credits
 
 Behind `BILLING_CREDITS_TOPUP` (off, and only meaningful with `BILLING_CREDITS=1`). The owner sets every amount and
-the fee; the code has no default amount and no default fee:
+the fee; the code has no default amount and no default fee. **One function reads the terms**:
+`topupTerms(ctx)` in `server/ops/credits.js`. Today it reads these env vars; D11 moves it to Billing's own config
+namespace `billing.credits`, so the owner sets them from Network's AI tab. No other code reads them directly.
 
 - `BILLING_CREDITS_TOPUP_AMOUNTS_CENTS`: a comma-separated list of whole USD cents. These are the only amounts a
   person may buy.
@@ -84,15 +86,33 @@ the fee; the code has no default amount and no default fee:
 Both are required. With either unset or malformed, `POST /api/me/credits/topups` refuses with
 `503 billing.topup_unconfigured` before creating an intent or opening a provider checkout.
 
+**Every provider carries a Credits intent** through the same multi-purpose pipeline as a Vibes purchase
+(`server/providers/index.js` receive → store → process → `applyPlan`):
+
+| Provider | How the person pays | The adapter maps its verified delivery to |
+|---|---|---|
+| Stripe | hosted checkout (`checkout.session.completed`) | the shared `credits_topup` plan |
+| PayPal | hosted checkout, then capture (`PAYMENT.CAPTURE.COMPLETED`) | the shared `credits_topup` plan |
+| CCBill | hosted FlexForm (`NewSaleSuccess`) | the shared `credits_topup` plan |
+| NOWPayments | hosted invoice (`payment_status` finished/confirmed/sending) | the shared `credits_topup` plan |
+| PowerChat | a site-account tip carrying `app_ref=pccredit:<intent>` (`donation.completed`) | the shared `credits_topup` plan |
+
+There is one plan effect (`credits_topup`) and one settle function: adapters only map their own verified delivery to
+it, exactly as they map to `purchase`. PowerChat has no hosted checkout URL; Billing returns the intent's
+`checkout_ref` (`pccredit:<intent>`) for the product to put in the tip's `app_ref`. No provider is silently skipped:
+an adapter that is not enabled is refused at start (`409 billing.provider_disabled`), and one without a mapping is
+listed here before it is offered.
+
 1. **Start.** A signed-in person (`Authorization: Bearer <user token>`) calls
    `POST /api/me/credits/topups` with `{ provider, project_id, amount_cents }`.
    - The amount must be one the owner listed, otherwise `422 billing.amount_not_allowed`.
    - The fee is `ceil(amount_cents × fee_bps / 10000)` cents, rounded once; the provider charges amount + fee.
    - Billing creates a `payment_intents` row with `kind='credits_topup'` (the project, amount and fee in its
      metadata) and opens the provider's existing checkout with the same `intent_id` metadata as a purchase.
-2. **Paid.** The provider's paid webhook for that intent credits the person's
-   `usd_credit:<subject>:<project_id>` account with the intent's amount at `1 cent = 10,000,000 nano-USD`, and
-   books the fee (and any overpayment) to `platform_revenue`. The journal, all in `nano-usd`:
+2. **Paid.** The provider's paid webhook for that intent is mapped to `credits_topup` and settles through the one
+   shared plan. It credits the person's `usd_credit:<subject>:<project_id>` account with the intent's amount at
+   `1 cent = 10,000,000 nano-USD`, and books the fee (and any overpayment) to `platform_revenue`. The journal, all in
+   `nano-usd`:
    - `provider_clearing:<provider>` −(what was paid);
    - `usd_credit:<subject>:<project_id>` +amount;
    - `platform_revenue` +fee.
@@ -121,8 +141,8 @@ Both are required. With either unset or malformed, `POST /api/me/credits/topups`
    - The reconciliation job must report zero problems (`journal.zero_sum`, no negative `usd_credit`, no unbalanced
      transaction).
 2. **Production, dark.**
-   - Deploy with `BILLING_CREDITS=0`. Migration `0011` is expand-only: it widens three checks (added `NOT VALID`, then
-     validated) and adds new tables.
+   - Deploy with `BILLING_CREDITS=0`. Migrations `0011` (the subledger) and `0012` (the top-up intent kind and its
+     debt table) are expand-only: they widen checks (`NOT VALID`, then validated) and add new tables.
    - Turn the flag on for staff projects only. Funding is still off, so real balances are zero: staff try the flow
      with sandbox tokens on sandbox credit, which pays for nothing real.
 3. **Funding.** Add the checkout top-up into `usd_credit`; this is a separate change, and the owner sets the prices

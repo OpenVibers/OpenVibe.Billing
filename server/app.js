@@ -11,8 +11,8 @@
  *   /webhooks/<provider>                  provider receipts (see api/webhooks.js)
  *   /, /auth/*, /cashouts, …               staff console (Network SSO, server-rendered; see console/index.js)
  *
- * createApp({ config, db, keys, identity, adapters, now, fetchImpl, log, limitsNow }) — everything injectable
- * (limitsNow: the per-person limiter's clock, tests; default the wall clock).
+ * createApp({ config, db, env, keys, identity, adapters, now, fetchImpl, log, limitsNow }) — everything injectable
+ * (env: the raw environment, default process.env; limitsNow: the per-person limiter's clock, tests; default the wall clock).
  */
 const path = require('path');
 const express = require('express');
@@ -52,7 +52,9 @@ async function createApp(opts = {}) {
         validate: (env) => contracts.validate('events.event-envelope@1', env),
         ...(opts.fetchImpl ? { fetch: fetchImpl } : {}),
     });
-    const ctx = { db, config, rates: createRates(config.rates), now: opts.now || (() => Date.now()), network: identity, log, outbox };
+    // ctx.env is the raw environment for the few settings read at the edge instead of loadConfig(): today only
+    // topupTerms() (D11 will read Billing's config namespace instead). Tests pass their own env through here.
+    const ctx = { db, config, env: opts.env || process.env, rates: createRates(config.rates), now: opts.now || (() => Date.now()), network: identity, log, outbox };
     const adapters = opts.adapters || providers.createAdapters(config, { fetchImpl, network: identity });
     const auth = createAuth({ config, keys });
 

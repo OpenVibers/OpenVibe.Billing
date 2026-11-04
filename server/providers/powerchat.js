@@ -12,13 +12,14 @@
  *
  * donation.completed, by the checkout ref we minted into app_ref (appExternalRef):
  *   pcorder:<intent>            Vibes purchase on the site account → CREDIT for the buyer
+ *   pccredit:<intent>           Credits top-up on the site account → the shared credits_topup plan
  *   pcsub:<intent>              subscription: route 'site' → MONEY (share to the creator, fee +
  *                               rest platform revenue); route 'direct' → EXTERNAL (entitlement
  *                               only, the streamer holds the money). Underpaid: site → a plain
  *                               site-routed tip to the streamer; direct → EXTERNAL tip, no effect.
  *   pcdon:<streamer>:<donor>    site-routed tip for a creator → MONEY into their payable
  *                               (legacy links carry Live user ids; they are resolved to subjects)
- *   (pcorder, site pcsub and pcdon count only when the tip was paid to POWERCHAT_SITE_USERNAME:
+ *   (pcorder, pccredit, site pcsub and pcdon count only when the tip was paid to POWERCHAT_SITE_USERNAME:
  *    the ref is buyer-editable in the fallback tip link; from any other account they are held)
  *   anything else               a tip on a streamer's own PowerChat → EXTERNAL: no journal entry;
  *                               stored in external_receipts and, once Billing is the authority,
@@ -104,7 +105,7 @@ function createPowerchat(cfg, { network } = {}) {
         const meta = { powerchat_event: paymentId, donor_name: data.donorName ? String(data.donorName).slice(0, 80) : null, app_ref: ref || null };
         const host = String((envelope.streamer && envelope.streamer.username) || '').toLowerCase();
         // Money only reaches OpenVibe when it was paid to the SITE account. app_ref rides in the
-        // buyer-editable fallback tip link (?app_ref=…), so a creator could put `pcorder:` / `pcdon:` /
+        // buyer-editable fallback tip link (?app_ref=…), so a creator could put `pcorder:` / `pccredit:` / `pcdon:` /
         // a site `pcsub:` ref on a tip to their OWN PowerChat (money they keep) and have Billing mint
         // credit or cash-out-able payable for it. Site-routed refs from any other account are held.
         const onSite = !!cfg.siteUsername && host === cfg.siteUsername;
@@ -130,6 +131,13 @@ function createPowerchat(cfg, { network } = {}) {
             if (!intent || intent.kind !== 'purchase') return { effect: 'none', reason: `purchase checkout ${ref} has no purchase intent` };
             if (cents < 1) return { effect: 'none', reason: 'zero-amount purchase' };
             return { effect: 'purchase', args: { provider: 'powerchat', receiptRef, intentId: intent.id, paidCents: cents, test: isTest, idempotencyKey: key, actor, metadata: meta } };
+        }
+        if ((m = ref.match(/^pccredit:(.+)$/))) {
+            if (!onSite) return offSite('Credits top-up');
+            const intent = await intents.find(ctx.db, m[1]);
+            if (!intent || intent.kind !== 'credits_topup') return { effect: 'none', reason: `Credits top-up ${ref} has no credits_topup intent` };
+            if (cents < 1) return { effect: 'none', reason: 'zero-amount Credits top-up' };
+            return { effect: 'credits_topup', args: { provider: 'powerchat', receiptRef, paidCents: cents, intentId: intent.id, idempotencyKey: key, actor, ...(isTest ? { test: true } : {}) } };
         }
         if ((m = ref.match(/^pcsub:(.+)$/))) {
             const intent = await intents.find(ctx.db, m[1]);

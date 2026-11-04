@@ -45,42 +45,6 @@ function parseStaff(raw) {
     return { subjects: [...new Set(items.filter((s) => USER_SUBJECT_RE.test(s)))], invalid: items.filter((s) => !USER_SUBJECT_RE.test(s)) };
 }
 
-// Credits top-up (D9): the owner names every allowed amount and the fee, so there is no default
-// amount and no default fee. A malformed value does not stop the service at boot (the rest of
-// Billing keeps running); the top-up route answers 503 billing.topup_unconfigured until it is fixed.
-// Amounts are whole USD cents, comma separated, e.g. "1000,2500"; the fee is integer basis points
-// (0 is allowed, 10000 = 100%). MAX_TOPUP_CENTS mirrors ops/common.js MAX_RECEIPT_CENTS.
-const MAX_TOPUP_CENTS = 100_000_000;
-function parseTopup(rawAmounts, rawFee, enabled) {
-    const problems = [];
-    let amounts = [];
-    const list = String(rawAmounts == null ? '' : rawAmounts).trim();
-    if (!list) {
-        problems.push('BILLING_CREDITS_TOPUP_AMOUNTS_CENTS is not set');
-    } else {
-        const seen = new Set();
-        for (const part of list.split(',')) {
-            const s = part.trim();
-            if (!/^[0-9]+$/.test(s) || !Number.isSafeInteger(Number(s)) || Number(s) <= 0 || Number(s) > MAX_TOPUP_CENTS) {
-                problems.push(`BILLING_CREDITS_TOPUP_AMOUNTS_CENTS has an invalid amount "${s}"`);
-                continue;
-            }
-            seen.add(Number(s));
-        }
-        amounts = [...seen].sort((a, b) => a - b);
-    }
-    let feeBps = null;
-    const fee = String(rawFee == null ? '' : rawFee).trim();
-    if (!fee) {
-        problems.push('BILLING_CREDITS_TOPUP_FEE_BPS is not set');
-    } else if (!/^[0-9]+$/.test(fee) || !Number.isSafeInteger(Number(fee)) || Number(fee) > 10_000) {
-        problems.push(`BILLING_CREDITS_TOPUP_FEE_BPS must be an integer from 0 to 10000 (got "${fee}")`);
-    } else {
-        feeBps = Number(fee);
-    }
-    return { enabled: !!enabled, amountsCents: amounts, feeBps, configured: problems.length === 0, problem: problems.length ? problems.join('; ') : null };
-}
-
 // Who keeps the money books (docs/live-cutover.md): 'live' while OpenVibe.Live is the ledger and
 // receives the PowerChat webhook (Billing runs in shadow), 'billing' once the webhook points here.
 // Anything else is refused at boot — a typo must not silently change what Billing announces.
@@ -232,9 +196,6 @@ function loadConfig(env = process.env) {
             leaseSeconds: Math.max(1, Math.min(86400, int(env.BILLING_INFERENCE_LEASE_SECONDS, 300))),
             // Background sweeper interval for expired holds (0 = off, default off until the subledger is enabled).
             sweepIntervalMs: int(env.BILLING_INFERENCE_SWEEP_MS, 0),
-            // The person's checkout top-up into usd_credit (D9). Off by default, and with no amounts or
-            // no fee it refuses (503 billing.topup_unconfigured) rather than inventing either.
-            topup: parseTopup(env.BILLING_CREDITS_TOPUP_AMOUNTS_CENTS, env.BILLING_CREDITS_TOPUP_FEE_BPS, bool(env.BILLING_CREDITS_TOPUP)),
         },
 
         // Staff console (server/console): Network SSO (authorization code + PKCE S256, OAuth

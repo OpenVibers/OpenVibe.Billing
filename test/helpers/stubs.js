@@ -136,4 +136,30 @@ async function startEvents() {
     return { url, batches, tokens, close: () => new Promise((r) => server.close(r)) };
 }
 
-module.exports = { startNetwork, startStripe, startEvents };
+/** PayPal/CCBill/NOWPayments test API: token, signature verification, checkout/capture and an invoice. */
+async function startProviderStub() {
+    const calls = [];
+    const server = http.createServer(async (req, res) => {
+        const raw = await readBody(req);
+        calls.push({ method: req.method, url: req.url, raw });
+        const json = (s, o) => send(res, s, o);
+        if (req.url === '/v1/oauth2/token') return json(200, { access_token: 'pp-token' });
+        if (req.url === '/v1/notifications/verify-webhook-signature') {
+            const body = JSON.parse(raw);
+            return json(200, { verification_status: body.transmission_sig === 'good' ? 'SUCCESS' : 'FAILURE' });
+        }
+        if (req.url === '/v2/checkout/orders') return json(201, { id: 'PPORDER1', links: [{ rel: 'approve', href: 'https://paypal.test/approve/PPORDER1' }] });
+        const cap = req.url.match(/^\/v2\/checkout\/orders\/([^/]+)\/capture$/);
+        if (cap) {
+            const custom = calls.find((c) => c.url === '/v2/checkout/orders');
+            const intentId = JSON.parse(custom.raw).purchase_units[0].custom_id;
+            return json(201, { status: 'COMPLETED', purchase_units: [{ payments: { captures: [{ id: 'CAP-9', custom_id: intentId, amount: { currency_code: 'USD', value: '13.00' } }] } }] });
+        }
+        if (req.url === '/invoice') return json(200, { id: 777, invoice_url: 'https://nowpayments.test/invoice/777' });
+        json(404, {});
+    });
+    const url = await listen(server);
+    return { url, calls, close: () => new Promise((r) => server.close(r)) };
+}
+
+module.exports = { startNetwork, startStripe, startEvents, startProviderStub };

@@ -69,7 +69,12 @@ async function applyPlan(ctx, plan, row) {
         case 'none': return { effect: 'none', reason: plan.reason, review: plan.review || plan.hold || undefined };
         case 'update': await plan.apply(ctx); return { effect: 'updated', reason: plan.reason };
         case 'purchase': return settled(await purchases.settle(ctx, withEvent(plan.args)));
-        case 'credits_topup': return settled(await topups.settle(ctx, withEvent(plan.args)));
+        case 'credits_topup': {
+            // One shared plan for every provider. Off or unconfigured: recorded for review, no money moves.
+            const r = await topups.settle(ctx, withEvent(plan.args));
+            if (r.skipped) return { effect: 'none', reason: r.skipped, review: true };
+            return settled(r);
+        }
         case 'subscription': return settled(await subscriptions.pay(ctx, withEvent(plan.args)));
         case 'tip': return settled(await transfers.fromReceipt(ctx, withEvent(plan.args)));
         case 'external': return await external.record(ctx, withEvent(plan.args));

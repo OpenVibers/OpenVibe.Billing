@@ -148,8 +148,10 @@ function present(i) {
                 fee_bps: Number(m.topup_fee_bps || 0), amount_nano_usd: String(BigInt(m.topup_amount_cents || 0) * NANO_PER_CENT),
             },
         } : {}),
-        // PowerChat checkouts carry this in app_ref; the webhook echoes it back.
-        checkout_ref: i.provider === 'powerchat' ? `${i.kind === 'purchase' ? 'pcorder' : 'pcsub'}:${i.id}` : undefined,
+        // PowerChat checkouts carry this in app_ref; the webhook echoes it back. A Credits top-up uses pccredit.
+        checkout_ref: i.provider === 'powerchat'
+            ? `${i.kind === 'purchase' ? 'pcorder' : i.kind === 'subscription' ? 'pcsub' : 'pccredit'}:${i.id}`
+            : undefined,
     };
 }
 
