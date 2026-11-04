@@ -86,7 +86,7 @@ async function create(ctx, input) {
 }
 
 /**
- * A Credits top-up intent (D9). Created only by the signed-in person's own route (ops/topups.js), never by
+ * A Balance top-up intent (D9). Created only by the signed-in person's own route (ops/topups.js), never by
  * /api/v1: the amount and the fee were validated against the owner's configured list first. amount_cents is
  * what the provider charges (the top-up plus the fee); the top-up itself is metadata.topup_amount_cents.
  */
@@ -94,7 +94,7 @@ async function createCreditsTopup(ctx, { provider, subject, projectId, amountCen
     const ms = ctx.now();
     const nowIso = iso(ms);
     const id = prefixedId('pi', ms);
-    const metadata = { project_id: projectId, topup_amount_cents: amountCents, topup_fee_cents: feeCents, topup_fee_bps: feeBps };
+    const metadata = { project_id: projectId || null, topup_amount_cents: amountCents, topup_fee_cents: feeCents, topup_fee_bps: feeBps };
     await ctx.db.prepare(`INSERT INTO payment_intents (id, provider, provider_ref, kind, subject, streamer_subject, amount_cents, fee_cents, bits, route,
             auto_renew, status, metadata, created_at, updated_at)
         VALUES (?, ?, NULL, 'credits_topup', ?, NULL, ?, ?, 0, NULL, 0, 'created', ?, ?, ?)`)
@@ -140,7 +140,7 @@ function present(i) {
         amount_cents: i.amount_cents, fee_cents: i.fee_cents, bits: i.bits, route: i.route, auto_renew: i.auto_renew,
         status: i.status, settled_txn: i.settled_txn || null, created_at: i.created_at,
         ...(i.kind === 'subscription' ? { tier: Number((i.metadata && i.metadata.tier) || 1) } : {}),
-        // A Credits top-up: the project it funds, the amount that becomes Credits and the fee the person pays on top.
+        // A Balance top-up: the project it funds (null for the person's own Balance), the amount added and the fee.
         ...(i.kind === 'credits_topup' ? {
             project_id: m.project_id || null,
             topup: {
@@ -148,7 +148,7 @@ function present(i) {
                 fee_bps: Number(m.topup_fee_bps || 0), amount_nano_usd: String(BigInt(m.topup_amount_cents || 0) * NANO_PER_CENT),
             },
         } : {}),
-        // PowerChat checkouts carry this in app_ref; the webhook echoes it back. A Credits top-up uses pccredit.
+        // PowerChat checkouts carry this in app_ref; the webhook echoes it back. A Balance top-up uses pccredit.
         checkout_ref: i.provider === 'powerchat'
             ? `${i.kind === 'purchase' ? 'pcorder' : i.kind === 'subscription' ? 'pcsub' : 'pccredit'}:${i.id}`
             : undefined,

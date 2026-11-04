@@ -22,11 +22,11 @@ const { createRelease } = require('openvibe-shared/release');
 const { loadConfig } = require('./config');
 const { openDb } = require('./db');
 const { createRates } = require('./rates');
-const { createKeyProvider, createIdentity } = require('./network');
+const { createKeyProvider, createIdentity, createProjects } = require('./network');
 const { createAuth } = require('./api/auth');
 const { v1Router } = require('./api/v1');
 const { internalRouter } = require('./api/internal');
-const { createBillingConfig, applyValues } = require('./config-store');
+const { createBillingConfig, createVibesConfig, applyValues, applyVibesValues } = require('./config-store');
 const { internalConfigRouter } = require('./internal-config');
 const { createActorLimits } = require('./api/actor-limits');
 const { webhooksRouter } = require('./api/webhooks');
@@ -57,10 +57,15 @@ async function createApp(opts = {}) {
     // ctx.env is the raw environment the owner-settings store reads its x-env pins from; the service reads the
     // settings themselves through ctx.configStore (D11). Tests pass their own env through here.
     const ctx = { db, config, env: opts.env || process.env, rates: createRates(config.rates), now: opts.now || (() => Date.now()), network: identity, log, outbox };
-    // D11 owner settings: `billing.credits` is the source of the Credits switches, the top-up terms and the
-    // hold lease. The env pins keep today's variables winning while they are set; a change applies live.
+    // D11 owner settings: `billing.credits` is the source of the Balance switches, the top-up terms and the
+    // hold lease; `billing.vibes` holds the Vibes Pay limits and the Get Vibes with Balance switch. The env pins
+    // keep today's variables winning while they are set; a change applies live.
     ctx.configStore = await createBillingConfig({ db, env: ctx.env, log, onActivate: (values) => applyValues(config, values) });
     applyValues(config, ctx.configStore.get());
+    ctx.vibesConfigStore = await createVibesConfig({ db, env: ctx.env, log, onActivate: (values) => applyVibesValues(config, values) });
+    applyVibesValues(config, ctx.vibesConfigStore.get());
+    // Network's project-membership reads (D12): the projects a person administers and one role check.
+    ctx.projects = opts.projects || createProjects(config, { fetchImpl });
     const adapters = opts.adapters || providers.createAdapters(config, { fetchImpl, network: identity });
     const auth = createAuth({ config, keys });
 

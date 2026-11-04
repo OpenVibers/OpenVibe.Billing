@@ -5,8 +5,9 @@
  *
  * Only Network's service token holds `billing.config.manage`; every route is guarded by it (server/api/auth.js).
  * The acting subject is the owner's usr_ id in X-OV-Subject, and only for a caller that holds the capability;
- * X-OV-Fresh: 1 is required for a write to an x-danger key, so a stale session can never turn Credits or the
- * top-up switch on. The store's onChange writes Billing's audit line (server/config-store.js).
+ * X-OV-Fresh: 1 is required for a write to an x-danger key, so a stale session can never turn Balance or the
+ * top-up switch on. Both namespaces (`billing.credits`, `billing.vibes`) are served here; their onChange writes
+ * Billing's audit line (server/config-store.js).
  *
  * The paths are full paths (the router is mounted at the app root) so the capability declaration's
  * implementedBy list points at real routes.
@@ -22,7 +23,7 @@ function internalConfigRouter({ ctx, auth }) {
     const r = express.Router();
     // The store is the only caller of the config routes, so its body parser needs to run only on these paths.
     r.use('/internal/config', express.json({ limit: '64kb' }));
-    const routes = adminRoutes([ctx.configStore], {
+    const routes = adminRoutes([ctx.configStore, ctx.vibesConfigStore], {
         requireAdmin: auth.needs(CAP),
         basePath: '/internal/config',
         actor: (req) => {

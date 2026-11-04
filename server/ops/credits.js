@@ -1,11 +1,11 @@
 'use strict';
 
 /**
- * Credits: the prepaid USD balance for metered services (AI Exchange D1, D2). All amounts are integer nano-USD (1e-9 USD),
- * represented as JS BigInt. The ledger account for a (subject, project_id) uses kind='usd_credit',
- * currency='nano-usd' and owner_subject='<subject>:<project_id>'. Holds are reservations; settlement moves
- * the actual charge to platform_revenue:nano-usd and releases the unused reservation. Sandbox grants create
- * synthetic credit from usd_credit_sandbox:nano-usd and are only available when BILLING_CREDITS_SANDBOX=1.
+ * Balance: the prepaid USD balance for metered services (AI Exchange D12). All amounts are integer nano-USD (1e-9 USD),
+ * represented as JS BigInt. A person's Balance is kind='usd_credit', currency='nano-usd', owner_subject='user:<usr_id>';
+ * a project's Balance is the same kind and currency owned by 'project:<prj_id>'. Holds are reservations; settlement
+ * moves the actual charge to platform_revenue:nano-usd and releases the unused reservation. Sandbox balances follow the
+ * same split under usd_credit_sandbox and are only available when BILLING_CREDITS_SANDBOX=1.
  *
  * Nothing here goes through chargeFor or the Vibes bits ledger.
  */
@@ -23,7 +23,7 @@ const ACTIVE_STATUSES = ['active', 'extended'];
 const TERMINAL_STATUSES = ['settled', 'released', 'expired'];
 
 /**
- * The owner's Credits top-up terms: the only reader of the amounts, the fee and the top-up switch.
+ * The owner's Balance top-up terms: the only reader of the amounts, the fee and the top-up switch.
  *
  * D11: they come from Billing's own config namespace `billing.credits`, through the store on ctx, so the
  * owner sets them from Network's AI tab and a change applies live. There is no default amount and no
@@ -59,11 +59,14 @@ function topupTerms(ctx) {
     return { enabled, amountsCents, feeBps, configured: problems.length === 0, problem: problems.length ? problems.join('; ') : null };
 }
 
+/** The one owner format (D12): a person's Balance is user:<usr_id>; a project's is project:<prj_id>. */
+const ownerOf = (subject, projectId) => (projectId ? `project:${projectId}` : `user:${subject}`);
+
 const A_INF = {
-    credit: (subject, projectId) => ({ kind: 'usd_credit', owner: `${subject}:${projectId}`, currency: CURRENCY }),
-    // A person's sandbox credit for one project (D10): its own account, spent only by a hold marked sandbox, so a
+    credit: (subject, projectId) => ({ kind: 'usd_credit', owner: ownerOf(subject, projectId), currency: CURRENCY }),
+    // A person's or project's sandbox Balance (D10/D12): its own account, spent only by a hold marked sandbox, so a
     // grant never becomes spending power on real supply.
-    sandboxCredit: (subject, projectId) => ({ kind: 'usd_credit_sandbox', owner: `${subject}:${projectId}`, currency: CURRENCY }),
+    sandboxCredit: (subject, projectId) => ({ kind: 'usd_credit_sandbox', owner: ownerOf(subject, projectId), currency: CURRENCY }),
     // The issuer the grants come from and sandbox charges return to (owner null).
     sandbox: () => ({ kind: 'usd_credit_sandbox', owner: null, currency: CURRENCY }),
     revenue: () => ({ kind: 'platform_revenue', owner: null, currency: CURRENCY }),
@@ -90,15 +93,18 @@ const nano = (v, field) => {
 
 const nanoNonNeg = nano;
 
-function parseSubject(v) {
-    if (v && typeof v === 'object' && v.type === 'user' && typeof v.id === 'string') return v.id;
-    if (typeof v === 'string' && v.startsWith('user:')) return v.slice(5);
-    return userSubject(v);
-}
+const APP_ID_RE = /^app_[0-9A-HJKMNP-TV-Z]{26}$/;
+const PROJECT_ID_RE = /^prj_[0-9A-HJKMNP-TV-Z]{26}$/;
 
-function accountIdOf(owner) {
-    const [subject, projectId] = String(owner || ':').split(':');
-    return { kind: 'usd_credit', owner, currency: CURRENCY, subject, projectId };
+/** A hold's SubjectRef: a person, or (with a project) an app acting for that project. */
+function parseSubject(v) {
+    if (v && typeof v === 'object' && v.type === 'app') {
+        if (typeof v.id !== 'string' || !APP_ID_RE.test(v.id)) fail(422, 'billing.invalid_subject', 'an app subject must be { type: "app", id: "app_…" }');
+        return { type: 'app', id: v.id };
+    }
+    if (v && typeof v === 'object' && v.type === 'user') return { type: 'user', id: userSubject(v) };
+    if (typeof v === 'string' && v.startsWith('user:')) return { type: 'user', id: v.slice(5) };
+    return { type: 'user', id: userSubject(v) };
 }
 
 function assertEnabled(config) {
@@ -117,11 +123,11 @@ const KINDS = new Set(['usd_credit', 'usd_credit_sandbox']);
 
 /**
  * The account row id for a (subject, project_id), selected FOR UPDATE. Creates the account and balance row if absent.
- * `kind` is usd_credit (real Credits) or usd_credit_sandbox (that person's sandbox credit for the project).
+ * `kind` is usd_credit (real Balance) or usd_credit_sandbox (that person's sandbox credit for the project).
  */
 async function lockAccount(db, subject, projectId, nowIso, kind = 'usd_credit') {
     if (!KINDS.has(kind)) throw new Error(`lockAccount: unknown kind ${kind}`);
-    const owner = `${subject}:${projectId}`;
+    const owner = ownerOf(subject, projectId);
     let row = await db.prepare(`SELECT a.id FROM accounts a WHERE a.kind = ? AND a.owner_subject = ? AND a.currency = 'nano-usd'`).get(kind, owner);
     if (!row) {
         // Two first holds at once: one inserts, the other finds it (the account's unique key), never a 500.
@@ -152,7 +158,7 @@ async function available(db, accountId) {
 function presentHold(row, availableAfter = null) {
     return {
         hold_id: row.id,
-        subject: { type: 'user', id: row.subject },
+        subject: { type: row.subject_type || 'user', id: row.subject },
         project_id: row.project_id,
         credential_id: row.credential_id || null,
         service: row.service || 'ai',
@@ -172,7 +178,7 @@ function presentSettlement(row) {
     return {
         settlement_id: row.id,
         hold_id: row.hold_id,
-        subject: { type: 'user', id: row.subject },
+        subject: { type: row.subject_type || 'user', id: row.subject },
         project_id: row.project_id,
         charge_nano_usd: String(row.charge_nano_usd),
         released_nano_usd: String(row.released_nano_usd),
@@ -197,7 +203,9 @@ async function createHold(ctx, input) {
     await assertNotFrozen(db);
     const subject = parseSubject(input.subject);
     const projectId = text(input.project_id, 'project_id');
-    if (!projectId || !/^prj_[0-9A-HJKMNP-TV-Z]{26}$/.test(projectId)) fail(422, 'billing.invalid_input', 'project_id must be a project ULID');
+    if (projectId && !PROJECT_ID_RE.test(projectId)) fail(422, 'billing.invalid_input', 'project_id must be a project ULID');
+    // A personal hold (no project) always spends the person's own Balance. A project hold spends the project's.
+    if (!projectId && subject.type !== 'user') fail(422, 'billing.invalid_input', 'an app subject needs a project_id');
     const maxNano = nanoNonNeg(input.max_nano_usd, 'max_nano_usd');
     const rateVersion = text(input.rate_version, 'rate_version', 200) || fail(422, 'billing.invalid_input', 'rate_version is required');
     const fingerprint = text(input.request_fingerprint, 'request_fingerprint', 1024) || fail(422, 'billing.invalid_input', 'request_fingerprint is required');
@@ -219,7 +227,7 @@ async function createHold(ctx, input) {
             if (existing.request_fingerprint !== fingerprint) fail(409, 'billing.hold_key_reused', 'the same idempotency_key with a different fingerprint is already used');
             return { hold: presentHold(existing, await available(db, existing.account_id)), replay: true };
         }
-        const accountId = await lockAccount(db, subject, projectId, nowIso, sandbox ? 'usd_credit_sandbox' : 'usd_credit');
+        const accountId = await lockAccount(db, subject.id, projectId, nowIso, sandbox ? 'usd_credit_sandbox' : 'usd_credit');
         // The same key at the same moment: the account lock serializes them, so the second sees the first's hold here.
         const raced = await db.prepare('SELECT * FROM credit_holds WHERE idempotency_key = ?').get(idempotencyKey);
         if (raced) {
@@ -227,14 +235,14 @@ async function createHold(ctx, input) {
             return { hold: presentHold(raced, await available(db, raced.account_id)), replay: true };
         }
         const avail = await available(db, accountId);
-        if (avail < maxNano) fail(402, 'billing.insufficient_funds', `insufficient ${sandbox ? 'sandbox ' : ''}credit: ${avail} < ${maxNano} nano-USD`, { available: String(avail), required: String(maxNano) });
+        if (avail < maxNano) fail(402, 'billing.insufficient_funds', `insufficient ${sandbox ? 'sandbox ' : ''}Balance: ${avail} < ${maxNano} nano-USD`, { available: String(avail), required: String(maxNano) });
 
         const holdId = prefixedId('hld', now);
         const leaseExpires = iso(now + leaseSeconds * 1000);
         const row = await db.prepare(`INSERT INTO credit_holds
-            (id, idempotency_key, subject, project_id, credential_id, service, account_id, held_nano_usd, max_nano_usd, rate_version, request_fingerprint, lease_expires_at, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, 'active', ?::timestamptz, ?::timestamptz) RETURNING *`).get(
-            holdId, idempotencyKey, subject, projectId, credentialId, service, accountId, maxNano, maxNano, rateVersion, fingerprint, leaseExpires, nowIso, nowIso);
+            (id, idempotency_key, subject, subject_type, project_id, credential_id, service, account_id, held_nano_usd, max_nano_usd, rate_version, request_fingerprint, lease_expires_at, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, 'active', ?::timestamptz, ?::timestamptz) RETURNING *`).get(
+            holdId, idempotencyKey, subject.id, subject.type, projectId, credentialId, service, accountId, maxNano, maxNano, rateVersion, fingerprint, leaseExpires, nowIso, nowIso);
         return { hold: presentHold(row, avail - maxNano), replay: false };
     });
 }
@@ -364,9 +372,9 @@ async function settleHold(ctx, input) {
 
         await db.prepare(`UPDATE credit_holds SET status = 'settled', held_nano_usd = 0, updated_at = ?::timestamptz WHERE id = ?`).run(nowIso, holdId);
         const row = await db.prepare(`INSERT INTO credit_settlements
-            (id, hold_id, idempotency_key, subject, project_id, account_id, charge_nano_usd, released_nano_usd, shortfall_nano_usd, journal_id, usage, retail, supply_cost_nano_usd, byok, attempts, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?::jsonb, ?::timestamptz) RETURNING *`).get(
-            prefixedId('stl', now), holdId, idempotencyKey, hold.subject, hold.project_id, hold.account_id,
+            (id, hold_id, idempotency_key, subject, subject_type, project_id, account_id, charge_nano_usd, released_nano_usd, shortfall_nano_usd, journal_id, usage, retail, supply_cost_nano_usd, byok, attempts, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?::jsonb, ?::timestamptz) RETURNING *`).get(
+            prefixedId('stl', now), holdId, idempotencyKey, hold.subject, hold.subject_type || 'user', hold.project_id, hold.account_id,
             collected, released, shortfall, txn.id, JSON.stringify(usage), JSON.stringify(retail), supplyCost, byok, JSON.stringify(attempts), nowIso);
         // billing.credit.settled@1, in the same transaction: for aggregates only (no subject, project or account).
         const answered = attempts.filter((a) => a && !a.error_code).pop() || attempts[attempts.length - 1] || null;
@@ -437,7 +445,9 @@ async function sandboxGrant(ctx, input) {
     await assertNotFrozen(db);
     const subject = parseSubject(input.subject);
     const projectId = text(input.project_id, 'project_id');
-    if (!projectId || !/^prj_[0-9A-HJKMNP-TV-Z]{26}$/.test(projectId)) fail(422, 'billing.invalid_input', 'project_id must be a project ULID');
+    if (projectId && !PROJECT_ID_RE.test(projectId)) fail(422, 'billing.invalid_input', 'project_id must be a project ULID');
+    // A personal hold (no project) always spends the person's own Balance. A project hold spends the project's.
+    if (!projectId && subject.type !== 'user') fail(422, 'billing.invalid_input', 'an app subject needs a project_id');
     const amount = nanoNonNeg(input.amount_nano_usd, 'amount_nano_usd');
     if (amount === 0n) fail(422, 'billing.invalid_amount', 'amount_nano_usd must be positive');
     const reason = text(input.reason, 'reason', 500) || 'sandbox grant';
@@ -445,29 +455,30 @@ async function sandboxGrant(ctx, input) {
     return await money(db, async () => {
         const now = ctx.now();
         const nowIso = iso(now);
-        const accountId = await lockAccount(db, subject, projectId, nowIso, 'usd_credit_sandbox');
+        const accountId = await lockAccount(db, subject.id, projectId, nowIso, 'usd_credit_sandbox');
         const grantId = prefixedId('igr', now);
         const { txn } = await post(ctx, {
-            type: 'credit', idempotencyKey: `credit:sandbox:${grantId}`, actor: input.actor || ACTOR, toSubject: subject,
+            type: 'credit', idempotencyKey: `credit:sandbox:${grantId}`, actor: input.actor || ACTOR, toSubject: subject.id,
             test: true,
-            entries: [entry(A_INF.sandbox(), -amount), entry(A_INF.sandboxCredit(subject, projectId), amount)],
+            entries: [entry(A_INF.sandbox(), -amount), entry(A_INF.sandboxCredit(subject.id, projectId), amount)],
             metadata: { credit: 'sandbox_grant', grant_id: grantId, project_id: projectId, reason, amount_nano_usd: String(amount) },
         });
         await db.prepare(`INSERT INTO credit_sandbox_grants (id, subject, project_id, account_id, amount_nano_usd, journal_id, reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?::timestamptz)`).run(grantId, subject, projectId, accountId, amount, txn.id, reason, nowIso);
-        return { grant_id: grantId, amount_nano_usd: String(amount), balance_nano_usd: String(await balance(db, A_INF.sandboxCredit(subject, projectId))) };
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?::timestamptz)`).run(grantId, subject.id, projectId, accountId, amount, txn.id, reason, nowIso);
+        return { grant_id: grantId, amount_nano_usd: String(amount), balance_nano_usd: String(await balance(db, A_INF.sandboxCredit(subject.id, projectId))) };
     });
 }
 
 /**
- * A person's statement for one project (GET /api/me/credits): the balance, what is held now, what is available, the
- * last 50 top-ups beside the last 50 charges (no prompt or answer is ever here: only counts, prices and ids). A
- * top-up's reversal shows what was clawed back and what remains a debt.
+ * A person's Balance statement (GET /api/me/credits): the balance, what is held now, what is available, the last 50
+ * top-ups beside the last 50 charges (no prompt or answer is ever here: only counts, prices and ids). With a
+ * projectId it reads that project's Balance instead of the person's. A top-up's reversal shows what was clawed back
+ * and what remains a debt.
  */
-async function statement(ctx, subject, projectId, { limit = 50 } = {}) {
+async function statement(ctx, subject, projectId = null, { limit = 50 } = {}) {
     const { db, config } = ctx;
     assertEnabled(config);
-    const owner = `${subject}:${projectId}`;
+    const owner = ownerOf(subject, projectId);
     const acct = await db.prepare(`SELECT a.id, b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id
         WHERE a.kind = 'usd_credit' AND a.owner_subject = ? AND a.currency = 'nano-usd'`).get(owner);
     // Sandbox credit is shown apart (D10): it never pays for a real request, so it is never part of the balance.
@@ -479,7 +490,8 @@ async function statement(ctx, subject, projectId, { limit = 50 } = {}) {
         const boxBal = BigInt(String(box.balance));
         sandbox = { balance_nano_usd: String(boxBal), held_nano_usd: String(boxHeld), available_nano_usd: String(boxBal - boxHeld < 0n ? 0n : boxBal - boxHeld) };
     }
-    if (!acct) return { project_id: projectId, balance_nano_usd: '0', held_nano_usd: '0', available_nano_usd: '0', sandbox, topups: [], charges: [] };
+    const ownerRef = projectId ? { type: 'project', id: projectId } : { type: 'user', id: subject };
+    if (!acct) return { owner: ownerRef, project_id: projectId || null, balance_nano_usd: '0', held_nano_usd: '0', available_nano_usd: '0', sandbox, topups: [], charges: [] };
     const held = await heldOnAccount(db, acct.id);
     const rows = await db.prepare(`SELECT s.*, h.service FROM credit_settlements s JOIN credit_holds h ON h.id = s.hold_id
         WHERE s.account_id = ? ORDER BY s.created_at DESC, s.id DESC LIMIT ?`).all(acct.id, Math.max(1, Math.min(200, limit)));
@@ -502,7 +514,8 @@ async function statement(ctx, subject, projectId, { limit = 50 } = {}) {
     }
     const bal = BigInt(String(acct.balance));
     return {
-        project_id: projectId,
+        owner: ownerRef,
+        project_id: projectId || null,
         balance_nano_usd: String(bal), held_nano_usd: String(held), available_nano_usd: String(bal - held < 0n ? 0n : bal - held),
         sandbox,
         topups: tops.map((r) => {
@@ -567,4 +580,5 @@ async function findSettlement(db, { holdId, id } = {}) {
 module.exports = {
     createHold, extendHold, settleHold, releaseHold, sweepExpired, sandboxGrant, statement,
     findHold, findSettlement, computeCharge, available, topupTerms, A_INF, CURRENCY, NANO_PER_CENT,
+    ownerOf, parseSubject, PROJECT_ID_RE, nano, heldOnAccount,
 };

@@ -92,7 +92,7 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
             COALESCE((SELECT SUM(e.amount) FROM ledger_entries e JOIN accounts a ON a.id = e.account_id
                 WHERE e.txn_id = t.id AND a.kind = 'provider_clearing' AND a.owner_subject = p.provider), 0)::bigint AS clearing
         FROM transactions t JOIN provider_events p ON p.id = t.source_event_id`).all();
-    // A Credits top-up and its reversal move nano-USD through the provider clearing (1 cent = 10,000,000 nano-USD),
+    // A Balance top-up and its reversal move nano-USD through the provider clearing (1 cent = 10,000,000 nano-USD),
     // not usd-cents; the paid or reversed cents metadata is still the receipt-side truth.
     const NANO_PER_CENT = 10_000_000;
     const rcptBad = rcpt.filter((r) => {

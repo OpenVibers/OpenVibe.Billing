@@ -6,8 +6,9 @@
  *
  *   export   the person's accounts with their balances, every transaction they sent or received, their checkouts,
  *            cash-outs, subscriptions (as a member, and as a creator without the members' identities), entitlements,
- *            tips on their own PowerChat, usage readings, promo allowances, Credits holds, settlements, sandbox
- *            grants and refunded-top-up debts, tier prices and connected payment accounts
+ *            tips on their own PowerChat, usage readings, promo allowances, Balance holds, settlements, sandbox
+ *            grants and refunded-top-up debts, Balance transfers and Vibes bought with Balance, tier prices and
+ *            connected payment accounts
  *   erase    money records stay (the ledger, receipts, checkouts, cash-outs, subscriptions, entitlements, usage and
  *            promo rows are records the law and the reconciliation need): counted as retained. What is only settings
  *            goes: tier prices, connected payment accounts (the attribution of a provider username to the person),
@@ -41,12 +42,15 @@ const TABLES = [
     { table: 'credit_sandbox_grants', subject: 'subject', file: 'inference-sandbox-grants.json', columns: ['id', 'project_id', 'amount_nano_usd', 'reason', 'created_at'], erase: { keep: ledger } },
     // A refunded top-up whose credit was already spent: a money record of the person (and the debt they owe).
     { table: 'credit_topup_debts', subject: 'subject', file: 'credit-debts.json', columns: ['id', 'topup_txn_id', 'transaction_id', 'reversal_ref', 'project_id', 'provider', 'amount_nano_usd', 'reason', 'created_at'], erase: { keep: ledger } },
+    // D12: moving Balance to a project and buying Vibes with Balance are money records too.
+    { table: 'balance_transfers', subject: 'subject', file: 'balance-transfers.json', columns: ['id', 'idempotency_key', 'to_project_id', 'amount_nano_usd', 'journal_id', 'created_at'], erase: { keep: ledger } },
+    { table: 'vibes_from_balance', subject: 'subject', file: 'vibes-from-balance.json', columns: ['id', 'idempotency_key', 'vibes', 'price_nano_usd', 'bits_per_usd', 'journal_id', 'created_at'], erase: { keep: ledger } },
 ];
 
 /** Accounts with their balances (a balance is the account's cached sum of ledger entries). */
 async function balances(db, subject) {
     return await db.prepare(`SELECT a.kind, a.currency, COALESCE(b.balance, 0) AS balance, a.created_at FROM accounts a
-        LEFT JOIN account_balances b ON b.account_id = a.id WHERE a.owner_subject = ? ORDER BY a.id`).all(subject);
+        LEFT JOIN account_balances b ON b.account_id = a.id WHERE a.owner_subject IN (?, ?) ORDER BY a.id`).all(subject, `user:${subject}`);
 }
 
 function create({ db, log = console } = {}) {
@@ -57,7 +61,7 @@ function create({ db, log = console } = {}) {
         // Accounts stay (the ledger points at them): counted as retained with the other money records.
         extraErase: async (t, subjects, counts) => {
             for (const subject of subjects) {
-                counts.add(counts.retained, 'accounts', Number(await t.value('SELECT COUNT(*)::int FROM accounts WHERE owner_subject = $1', [subject])) || 0);
+                counts.add(counts.retained, 'accounts', Number(await t.value('SELECT COUNT(*)::int FROM accounts WHERE owner_subject IN ($1, $2)', [subject, `user:${subject}`])) || 0);
             }
         },
     });

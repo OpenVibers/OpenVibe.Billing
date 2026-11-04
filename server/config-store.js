@@ -1,7 +1,8 @@
 'use strict';
 
 /**
- * Billing's owner settings (D11): the namespace `billing.credits`, read through openvibe-shared/config.
+ * Billing's owner settings (D11): the namespaces `billing.credits` and `billing.vibes`, read through
+ * openvibe-shared/config.
  *
  * Every key keeps the environment variable that configured it before D11 as an `x-env` pin: while that
  * variable is set, its value is effective and read-only (the owner's value is refused with
@@ -20,18 +21,20 @@ const { iso, prefixedId } = require('./ledger');
 
 const SERVICE = 'billing';
 const NAMESPACE = 'billing.credits';
-const GROUP = 'Credits';
+const GROUP = 'Balance';
+const VIBES_NAMESPACE = 'billing.vibes';
+const VIBES_GROUP = 'Vibes';
 
 const SCHEMA = {
     $schema: 'https://json-schema.org/draft/2020-12/schema',
-    title: 'Billing Credits',
-    description: 'Credits ledger and the owner terms of the checkout top-up.',
+    title: 'Billing Balance',
+    description: 'Balance ledger and the owner terms of the checkout top-up.',
     type: 'object',
     additionalProperties: false,
     properties: {
         credits: {
             type: 'boolean', default: false,
-            title: 'Credits ledger', description: 'Open the Credits ledger: the internal hold/settle API and the person\'s Credits routes.',
+            title: 'Balance ledger', description: 'Open the Balance ledger: the internal hold/settle API and the person\'s Balance routes.',
             'x-group': GROUP, 'x-env': 'BILLING_CREDITS', 'x-danger': true,
         },
         sandbox: {
@@ -41,7 +44,7 @@ const SCHEMA = {
         },
         topup: {
             type: 'boolean', default: false,
-            title: 'Credits top-up', description: 'Offer checkout top-ups of Credits through the payment providers.',
+            title: 'Balance top-up', description: 'Offer checkout top-ups of Balance through the payment providers.',
             'x-group': GROUP, 'x-env': 'BILLING_CREDITS_TOPUP', 'x-danger': true,
         },
         topup_amounts_cents: {
@@ -58,8 +61,38 @@ const SCHEMA = {
         // rather than an x-unit that would make createConfigStore throw.
         hold_lease_seconds: {
             type: 'integer', minimum: 1, maximum: 86_400, default: 300,
-            title: 'Hold lease (seconds)', description: 'How long a Credits hold lasts before it expires.',
+            title: 'Hold lease (seconds)', description: 'How long a Balance hold lasts before it expires.',
             'x-group': GROUP, 'x-env': 'BILLING_INFERENCE_LEASE_SECONDS',
+        },
+    },
+};
+
+const VIBES_SCHEMA = {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    title: 'Billing Vibes',
+    description: 'Vibes Pay limits and the switch that lets a person get Vibes with Balance.',
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+        vibes_pay: {
+            type: 'boolean', default: false,
+            title: 'Vibes Pay', description: 'Let apps charge Vibes on the pay sheet. Turning it on enables spending real Vibes.',
+            'x-group': VIBES_GROUP, 'x-env': 'BILLING_VIBES_PAY', 'x-danger': true,
+        },
+        max_charge_vibes: {
+            type: 'integer', minimum: 0, maximum: 10_000_000, default: 0,
+            title: 'Largest single charge (Vibes)', description: 'The most Vibes one app charge may ask for; 0 closes app charges.',
+            'x-group': VIBES_GROUP, 'x-env': 'BILLING_VIBES_MAX_CHARGE',
+        },
+        daily_app_spend_vibes_per_person: {
+            type: 'integer', minimum: 0, maximum: 10_000_000, default: 0,
+            title: 'Daily app spend per person (Vibes)', description: 'The most Vibes one person may spend in apps in a day; 0 closes app spending.',
+            'x-group': VIBES_GROUP, 'x-env': 'BILLING_VIBES_DAILY_APP_SPEND',
+        },
+        from_balance: {
+            type: 'boolean', default: false,
+            title: 'Get Vibes with Balance', description: 'Let a person buy Vibes with their Balance, at the pack value rate.',
+            'x-group': VIBES_GROUP, 'x-env': 'BILLING_VIBES_FROM_BALANCE', 'x-danger': true,
         },
     },
 };
@@ -91,6 +124,7 @@ function parseAmounts(raw) {
 
 const PINNED = ['BILLING_CREDITS', 'BILLING_CREDITS_SANDBOX', 'BILLING_CREDITS_TOPUP', 'BILLING_CREDITS_TOPUP_AMOUNTS_CENTS',
     'BILLING_CREDITS_TOPUP_FEE_BPS', 'BILLING_INFERENCE_LEASE_SECONDS'];
+const VIBES_PINNED = ['BILLING_VIBES_PAY', 'BILLING_VIBES_MAX_CHARGE', 'BILLING_VIBES_DAILY_APP_SPEND', 'BILLING_VIBES_FROM_BALANCE'];
 
 /**
  * The environment as the store should read it. An empty variable means unset (as `loadConfig` already reads
@@ -128,6 +162,17 @@ function valuesFromEnv(env) {
     };
 }
 
+/** The Vibes namespace's environment: empty means unset and a switch keeps every form loadConfig accepted. */
+function vibesStoreEnv(env) {
+    const out = { ...(env || {}) };
+    for (const name of VIBES_PINNED) if (out[name] != null && String(out[name]).trim() === '') delete out[name];
+    for (const name of ['BILLING_VIBES_PAY', 'BILLING_VIBES_FROM_BALANCE']) {
+        if (out[name] == null) continue;
+        out[name] = ['1', 'true', 'yes', 'on'].includes(String(out[name]).toLowerCase()) ? '1' : '0';
+    }
+    return out;
+}
+
 /** Apply the store's effective values to the config object the rest of the service already reads (live). */
 function applyValues(config, values) {
     const credits = config.credits || (config.credits = {});
@@ -137,14 +182,24 @@ function applyValues(config, values) {
     credits.leaseSeconds = Number.isFinite(lease) ? Math.max(1, Math.min(86_400, Math.trunc(lease))) : 300;
 }
 
+function applyVibesValues(config, values) {
+    const vibes = config.vibes || (config.vibes = {});
+    vibes.pay = values.vibes_pay === true;
+    vibes.fromBalance = values.from_balance === true;
+    const max = Number(values.max_charge_vibes);
+    const daily = Number(values.daily_app_spend_vibes_per_person);
+    vibes.maxChargeVibes = Number.isSafeInteger(max) && max >= 0 ? max : 0;
+    vibes.dailyAppSpendVibesPerPerson = Number.isSafeInteger(daily) && daily >= 0 ? daily : 0;
+}
+
 /** One append-only staff_audit row per activation: service, namespace, keys, actor, revision; never a value. */
-async function auditChange(db, { keys, actor, revision }, log) {
+async function auditChange(db, { namespace, service, keys, actor, revision }, log) {
     try {
         const at = iso(Date.now());
         await db.prepare(`INSERT INTO staff_audit (id, at, actor_subject, action, target_type, target_id, reason, outcome, detail)
             VALUES (?, ?, ?, 'config.change', 'config_namespace', ?, 'configuration activated', 'done', ?)`)
-            .run(prefixedId('sa', Date.now()), at, actor && actor.type === 'user' ? actor.id : null, NAMESPACE,
-                JSON.stringify({ service: SERVICE, namespace: NAMESPACE, keys: [...(keys || [])], revision }));
+            .run(prefixedId('sa', Date.now()), at, actor && actor.type === 'user' ? actor.id : null, namespace,
+                JSON.stringify({ service, namespace, keys: [...(keys || [])], revision }));
     } catch (err) {
         // The audit must never refuse a revision: log the failure without the values.
         (log || console).warn(`[config] audit line failed: ${err && err.message ? err.message.split('\n')[0] : 'unknown error'}`);
@@ -158,7 +213,7 @@ async function createBillingConfig({ db, env, log = console, schema = SCHEMA, on
         env: storeEnv(env),
         classify: () => 'internal',
         onActivate,
-        onChange: async (change) => await auditChange(db, change, log),
+        onChange: async (change) => await auditChange(db, { ...change, namespace: NAMESPACE, service: SERVICE }, log),
         log,
     });
     if (store.sealed) {
@@ -174,6 +229,19 @@ async function createBillingConfig({ db, env, log = console, schema = SCHEMA, on
     return store;
 }
 
+/** The D11 `billing.vibes` namespace (Vibes Pay limits and Get Vibes with Balance). */
+async function createVibesConfig({ db, env, log = console, schema = VIBES_SCHEMA, onActivate = null }) {
+    return await config.createConfigStore({
+        db, service: SERVICE, namespace: VIBES_NAMESPACE, schema,
+        env: vibesStoreEnv(env),
+        classify: () => 'internal',
+        onActivate,
+        onChange: async (change) => await auditChange(db, { ...change, namespace: VIBES_NAMESPACE, service: SERVICE }, log),
+        log,
+    });
+}
+
 module.exports = {
-    SERVICE, NAMESPACE, SCHEMA, parseAmounts, storeEnv, valuesFromEnv, applyValues, createBillingConfig, auditChange,
+    SERVICE, NAMESPACE, VIBES_NAMESPACE, SCHEMA, VIBES_SCHEMA, parseAmounts, storeEnv, valuesFromEnv, applyValues,
+    vibesStoreEnv, applyVibesValues, createBillingConfig, createVibesConfig, auditChange,
 };

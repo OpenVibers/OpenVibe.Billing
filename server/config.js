@@ -188,7 +188,7 @@ function loadConfig(env = process.env) {
             staleReceiptMin: int(env.BILLING_RECONCILE_STALE_RECEIPT_MIN, 60),
         },
         credits: {
-            // AI Exchange D2: high-precision credits ledger. Off by default; no inference money moves without it.
+            // AI Exchange D2/D12: high-precision Balance ledger. Off by default; no inference money moves without it.
             enabled: bool(env.BILLING_CREDITS),
             // Synthetic inference credit grants, for development and integration tests only.
             sandbox: bool(env.BILLING_CREDITS_SANDBOX),
@@ -196,6 +196,15 @@ function loadConfig(env = process.env) {
             leaseSeconds: Math.max(1, Math.min(86400, int(env.BILLING_INFERENCE_LEASE_SECONDS, 300))),
             // Background sweeper interval for expired holds (0 = off, default off until the subledger is enabled).
             sweepIntervalMs: int(env.BILLING_INFERENCE_SWEEP_MS, 0),
+        },
+
+        // D12 `billing.vibes`: Vibes Pay limits and Get Vibes with Balance. The defaults are closed; the store in
+        // server/config-store.js applies the owner's values live, with these env names as x-env pins.
+        vibes: {
+            pay: bool(env.BILLING_VIBES_PAY),
+            maxChargeVibes: Math.max(0, int(env.BILLING_VIBES_MAX_CHARGE, 0)),
+            dailyAppSpendVibesPerPerson: Math.max(0, int(env.BILLING_VIBES_DAILY_APP_SPEND, 0)),
+            fromBalance: bool(env.BILLING_VIBES_FROM_BALANCE),
         },
 
         // Staff console (server/console): Network SSO (authorization code + PKCE S256, OAuth

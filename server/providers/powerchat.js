@@ -12,7 +12,7 @@
  *
  * donation.completed, by the checkout ref we minted into app_ref (appExternalRef):
  *   pcorder:<intent>            Vibes purchase on the site account → CREDIT for the buyer
- *   pccredit:<intent>           Credits top-up on the site account → the shared credits_topup plan
+ *   pccredit:<intent>           Balance top-up on the site account → the shared credits_topup plan
  *   pcsub:<intent>              subscription: route 'site' → MONEY (share to the creator, fee +
  *                               rest platform revenue); route 'direct' → EXTERNAL (entitlement
  *                               only, the streamer holds the money). Underpaid: site → a plain
@@ -133,10 +133,10 @@ function createPowerchat(cfg, { network } = {}) {
             return { effect: 'purchase', args: { provider: 'powerchat', receiptRef, intentId: intent.id, paidCents: cents, test: isTest, idempotencyKey: key, actor, metadata: meta } };
         }
         if ((m = ref.match(/^pccredit:(.+)$/))) {
-            if (!onSite) return offSite('Credits top-up');
+            if (!onSite) return offSite('Balance top-up');
             const intent = await intents.find(ctx.db, m[1]);
-            if (!intent || intent.kind !== 'credits_topup') return { effect: 'none', reason: `Credits top-up ${ref} has no credits_topup intent` };
-            if (cents < 1) return { effect: 'none', reason: 'zero-amount Credits top-up' };
+            if (!intent || intent.kind !== 'credits_topup') return { effect: 'none', reason: `Balance top-up ${ref} has no credits_topup intent` };
+            if (cents < 1) return { effect: 'none', reason: 'zero-amount Balance top-up' };
             return { effect: 'credits_topup', args: { provider: 'powerchat', receiptRef, paidCents: cents, intentId: intent.id, idempotencyKey: key, actor, ...(isTest ? { test: true } : {}) } };
         }
         if ((m = ref.match(/^pcsub:(.+)$/))) {

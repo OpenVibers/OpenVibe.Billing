@@ -70,12 +70,12 @@ async function reverseReceipt(ctx, input) {
             Object.assign(meta, { bits_reversed: b, bits_clawed_back: clawed, unrecovered_bits: unrecovered });
             review = unrecovered > 0;
         } else if (orig.type === 'credit' && orig.metadata.credit === 'topup') {
-            // A Credits top-up (D9) is reversed in nano-USD: the part of the credited amount this refund covers is
+            // A Balance top-up (D9/D12) is reversed in nano-USD: the part of the credited amount this refund covers is
             // debited from usd_credit by what the account still holds (never below zero). The spent part is the
             // person's debt, in its own ledger account and a row reconciliation reports; it is never written off.
-            const projectId = String(orig.metadata.project_id || '');
+            const projectId = orig.metadata.project_id == null || orig.metadata.project_id === '' ? null : String(orig.metadata.project_id);
             const amountNano = BigInt(orig.metadata.amount_nano_usd || 0);
-            if (amountNano <= 0n || !projectId) fail(422, 'billing.not_reversible', `top-up transaction ${orig.id} has no credit amount`);
+            if (amountNano <= 0n) fail(422, 'billing.not_reversible', `top-up transaction ${orig.id} has no Balance amount`);
             const totalPaid = Number(orig.metadata.paid_cents) || paid;
             const cumBefore = (amountNano * BigInt(done)) / BigInt(totalPaid);
             const cumAfter = (amountNano * BigInt(done + cents)) / BigInt(totalPaid);

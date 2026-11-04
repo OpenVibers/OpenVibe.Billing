@@ -36,6 +36,7 @@ const nanoBalance = async (t, kind) => (await t.db.prepare(`SELECT COALESCE(SUM(
         },
     });
     const alice = t.user(201);
+    t.network.addMembership(PRJ, alice.id, 'owner');
     const aliceToken = t.network.signUser({ subject_id: alice.id, username: 'alice' });
     const start = (body, token = aliceToken) => t.call('POST', '/api/me/credits/topups', { body, token });
     const read = async (token = aliceToken) => (await fetch(`${t.base}/api/me/credits?project_id=${PRJ}`, { headers: { Authorization: `Bearer ${token}` } })).json();
@@ -167,6 +168,7 @@ const nanoBalance = async (t, kind) => (await t.db.prepare(`SELECT COALESCE(SUM(
 
     await check('PowerChat: a site-account tip carrying pccredit:<intent> settles through the shared plan, once', async () => {
         const bob = t.user(202);
+        t.network.addMembership(PRJ, bob.id, 'owner');
         const bobToken = t.network.signUser({ subject_id: bob.id, username: 'bob' });
         const r = await start({ provider: 'powerchat', project_id: PRJ, amount_cents: 1000 }, bobToken);
         assert.strictEqual(r.status, 201, r.text);
@@ -196,6 +198,7 @@ const nanoBalance = async (t, kind) => (await t.db.prepare(`SELECT COALESCE(SUM(
 
     await check('PayPal: the capture completes the shared plan; a replay and a second event for it credit once', async () => {
         const carol = t.user(203);
+        t.network.addMembership(PRJ, carol.id, 'owner');
         const carolToken = t.network.signUser({ subject_id: carol.id, username: 'carol' });
         const r = await start({ provider: 'paypal', project_id: PRJ, amount_cents: 1000 }, carolToken);
         assert.strictEqual(r.status, 201, r.text);
@@ -236,6 +239,7 @@ const nanoBalance = async (t, kind) => (await t.db.prepare(`SELECT COALESCE(SUM(
         // before the provider's paid delivery arrives.
         const off = await boot({ stripe: true, env: { BILLING_CREDITS: '1' } });
         const dave = off.user(204);
+        off.network.addMembership(PRJ, dave.id, 'owner');
         const daveToken = off.network.signUser({ subject_id: dave.id, username: 'dave' });
         const actor = { type: 'user', id: dave.id };
         try {
@@ -299,6 +303,7 @@ const nanoBalance = async (t, kind) => (await t.db.prepare(`SELECT COALESCE(SUM(
     await check('with BILLING_CREDITS_TOPUP off nothing opens: 404, no intent, no checkout; the statement still reads', async () => {
         const off = await boot({ stripe: true, env: { BILLING_CREDITS: '1' } });
         const w = off.user(204);
+        off.network.addMembership(PRJ, w.id, 'owner');
         const token = off.network.signUser({ subject_id: w.id, username: 'w' });
         const r = await off.call('POST', '/api/me/credits/topups', { token, body: { provider: 'stripe', project_id: PRJ, amount_cents: 1000 } });
         assert.strictEqual(r.status, 404, r.text);

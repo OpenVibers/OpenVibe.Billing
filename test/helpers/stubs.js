@@ -4,7 +4,8 @@
  *
  *   startNetwork()  JWKS, client-credentials token endpoint (scope → cap), resolve-batch
  *                   (insists on a service token for openvibe.network holding identity.subject.resolve),
- *                   and SSO: authorize() issues a PKCE-bound code, /oauth/token redeems it, /oauth/revoke
+ *                   project memberships (/internal/projects?subject= and /internal/projects/:id/members/:subject,
+ *                   network.project.member.read), and SSO: authorize() issues a PKCE-bound code, /oauth/token redeems it
  *   startStripe()   /checkout/sessions and /subscriptions/:id, recording calls; `fail` makes it 500
  *   startEvents()   POST /api/v1/events recording batches and the bearer tokens it saw
  */
@@ -27,6 +28,7 @@ async function startNetwork() {
     const legacy = {};          // live user id → subject id
     const resolveCalls = [];
     const grants = [];
+    const memberships = [];      // { project_id, subject, role, archived }
     let issuer = 'http://network.test';
     const state = { down: false };
 
@@ -56,6 +58,13 @@ async function startNetwork() {
         if (liveId != null) legacy[String(liveId)] = subject;
         return subject;
     }
+    /** Record a project membership; the D12 reads return it. */
+    function addMembership(projectId, subject, role = 'owner', archived = false) {
+        const existing = memberships.find((m) => m.project_id === projectId && m.subject === subject);
+        if (existing) Object.assign(existing, { role, archived });
+        else memberships.push({ project_id: projectId, subject, role, archived });
+        return memberships[memberships.length - 1];
+    }
 
     const server = http.createServer(async (req, res) => {
         const raw = await readBody(req);
@@ -77,6 +86,22 @@ async function startNetwork() {
             return send(res, 200, { access_token: signService({ sub: `svc:${body.client_id}`, aud: [body.audience], cap }), token_type: 'Bearer', expires_in: 300 });
         }
         if (req.url === '/oauth/revoke' && req.method === 'POST') { revoked.push(JSON.parse(raw || '{}').token); return send(res, 200, { revoked: true }); }
+        if (req.url.startsWith('/internal/projects') && req.method === 'GET') {
+            const auth = String(req.headers.authorization || '');
+            const v = serviceAuth.verifyServiceToken(auth.slice(7), { publicKey: publicPem, issuer, audience: 'openvibe.network' });
+            if (!v.ok) return send(res, 401, { code: v.code });
+            if (!(v.claims.cap || []).includes('network.project.member.read')) return send(res, 403, { code: 'capability.denied' });
+            const u = new URL(req.url, issuer);
+            if (u.pathname === '/internal/projects') {
+                const subject = u.searchParams.get('subject');
+                return send(res, 200, { projects: memberships.filter((m) => m.subject === subject).map((m) => ({ ...m })) });
+            }
+            const m = u.pathname.match(/^\/internal\/projects\/([^/]+)\/members\/([^/]+)$/);
+            if (!m) return send(res, 404, { error: 'not found' });
+            const found = memberships.find((x) => x.project_id === decodeURIComponent(m[1]) && x.subject === decodeURIComponent(m[2]));
+            if (!found) return send(res, 404, { code: 'project.member_not_found' });
+            return send(res, 200, { project_id: found.project_id, subject: found.subject, role: found.role, archived: found.archived, added_at: null });
+        }
         if (req.url === '/internal/identity/resolve-batch' && req.method === 'POST') {
             const auth = String(req.headers.authorization || '');
             const v = serviceAuth.verifyServiceToken(auth.slice(7), { publicKey: publicPem, issuer, audience: 'openvibe.network' });
@@ -98,7 +123,7 @@ async function startNetwork() {
     issuer = url;
     // A person's Network session token, as the browser holds it (the shared navbar sends it).
     const signUser = (u) => userToken({ role: 'user', username: 'someone', nowMs: Date.now(), ...u });
-    return { url, publicPem, signService, signUser, addUser, authorize, revoked, legacy, resolveCalls, grants, state, close: () => new Promise((r) => server.close(r)) };
+    return { url, publicPem, signService, signUser, addUser, addMembership, memberships, authorize, revoked, legacy, resolveCalls, grants, state, close: () => new Promise((r) => server.close(r)) };
 }
 
 async function startStripe() {

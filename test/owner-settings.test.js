@@ -19,6 +19,7 @@ const KEK = 'k1:' + crypto.randomBytes(32).toString('base64');
     console.log('owner settings (billing.credits)');
     const t = await boot();
     const owner = t.user(301);
+    t.network.addMembership(PRJ, owner.id, 'owner');
     const ownerToken = t.network.signUser({ subject_id: owner.id, username: 'owner' });
     const headers = (fresh = false, extra = {}) => ({ 'x-ov-subject': owner.id, ...(fresh ? { 'x-ov-fresh': '1' } : {}), ...extra });
     const get = (cap = CAP, extra = {}) => t.call('GET', '/internal/config', { cap, headers: extra });
@@ -40,7 +41,7 @@ const KEK = 'k1:' + crypto.randomBytes(32).toString('base64');
         const p = ns.schema.properties;
         assert.deepStrictEqual(Object.keys(p).sort(), ['credits', 'hold_lease_seconds', 'sandbox', 'topup', 'topup_amounts_cents', 'topup_fee_bps']);
         for (const k of Object.keys(p)) {
-            assert.strictEqual(p[k]['x-group'], 'Credits', `${k}: x-group`);
+            assert.strictEqual(p[k]['x-group'], 'Balance', `${k}: x-group`);
             assert.ok(p[k].title && p[k].description, `${k}: title and description`);
         }
         assert.deepStrictEqual([p.credits['x-env'], p.credits['x-danger']], ['BILLING_CREDITS', true]);

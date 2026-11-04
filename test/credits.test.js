@@ -47,10 +47,10 @@ function holdBody(subject, max, over = {}) {
     return {
         idempotency_key: `hold:${crypto.randomBytes(8).toString('hex')}`,
         subject: { type: 'user', id: subject.id },
-        project_id: PRJ,
         max_nano_usd: String(max),
         rate_version: 'rc-v1',
         request_fingerprint: crypto.randomBytes(8).toString('hex'),
+        // No project means the person's own Balance (D12); a project hold passes project_id.
         ...over,
     };
 }
@@ -72,12 +72,12 @@ async function assertJournalBalances(db, label) {
     const release = (id, opts = {}) => t.call('POST', `/internal/credits/holds/${id}/release`, { body: {}, cap: INF, sub: 'svc:ai', ...opts });
     const grant = (body, opts = {}) => t.call('POST', '/internal/credits/sandbox/grants', { body, cap: SBX, sub: 'svc:ai', ...opts });
     // A real top-up, booked the way checkout funding will book one (money received at the provider -> the person's Credits).
-    const fund = (user, amount) => post(t.ctx, {
+    const fund = (user, amount, projectId = null) => post(t.ctx, {
         type: 'credit', idempotencyKey: `test:fund:${crypto.randomBytes(8).toString('hex')}`, test: true,
         actor: { type: 'service', id: 'billing' }, toSubject: user.id,
         entries: [
             { kind: 'provider_clearing', owner: 'stripe', currency: 'nano-usd', amount: -BigInt(amount) },
-            { ...inference.A_INF.credit(user.id, PRJ), amount: BigInt(amount) },
+            { ...inference.A_INF.credit(user.id, projectId), amount: BigInt(amount) },
         ],
         metadata: { credit: 'test_top_up' },
     });
@@ -93,7 +93,7 @@ async function assertJournalBalances(db, label) {
         assert.strictEqual(txn.test, 1);
         const entries = (await t.db.prepare('SELECT a.kind, a.owner_subject AS owner, a.currency, e.amount::text AS amount FROM ledger_entries e JOIN accounts a ON a.id = e.account_id WHERE e.txn_id = ?').all(txn.id));
         assert.deepStrictEqual(entries.map((e) => [e.kind, e.owner, e.currency, e.amount]).sort(),
-            [['usd_credit_sandbox', null, 'nano-usd', '-100000'], ['usd_credit_sandbox', `${alice.id}:${PRJ}`, 'nano-usd', '100000']]);
+            [['usd_credit_sandbox', null, 'nano-usd', '-100000'], ['usd_credit_sandbox', `project:${PRJ}`, 'nano-usd', '100000']]);
         await assertJournalBalances(t.db, 'after sandbox grant');
     });
 
@@ -190,8 +190,8 @@ async function assertJournalBalances(db, label) {
         // 100 input @ 1000/m = ceil(100*1000/1e6) = 1; per_request 100 => 101
         assert.strictEqual(s.json.charge_nano_usd, '101');
         assert.strictEqual(s.json.released_nano_usd, '49899');
-        const bal = await t.db.prepare("SELECT b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'usd_credit' AND a.owner_subject = ?").get(`${gina.id}:${PRJ}`);
-        assert.strictEqual(String(bal.balance), '99899'); // credit balance reduced by the charge; the rest of the hold is released
+        const bal = await t.db.prepare("SELECT b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'usd_credit' AND a.owner_subject = ?").get(`user:${gina.id}`);
+        assert.strictEqual(String(bal.balance), '99899'); // Balance reduced by the charge; the rest of the hold is released
     });
 
     await check('release returns the held amount and is idempotent', async () => {
@@ -226,16 +226,15 @@ async function assertJournalBalances(db, label) {
         const holds = await Promise.all(Array.from({ length: 100 }, (_, i) => create({
             idempotency_key: `${key}:${i}`,
             subject: { type: 'user', id: jack.id },
-            project_id: PRJ,
             max_nano_usd: '10000',
             rate_version: 'rc-v1',
             request_fingerprint: `fp-${i}`,
         })));
         const succeeded = holds.filter((r) => r.status === 201).length;
         assert.strictEqual(succeeded, 7, `expected 7 holds, got ${succeeded}`);
-        const bal = await t.db.prepare("SELECT b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'usd_credit' AND a.owner_subject = ?").get(`${jack.id}:${PRJ}`);
+        const bal = await t.db.prepare("SELECT b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'usd_credit' AND a.owner_subject = ?").get(`user:${jack.id}`);
         assert.strictEqual(String(bal.balance), '70000');
-        const held = await t.db.prepare("SELECT COALESCE(SUM(held_nano_usd), 0)::text AS held FROM credit_holds WHERE account_id = (SELECT id FROM accounts WHERE kind = 'usd_credit' AND owner_subject = ?) AND status IN ('active', 'extended')").get(`${jack.id}:${PRJ}`);
+        const held = await t.db.prepare("SELECT COALESCE(SUM(held_nano_usd), 0)::text AS held FROM credit_holds WHERE account_id = (SELECT id FROM accounts WHERE kind = 'usd_credit' AND owner_subject = ?) AND status IN ('active', 'extended')").get(`user:${jack.id}`);
         assert.strictEqual(String(held.held), '70000');
         assert.ok(holds.every((r) => r.status === 201 || r.json.code === 'billing.insufficient_funds'));
     });
@@ -251,15 +250,16 @@ async function assertJournalBalances(db, label) {
         assert.strictEqual(s.json.charge_nano_usd, '3000', 'collected: the hold and the free balance');
         assert.strictEqual(s.json.shortfall_nano_usd, '2000', 'owed, not collected, and recorded');
         assert.strictEqual(s.json.released_nano_usd, '0');
-        const bal = await t.db.prepare("SELECT b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'usd_credit' AND a.owner_subject = ?").get(`${omar.id}:${PRJ}`);
+        const bal = await t.db.prepare("SELECT b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'usd_credit' AND a.owner_subject = ?").get(`user:${omar.id}`);
         assert.strictEqual(String(bal.balance), '0', 'never below zero');
     });
 
-    await check('a person reads their own Credits statement: balance, held, available, charges without content', async () => {
+    await check('a person reads their own Balance statement: balance, held, available, charges without content', async () => {
         const lena = t.user(13);
-        await fund(lena, '100000');
-        const open = await create(holdBody(lena, 20000));
-        const done = await create(holdBody(lena, 10000));
+        t.network.addMembership(PRJ, lena.id, 'owner');
+        await fund(lena, '100000', PRJ);
+        const open = await create(holdBody(lena, 20000, { project_id: PRJ }));
+        const done = await create(holdBody(lena, 10000, { project_id: PRJ }));
         await settle(done.json.hold_id, settleBody({ input_tokens: 1000, output_tokens: 1000 }, { attempts: [{ deployment_id: 'own:qwen/qwen3-4b:q4_k_m@3f2a1c9', provider_access: 'OWN_DEPLOYMENT', started_at: new Date().toISOString(), ended_at: new Date().toISOString() }] }));
         const token = t.network.signUser({ subject_id: lena.id, username: 'lena' });
         const read = (q, tok = token) => fetch(`${t.base}/api/me/credits${q}`, { headers: tok ? { Authorization: `Bearer ${tok}` } : {} });
@@ -277,8 +277,8 @@ async function assertJournalBalances(db, label) {
         assert.strictEqual((await read(`?project_id=${PRJ}`, null)).status, 401, 'a token is needed');
         assert.strictEqual((await read('?project_id=nope')).status, 422);
         const other = t.network.signUser({ subject_id: t.user(14).id, username: 'mo' });
-        const theirs = await (await read(`?project_id=${PRJ}`, other)).json();
-        assert.strictEqual(theirs.balance_nano_usd, '0', 'another person sees only their own (empty) account');
+        const theirs = await read(`?project_id=${PRJ}`, other);
+        assert.strictEqual(theirs.status, 403, 'a person who does not administer the project reads no statement');
     });
 
     await check('a body that is not the contract\'s is refused with 422 before anything is held', async () => {
@@ -297,21 +297,23 @@ async function assertJournalBalances(db, label) {
         assert.strictEqual(settled.status, 422, 'attempts carry the contract fields only (deployment_id, provider_access, times)');
     });
 
-    await check('sandbox credit pays only a sandbox hold, and its charge returns to the issuer (D10)', async () => {
+    await check('sandbox Balance pays only a sandbox hold, and its charge returns to the issuer (D10)', async () => {
         const sam = t.user(15);
-        await grant({ subject: { type: 'user', id: sam.id }, project_id: PRJ, amount_nano_usd: '50000' });
-        const real = await create(holdBody(sam, 1000));
-        assert.strictEqual(real.status, 402, 'a real hold never spends sandbox credit');
+        const SAM_PRJ = 'prj_01JAB2C3D4E5F6G7H8J9K0MNPS';
+        t.network.addMembership(SAM_PRJ, sam.id, 'owner');
+        await grant({ subject: { type: 'user', id: sam.id }, project_id: SAM_PRJ, amount_nano_usd: '50000' });
+        const real = await create(holdBody(sam, 1000, { project_id: SAM_PRJ }));
+        assert.strictEqual(real.status, 402, 'a real hold never spends sandbox Balance');
         const revenueBefore = await t.db.prepare("SELECT COALESCE(SUM(b.balance), 0)::text AS v FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'platform_revenue' AND a.currency = 'nano-usd'").get();
-        const boxed = await create(holdBody(sam, 10000, { sandbox: true }));
+        const boxed = await create(holdBody(sam, 10000, { project_id: SAM_PRJ, sandbox: true }));
         assert.strictEqual(boxed.status, 201, boxed.text);
         const done2 = await settle(boxed.json.hold_id, settleBody({ input_tokens: 1000, output_tokens: 1000 }));
         assert.strictEqual(done2.status, 201, done2.text);
         const revenueAfter = await t.db.prepare("SELECT COALESCE(SUM(b.balance), 0)::text AS v FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'platform_revenue' AND a.currency = 'nano-usd'").get();
         assert.strictEqual(revenueAfter.v, revenueBefore.v, 'a sandbox charge is not revenue');
         const token = t.network.signUser({ subject_id: sam.id, username: 'sam' });
-        const doc = await (await fetch(`${t.base}/api/me/credits?project_id=${PRJ}`, { headers: { Authorization: `Bearer ${token}` } })).json();
-        assert.strictEqual(doc.balance_nano_usd, '0', 'the real balance does not include sandbox credit');
+        const doc = await (await fetch(`${t.base}/api/me/credits?project_id=${SAM_PRJ}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+        assert.strictEqual(doc.balance_nano_usd, '0', 'the real Balance does not include sandbox Balance');
         assert.strictEqual(doc.sandbox.balance_nano_usd, String(50000 - 104), 'the sandbox balance is shown apart');
         assert.strictEqual(doc.charges.length, 0, 'sandbox charges are not on the real statement');
     });

@@ -1,24 +1,30 @@
-# Credits: the prepaid USD balance for metered services
+# Balance: the prepaid USD balance for metered services
 
 OpenVibe has two currencies (AI Exchange D9, owner 2026-11-03):
 
 | Currency | For | Precision |
 |---|---|---|
 | **Vibes** | Social and consumer use: tips and bits on Live, creators, cashout, consumer apps priced in whole Vibes. | A whole Vibes bit, 100 per USD. |
-| **Credits** | A traditional topped-up balance that metered developer and platform services spend: the AI API first, then compute. | nano-USD (1e-9 USD) |
+| **Balance** | A topped-up USD balance that metered developer and platform services spend: the AI API first, then compute. One for one with the dollar. | nano-USD (1e-9 USD) |
 
-Nothing about Vibes changes. Credits are built on the same double-entry journal, in their own currency (`nano-usd`)
-and their own accounts, and they never go through `chargeFor`.
+Nothing about Vibes changes. Balance is built on the same double-entry journal, in its own currency (`nano-usd`)
+and its own accounts, and never goes through `chargeFor`.
 
 Everything is behind `BILLING_CREDITS` (off). Sandbox grants are also behind `BILLING_CREDITS_SANDBOX` (off).
 
-**Sandbox credit is kept apart (D10).**
-- A grant lands in the person's own `usd_credit_sandbox` account for that project, never in `usd_credit`.
+**Who holds a Balance (D12).**
+- A person's Balance is `usd_credit` owned by `user:<usr_id>`.
+- A project's Balance is `usd_credit` owned by `project:<prj_id>`.
+- A hold with a `project_id` spends the project's Balance; a hold without one spends the person's.
+- Sandbox balances follow the same split under `usd_credit_sandbox`.
+
+**Sandbox Balance is kept apart (D10).**
+- A grant lands in the project's `usd_credit_sandbox` account (`project:<prj_id>`), never in `usd_credit`.
 - Only a hold with `sandbox: true` spends it, and a real hold never sees it: granted test credit can never pay for
   real supply.
 - A sandbox charge returns to the sandbox issuer, not to `platform_revenue`, and its journal transaction is marked
   test.
-- The statement shows the sandbox balance apart (`sandbox`).
+- The statement shows the sandbox Balance apart (`sandbox`).
 
 Every internal request body is checked against its `openvibe-contracts` schema first; another shape is a 422
 `billing.invalid_request`, before anything is held.
@@ -36,8 +42,9 @@ Every internal request body is checked against its `openvibe-contracts` schema f
    the supply cost, `byok` and the attempts (`/holds/:id/settle`).
    - Billing computes the charge itself: for each token class, `ceil(tokens × rate_nano_per_m / 1,000,000)`, plus the
      per-request fee.
-   - It moves that amount from the person's `usd_credit` account to `platform_revenue` (a sandbox hold: from their
-     `usd_credit_sandbox` back to the issuer), and releases the rest of the hold.
+   - It moves that amount from the account the hold locked (the person's or the project's `usd_credit`) to
+     `platform_revenue` (a sandbox hold: from `usd_credit_sandbox` back to the issuer), and releases the rest of
+     the hold.
    - In the same transaction it announces `billing.credit.settled@1`, for aggregates (OpenVibe.Report). The event
      carries the answering deployment, its `provider_access`, the four token counts, what was collected, the supply
      cost and the shortfall. It never carries the subject, the project or the account: a person's charges are read
@@ -54,24 +61,49 @@ Every internal request body is checked against its `openvibe-contracts` schema f
 | **One hold per key.** | The key is unique and re-checked after the account lock. The same key with another fingerprint is a 409. | idempotent create; 409 on a fingerprint change. |
 | **Only what was used is charged.** | The settle computes the charge from usage and releases the rest. An aborted stream settles its partial usage. | an aborted stream: a partial charge, the rest released. |
 | **No silent loss.** | Usage beyond the hold is taken from the free balance. What cannot be collected (never below zero) is recorded as `shortfall_nano_usd` for reconciliation. | usage beyond the hold: the free balance is taken, the shortfall recorded, the balance never below zero. |
-| **Sandbox credit never pays for real supply.** | A grant credits `usd_credit_sandbox`; only a `sandbox: true` hold draws on it, and its charge goes back to the issuer. | a real hold on granted credit is 402; a sandbox hold settles, `platform_revenue` unchanged. |
+| **Sandbox Balance never pays for real supply.** | A grant credits `usd_credit_sandbox`; only a `sandbox: true` hold draws on it, and its charge goes back to the issuer. | a real hold on granted credit is 402; a sandbox hold settles, `platform_revenue` unchanged. |
 | **BYOK is never billed twice.** | `byok: true` charges 0; the provider bills the person directly. | BYOK settle: charge 0. |
 | **The journal balances.** | Every movement is a balanced journal entry, in its own currency. Reconciliation sums per currency as text, so no total exceeds JavaScript's safe range. | the journal balances at the end. |
 | **Rounding is once per token class per request.** | `computeCharge`. | the 4-class rounding test, with a worked example. |
 
 **The old amplification, gone.** `chargeFor` rounds every usage reading up to one whole Vibes bit ($0.01). One token at
-$1 per billion tokens is charged a full cent there, a ten-million-fold over-charge. Credits charge it 1 nano-USD.
+$1 per billion tokens is charged a full cent there, a ten-million-fold over-charge. Balance charges it 1 nano-USD.
 (test: "the old chargeFor amplification for tiny usage does not affect the subledger")
 
 ## Reading it
 
-A signed-in person reads their own statement for a project with `GET /api/me/credits?project_id=prj_…`:
+`GET /api/me/balance` (a person token, the same CORS as `/api/me/vibes`) answers:
+
+```json
+{
+  "personal": { "owner": { "type": "user", "id": "usr_…" }, "balance_nano_usd": "…", "held_nano_usd": "…", "available_nano_usd": "…" },
+  "projects": [ { "owner": { "type": "project", "id": "prj_…" }, "balance_nano_usd": "…", "held_nano_usd": "…", "available_nano_usd": "…" } ]
+}
+```
+
+The `projects` are the ones the person administers: Billing asks Network with its own service token (`network.project.member.read`), and a failed read is an error, never an empty list. `GET /api/me/credits` is an alias of the same answer; with `?project_id=prj_…` it still answers that one project's statement (after Network confirms the person administers it):
 - the balance, what is held and what is available;
 - the last 50 charges: service, model, token counts, charge, shortfall, BYOK, rate version.
 
 There is never any prompt or answer: Billing never receives them.
 
-## Top-up: a person funds their own Credits
+## Moving Balance
+
+`POST /api/me/balance/transfers` with `{ to_project_id, amount_nano_usd, idempotency_key }` moves money from the
+person's Balance to a project they administer (admin or owner, unarchived). One serializable transaction locks both
+accounts; the source spends available Balance only (never money under an active hold), so it can never go below zero.
+A replay with the same key returns the same transfer and moves nothing; a different request under that key is a 409.
+
+`POST /api/me/vibes/from-balance` with `{ vibes, idempotency_key }` buys Vibes at the pack value rate:
+
+  `price_nano_usd = ceil(vibes × 1,000,000,000 / bits_per_usd)`
+
+with `bits_per_usd` = `BILLING_BITS_PER_USD` (default 100). The journal moves the exact nano-USD from the person's
+`usd_credit` to `platform_revenue:nano-usd` and mints the Vibes from `fx_conversion:vibes-bits` into the person's
+Vibes account exactly as a pack purchase does. It is behind `billing.vibes.from_balance` (danger, off) and
+`BILLING_CREDITS`.
+
+## Top-up: a person adds money to a Balance
 
 Behind `BILLING_CREDITS_TOPUP` (off, and only meaningful with `BILLING_CREDITS=1`). The owner sets every amount and
 the fee; the code has no default amount and no default fee. **One function reads the terms**:
@@ -91,7 +123,7 @@ it wins and the owner's write is `409 config.pinned_in_env`; nothing changes unt
 Both are required. With either unset or malformed, `POST /api/me/credits/topups` refuses with
 `503 billing.topup_unconfigured` before creating an intent or opening a provider checkout.
 
-**Every provider carries a Credits intent** through the same multi-purpose pipeline as a Vibes purchase
+**Every provider carries a Balance top-up intent** through the same multi-purpose pipeline as a Vibes purchase
 (`server/providers/index.js` receive → store → process → `applyPlan`):
 
 | Provider | How the person pays | The adapter maps its verified delivery to |
@@ -109,17 +141,18 @@ an adapter that is not enabled is refused at start (`409 billing.provider_disabl
 listed here before it is offered.
 
 1. **Start.** A signed-in person (`Authorization: Bearer <user token>`) calls
-   `POST /api/me/credits/topups` with `{ provider, project_id, amount_cents }`.
+   `POST /api/me/credits/topups` with `{ provider, project_id?, amount_cents }`. A project is optional: without one
+the top-up adds to the person's own Balance.
    - The amount must be one the owner listed, otherwise `422 billing.amount_not_allowed`.
    - The fee is `ceil(amount_cents × fee_bps / 10000)` cents, rounded once; the provider charges amount + fee.
    - Billing creates a `payment_intents` row with `kind='credits_topup'` (the project, amount and fee in its
      metadata) and opens the provider's existing checkout with the same `intent_id` metadata as a purchase.
 2. **Paid.** The provider's paid webhook for that intent is mapped to `credits_topup` and settles through the one
-   shared plan. It credits the person's `usd_credit:<subject>:<project_id>` account with the intent's amount at
-   `1 cent = 10,000,000 nano-USD`, and books the fee (and any overpayment) to `platform_revenue`. The journal, all in
-   `nano-usd`:
+   shared plan. It credits the intent's account — `usd_credit:user:<usr_id>` without a project, or
+   `usd_credit:project:<prj_id>` with one — with the intent's amount at `1 cent = 10,000,000 nano-USD`, and books
+   the fee (and any overpayment) to `platform_revenue`. The journal, all in `nano-usd`:
    - `provider_clearing:<provider>` −(what was paid);
-   - `usd_credit:<subject>:<project_id>` +amount;
+   - `usd_credit:user:<usr_id>` (or `usd_credit:project:<prj_id>`) +amount;
    - `platform_revenue` +fee.
 3. **Once.** The provider event is stored once by its event id, and the settled transaction's receipt reference is
    unique. A redelivery returns `duplicate_receipt`; a second event for the same payment credits nothing further. The
@@ -158,7 +191,7 @@ listed here before it is offered.
    through the vhost. Reconcile before and after the first real payment.
 4. **Kill switch.** `BILLING_CREDITS=0` refuses every hold (503). OpenVibe AI then refuses paid requests with a clear
    error, while BYOK, the person's own machine and sandbox keep working. `money_writes_frozen` freezes the whole
-   economy, Credits included.
+   economy, Balance included.
 5. **Rollback.** Turn the flag off. The tables stay, unused: N-1 code never reads them.
 6. **Reconcile daily.**
    - The reconciliation job covers `nano-usd` like every other currency.

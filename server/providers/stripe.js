@@ -67,7 +67,7 @@ function createStripe(cfg, { fetchImpl = globalThis.fetch } = {}) {
                     return { effect: 'update', reason: 'linked Stripe subscription', apply: async (c) => await intents.mergeMetadata(c, intent.id, { stripe_subscription: obj.subscription }) };
                 }
                 if (obj.payment_status && obj.payment_status !== 'paid') return { effect: 'none', reason: `checkout ${obj.payment_status}` };
-                // A Credits top-up (D9) maps to the one shared credits_topup plan; the shared settle credits usd_credit
+                // A Balance top-up (D9) maps to the one shared credits_topup plan; the shared settle credits usd_credit
                 // instead of Vibes bits. It can never fall through to a purchase or subscription.
                 if (intent.kind === 'credits_topup') {
                     return { effect: 'credits_topup', args: {

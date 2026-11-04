@@ -1,9 +1,10 @@
 'use strict';
 
 /**
- * Credits top-up (D9): a person pays USD through the existing checkout provider and the paid webhook credits their
- * (subject, project_id) usd_credit account, at nano-USD precision (1 cent = 10,000,000 nano-USD). The fee the owner
- * configured is charged on top and booked to platform_revenue.
+ * Balance top-up (D9/D12): a person pays USD through the existing checkout provider and the paid webhook credits
+ * their usd_credit account, at nano-USD precision (1 cent = 10,000,000 nano-USD). Without a project_id it credits the
+ * person's own Balance (owner user:<usr_id>); with one it credits that project's Balance (owner project:<prj_id>). The
+ * fee the owner configured is charged on top and booked to platform_revenue.
  *
  * Everything is behind BILLING_CREDITS_TOPUP (off). The owner sets every allowed amount and the fee through
  * topupTerms(ctx) in ops/credits.js, the one reader of the terms; there is no default amount and no default fee.
@@ -12,11 +13,11 @@
  *
  * Every adapter maps its own verified delivery to the one `credits_topup` plan (providers/index.js applyPlan), so a
  * PowerChat tip, a Stripe checkout, a PayPal capture, a CCBill sale and a NOWPayments payment all settle through
- * settle() below. No adapter carries Credits logic beyond that mapping.
+ * settle() below. No adapter carries Balance logic beyond that mapping.
  *
  * Journal on a paid top-up (nano-usd, all balanced):
  *   provider_clearing:<provider>  -(what was paid)
- *   usd_credit:<subject>:<project> +amount
+ *   usd_credit:user:<usr_id> (or usd_credit:project:<prj_id>) +amount
  *   platform_revenue               +fee (and any overpayment)
  *
  * The receipt reference is unique in the journal and the intent is marked settled in the same transaction, so a
@@ -39,10 +40,10 @@ function feeCents(amountCents, feeBps) {
 }
 
 function assertStartable(ctx) {
-    if (!ctx.config.credits || !ctx.config.credits.enabled) fail(404, 'billing.not_enabled', 'Credits are not open yet');
+    if (!ctx.config.credits || !ctx.config.credits.enabled) fail(404, 'billing.not_enabled', 'Balance is not open yet');
     const t = topupTerms(ctx);
-    if (!t.enabled) fail(404, 'billing.topup_disabled', 'Credits top-up is not open');
-    if (!t.configured) fail(503, 'billing.topup_unconfigured', `the Credits top-up is not configured: ${t.problem}`);
+    if (!t.enabled) fail(404, 'billing.topup_disabled', 'Balance top-up is not open');
+    if (!t.configured) fail(503, 'billing.topup_unconfigured', `the Balance top-up is not configured: ${t.problem}`);
     return t;
 }
 
@@ -57,8 +58,9 @@ async function startTopup(ctx, adapters, input) {
     // The freeze stops money writes; opening a checkout that would take money is one, as on /api/v1/intents.
     if (await isFrozen(ctx.db)) fail(503, 'billing.frozen', 'the economy is frozen: top-ups are refused');
     const subject = userSubject(input.subject, 'subject');
-    const projectId = String(input.project_id || '');
-    if (!PROJECT_RE.test(projectId)) fail(422, 'billing.invalid_input', 'project_id is a project id');
+    // A top-up with no project adds to the person's own Balance (D12); with one it adds to that project's Balance.
+    const projectId = input.project_id == null || input.project_id === '' ? null : String(input.project_id);
+    if (projectId != null && !PROJECT_RE.test(projectId)) fail(422, 'billing.invalid_input', 'project_id is a project id');
     const amountCents = positiveInt(input.amount_cents, 'amount_cents', MAX_RECEIPT_CENTS);
     if (!t.amountsCents.includes(amountCents)) fail(422, 'billing.amount_not_allowed', 'this top-up amount is not offered');
     const provider = String(input.provider || '').toLowerCase();
@@ -73,7 +75,7 @@ async function startTopup(ctx, adapters, input) {
     if (adapter.createCheckout) {
         try {
             const out = await adapter.createCheckout(ctx, intent, {
-                name: 'OpenVibe Credits',
+                name: 'OpenVibe Balance',
                 successUrl: `${config.baseUrl}/checkout/success`, cancelUrl: `${config.baseUrl}/checkout/cancel`,
                 ipnUrl: `${config.baseUrl}/webhooks/${adapter.name}`,
             });
@@ -91,14 +93,15 @@ async function startTopup(ctx, adapters, input) {
  * Settle a paid top-up exactly once, for every provider. When the feature is off or unconfigured the event is
  * recorded for review and moves nothing (money received but not credited is visible to an operator, never silent).
  * Idempotent on the provider event key and on the receipt reference (a second event for the same payment returns the
- * first transaction). Credits exactly the intent's amount; the fee (and any overpayment) is platform revenue. Marks
+ * first transaction). Adds exactly the intent's amount to the Balance; the fee (and any overpayment) is platform
+ * revenue. Marks
  * the intent settled in the same transaction.
  */
 async function settle(ctx, input) {
     const { db } = ctx;
     const t = topupTerms(ctx);
-    if (!ctx.config.credits || !ctx.config.credits.enabled || !t.enabled) return { skipped: 'Credits top-up is off' };
-    if (!t.configured) return { skipped: `Credits top-up is not configured: ${t.problem}` };
+    if (!ctx.config.credits || !ctx.config.credits.enabled || !t.enabled) return { skipped: 'Balance top-up is off' };
+    if (!t.configured) return { skipped: `Balance top-up is not configured: ${t.problem}` };
     return await money(db, async () => {
         const receiptRef = input.receiptRef;
         if (!receiptRef) fail(422, 'billing.invalid_input', 'a provider receipt reference is required');
@@ -118,8 +121,9 @@ async function settle(ctx, input) {
         if (paidCents < intent.amount_cents) fail(422, 'billing.underpaid', `the payment of ${paidCents} cents does not cover the top-up of ${intent.amount_cents} cents`);
         const amountCents = Number(intent.metadata.topup_amount_cents);
         const feeBps = Number(intent.metadata.topup_fee_bps);
-        const projectId = String(intent.metadata.project_id || '');
-        if (!Number.isSafeInteger(amountCents) || amountCents <= 0 || !PROJECT_RE.test(projectId)) fail(422, 'billing.intent_mismatch', `intent ${intent.id} is not a valid credits_topup`);
+        const rawProject = intent.metadata.project_id;
+        const projectId = rawProject == null || rawProject === '' ? null : String(rawProject);
+        if (!Number.isSafeInteger(amountCents) || amountCents <= 0 || (projectId != null && !PROJECT_RE.test(projectId))) fail(422, 'billing.intent_mismatch', `intent ${intent.id} is not a valid Balance top-up`);
 
         const amountNano = BigInt(amountCents) * NANO_PER_CENT;
         const paidNano = BigInt(paidCents) * NANO_PER_CENT;
