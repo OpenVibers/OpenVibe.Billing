@@ -226,6 +226,21 @@ async function assertJournalBalances(db, label) {
         assert.ok(holds.every((r) => r.status === 201 || r.json.code === 'billing.insufficient_funds'));
     });
 
+    await check('usage beyond the hold takes the free balance, never below zero, and records the shortfall', async () => {
+        const omar = t.user(15);
+        await grant({ subject: { type: 'user', id: omar.id }, project_id: PRJ, amount_nano_usd: '3000' });
+        const h = await create(holdBody(omar, 1000));
+        // The request turned out to cost 5,000 nano (a per-request fee here), against 1,000 held and 3,000 funded in all.
+        const rate = retail({ nano_usd_per_m: { input: '0', cached_read: '0', cache_write: '0', output: '0' }, per_request_nano_usd: '5000' });
+        const s = await settle(h.json.hold_id, settleBody({ input_tokens: 0, output_tokens: 0 }, { retail: rate }));
+        assert.strictEqual(s.status, 201, s.text);
+        assert.strictEqual(s.json.charge_nano_usd, '3000', 'collected: the hold and the free balance');
+        assert.strictEqual(s.json.shortfall_nano_usd, '2000', 'owed, not collected, and recorded');
+        assert.strictEqual(s.json.released_nano_usd, '0');
+        const bal = await t.db.prepare("SELECT b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'usd_credit' AND a.owner_subject = ?").get(`${omar.id}:${PRJ}`);
+        assert.strictEqual(String(bal.balance), '0', 'never below zero');
+    });
+
     await check('a person reads their own Credits statement: balance, held, available, charges without content', async () => {
         const lena = t.user(13);
         await grant({ subject: { type: 'user', id: lena.id }, project_id: PRJ, amount_nano_usd: '100000' });

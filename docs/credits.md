@@ -38,7 +38,7 @@ Everything is behind `BILLING_CREDITS` (off). Sandbox grants are also behind `BI
 | **Exactly one charge per request.** | The settle's idempotency key is unique. A replay returns the first settlement. Two concurrent settles serialize on the hold lock, and the second replays. A key reused for another hold is a 409. | settle replay: one journal transaction, the same settlement. |
 | **One hold per key.** | The key is unique and re-checked after the account lock. The same key with another fingerprint is a 409. | idempotent create; 409 on a fingerprint change. |
 | **Only what was used is charged.** | The settle computes the charge from usage and releases the rest. An aborted stream settles its partial usage. | an aborted stream: a partial charge, the rest released. |
-| **No silent loss.** | Usage beyond the hold is taken from the free balance. What cannot be collected (never below zero) is recorded as `shortfall_nano_usd` for reconciliation. | (the shortfall path) |
+| **No silent loss.** | Usage beyond the hold is taken from the free balance. What cannot be collected (never below zero) is recorded as `shortfall_nano_usd` for reconciliation. | usage beyond the hold: the free balance is taken, the shortfall recorded, the balance never below zero. |
 | **BYOK is never billed twice.** | `byok: true` charges 0; the provider bills the person directly. | BYOK settle: charge 0. |
 | **The journal balances.** | Every movement is a balanced journal entry, in its own currency. Reconciliation sums per currency as text, so no total exceeds JavaScript's safe range. | the journal balances at the end. |
 | **Rounding is once per token class per request.** | `computeCharge`. | the 4-class rounding test, with a worked example. |
