@@ -60,6 +60,9 @@ const key = (p) => `${p}:${crypto.randomBytes(8).toString('hex')}`;
     });
 
     await check('the caller\'s own rows carry exact amounts and plain labels', async () => {
+        const cors = await fetch(`${t.base}/api/me/activity`, { headers: { Authorization: `Bearer ${aliceToken}`, Origin: 'https://openvibe.network' } });
+        assert.strictEqual(cors.headers.get('access-control-allow-origin'), 'https://openvibe.network');
+        assert.strictEqual(cors.headers.get('cache-control'), 'private, no-store');
         const r = await get(aliceToken);
         assert.strictEqual(r.status, 200, r.text);
         const rows = r.body.activity;
