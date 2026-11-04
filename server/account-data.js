@@ -34,6 +34,10 @@ const TABLES = [
     // Import holds and usage budgets are part of the books: the import, its credits and the spend must still reconcile.
     { table: 'import_holds', subject: 'owner', file: 'import-holds.json', columns: ['live_user_id', 'owner', 'reason', 'credit_bits', 'payable_bits', 'resolved_subject', 'first_seen_at', 'updated_at'], erase: { keep: ledger } },
     { table: 'usage_budgets', subject: 'subject', file: 'usage-budgets.json', erase: { keep: ledger } },
+    // The credits ledger (AI Exchange D2): holds, settlements and sandbox grants are money records too.
+    { table: 'credit_holds', subject: 'subject', file: 'inference-holds.json', columns: ['id', 'project_id', 'held_nano_usd', 'max_nano_usd', 'rate_version', 'status', 'lease_expires_at', 'created_at', 'updated_at'], erase: { keep: ledger } },
+    { table: 'credit_settlements', subject: 'subject', file: 'inference-charges.json', columns: ['id', 'hold_id', 'project_id', 'charge_nano_usd', 'released_nano_usd', 'journal_id', 'usage', 'retail', 'byok', 'created_at'], erase: { keep: ledger } },
+    { table: 'credit_sandbox_grants', subject: 'subject', file: 'inference-sandbox-grants.json', columns: ['id', 'project_id', 'amount_nano_usd', 'reason', 'created_at'], erase: { keep: ledger } },
 ];
 
 /** Accounts with their balances (a balance is the account's cached sum of ledger entries). */

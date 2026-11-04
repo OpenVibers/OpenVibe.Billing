@@ -1,16 +1,16 @@
 'use strict';
 /**
- * High-precision inference subledger (AI Exchange D1, D2; migrations/0011_inference_subledger.sql, ops/inference.js,
- * api/internal.js): holds, extends, settlements and releases in nano-USD, behind BILLING_INFERENCE_SUBLEDGER.
- * Sandbox grants are behind BILLING_INFERENCE_SANDBOX. Nothing here touches chargeFor or Vibes bits.
+ * Credits: the prepaid USD balance for metered services (AI Exchange D1, D2; migrations/0011_inference_subledger.sql, ops/inference.js,
+ * api/internal.js): holds, extends, settlements and releases in nano-USD, behind BILLING_CREDITS.
+ * Sandbox grants are behind BILLING_CREDITS_SANDBOX. Nothing here touches chargeFor or Vibes bits.
  */
 const assert = require('assert');
 const crypto = require('crypto');
 const { boot, check, done } = require('./helpers/app');
-const inference = require('../server/ops/inference');
+const inference = require('../server/ops/credits');
 
-const INF = ['billing.inference.hold'];
-const SBX = ['billing.inference.sandbox.grant'];
+const INF = ['billing.credit.hold'];
+const SBX = ['billing.credit.sandbox.grant'];
 const PRJ = 'prj_01JAB2C3D4E5F6G7H8J9K0MNPQ';
 
 function retail(over = {}) {
@@ -61,13 +61,13 @@ async function assertJournalBalances(db, label) {
 }
 
 (async () => {
-    console.log('inference subledger');
-    const t = await boot({ env: { BILLING_INFERENCE_SUBLEDGER: '1', BILLING_INFERENCE_SANDBOX: '1' } });
-    const create = (body, opts = {}) => t.call('POST', '/internal/inference/holds', { body, cap: INF, sub: 'svc:ai', ...opts });
-    const extend = (id, add, opts = {}) => t.call('POST', `/internal/inference/holds/${id}/extend`, { body: { add_nano_usd: String(add) }, cap: INF, sub: 'svc:ai', ...opts });
-    const settle = (id, body, opts = {}) => t.call('POST', `/internal/inference/holds/${id}/settle`, { body, cap: INF, sub: 'svc:ai', ...opts });
-    const release = (id, opts = {}) => t.call('POST', `/internal/inference/holds/${id}/release`, { body: {}, cap: INF, sub: 'svc:ai', ...opts });
-    const grant = (body, opts = {}) => t.call('POST', '/internal/inference/sandbox/grants', { body, cap: SBX, sub: 'svc:ai', ...opts });
+    console.log('credits ledger');
+    const t = await boot({ env: { BILLING_CREDITS: '1', BILLING_CREDITS_SANDBOX: '1' } });
+    const create = (body, opts = {}) => t.call('POST', '/internal/credits/holds', { body, cap: INF, sub: 'svc:ai', ...opts });
+    const extend = (id, add, opts = {}) => t.call('POST', `/internal/credits/holds/${id}/extend`, { body: { add_nano_usd: String(add) }, cap: INF, sub: 'svc:ai', ...opts });
+    const settle = (id, body, opts = {}) => t.call('POST', `/internal/credits/holds/${id}/settle`, { body, cap: INF, sub: 'svc:ai', ...opts });
+    const release = (id, opts = {}) => t.call('POST', `/internal/credits/holds/${id}/release`, { body: {}, cap: INF, sub: 'svc:ai', ...opts });
+    const grant = (body, opts = {}) => t.call('POST', '/internal/credits/sandbox/grants', { body, cap: SBX, sub: 'svc:ai', ...opts });
 
     const alice = t.user(1);
 
@@ -76,11 +76,11 @@ async function assertJournalBalances(db, label) {
         assert.strictEqual(r.status, 201, r.text);
         assert.strictEqual(r.json.amount_nano_usd, '100000');
         assert.strictEqual(r.json.balance_nano_usd, '100000');
-        const txn = await t.db.prepare("SELECT * FROM transactions WHERE idempotency_key = ?").get(`inference:sandbox:${r.json.grant_id}`);
+        const txn = await t.db.prepare("SELECT * FROM transactions WHERE idempotency_key = ?").get(`credit:sandbox:${r.json.grant_id}`);
         assert.strictEqual(txn.test, 1);
         const entries = (await t.db.prepare('SELECT a.kind, a.owner_subject AS owner, a.currency, e.amount::text AS amount FROM ledger_entries e JOIN accounts a ON a.id = e.account_id WHERE e.txn_id = ?').all(txn.id));
         assert.deepStrictEqual(entries.map((e) => [e.kind, e.owner, e.currency, e.amount]).sort(),
-            [['inference_credit', `${alice.id}:${PRJ}`, 'nano-usd', '100000'], ['inference_sandbox', null, 'nano-usd', '-100000']]);
+            [['usd_credit', `${alice.id}:${PRJ}`, 'nano-usd', '100000'], ['usd_credit_sandbox', null, 'nano-usd', '-100000']]);
         await assertJournalBalances(t.db, 'after sandbox grant');
     });
 
@@ -163,7 +163,7 @@ async function assertJournalBalances(db, label) {
         assert.strictEqual(s2.status, 200, s2.text);
         assert.strictEqual(s2.json.settlement_id, s1.json.settlement_id);
         assert.strictEqual(s2.json.journal_id, s1.json.journal_id);
-        const txns = await t.db.prepare("SELECT COUNT(*) AS n FROM transactions WHERE type = 'inference' AND idempotency_key = ?").get(`inference:settle:${body.idempotency_key}`);
+        const txns = await t.db.prepare("SELECT COUNT(*) AS n FROM transactions WHERE type = 'credit' AND idempotency_key = ?").get(`credit:settle:${body.idempotency_key}`);
         assert.strictEqual(Number(txns.n), 1);
     });
 
@@ -176,7 +176,7 @@ async function assertJournalBalances(db, label) {
         // 100 input @ 1000/m = ceil(100*1000/1e6) = 1; per_request 100 => 101
         assert.strictEqual(s.json.charge_nano_usd, '101');
         assert.strictEqual(s.json.released_nano_usd, '49899');
-        const bal = await t.db.prepare("SELECT b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'inference_credit' AND a.owner_subject = ?").get(`${gina.id}:${PRJ}`);
+        const bal = await t.db.prepare("SELECT b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'usd_credit' AND a.owner_subject = ?").get(`${gina.id}:${PRJ}`);
         assert.strictEqual(String(bal.balance), '99899'); // credit balance reduced by the charge; the rest of the hold is released
     });
 
@@ -190,7 +190,7 @@ async function assertJournalBalances(db, label) {
         const r2 = await release(h.json.hold_id);
         assert.strictEqual(r2.status, 200, r2.text);
         assert.strictEqual(r2.json.released_nano_usd, '30000');
-        const row = await t.db.prepare('SELECT status FROM inference_holds WHERE id = ?').get(h.json.hold_id);
+        const row = await t.db.prepare('SELECT status FROM credit_holds WHERE id = ?').get(h.json.hold_id);
         assert.strictEqual(row.status, 'released');
     });
 
@@ -200,8 +200,8 @@ async function assertJournalBalances(db, label) {
         const h = await create(holdBody(ivy, 10000));
         t.clock.offset += 600 * 1000; // default lease is 300s; advance past it
         const out = await inference.sweepExpired(t.ctx);
-        assert.ok(out.released >= 1, `expected at least 1 release, got ${out.released}`);
-        const row = await t.db.prepare('SELECT status FROM inference_holds WHERE id = ?').get(h.json.hold_id);
+        assert.ok(out.released >= 1, `expected at least 1 release, got ${out.released}; the hold answered ${h.status} ${JSON.stringify(h.json).slice(0, 300)}`);
+        const row = await t.db.prepare('SELECT status FROM credit_holds WHERE id = ?').get(h.json.hold_id);
         assert.strictEqual(row.status, 'expired');
     });
 
@@ -219,9 +219,9 @@ async function assertJournalBalances(db, label) {
         })));
         const succeeded = holds.filter((r) => r.status === 201).length;
         assert.strictEqual(succeeded, 7, `expected 7 holds, got ${succeeded}`);
-        const bal = await t.db.prepare("SELECT b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'inference_credit' AND a.owner_subject = ?").get(`${jack.id}:${PRJ}`);
+        const bal = await t.db.prepare("SELECT b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id WHERE a.kind = 'usd_credit' AND a.owner_subject = ?").get(`${jack.id}:${PRJ}`);
         assert.strictEqual(String(bal.balance), '70000');
-        const held = await t.db.prepare("SELECT COALESCE(SUM(held_nano_usd), 0)::text AS held FROM inference_holds WHERE account_id = (SELECT id FROM accounts WHERE kind = 'inference_credit' AND owner_subject = ?) AND status IN ('active', 'extended')").get(`${jack.id}:${PRJ}`);
+        const held = await t.db.prepare("SELECT COALESCE(SUM(held_nano_usd), 0)::text AS held FROM credit_holds WHERE account_id = (SELECT id FROM accounts WHERE kind = 'usd_credit' AND owner_subject = ?) AND status IN ('active', 'extended')").get(`${jack.id}:${PRJ}`);
         assert.strictEqual(String(held.held), '70000');
         assert.ok(holds.every((r) => r.status === 201 || r.json.code === 'billing.insufficient_funds'));
     });

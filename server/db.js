@@ -19,7 +19,7 @@ const { createDb } = require('openvibe-sdk/db');
 
 const ACCOUNT_KINDS = ['user_credit', 'creator_payable', 'provider_clearing', 'platform_revenue', 'payouts_pending',
     'refunds', 'import_adjustment', 'chargeback_loss', 'fx_conversion', 'promo_credit', 'promo_reserve',
-    'inference_credit', 'inference_sandbox'];
+    'usd_credit', 'usd_credit_sandbox'];
 // The promo ledger's kinds (migrations/0003): their entries never share a transaction with any other kind.
 const PROMO_KINDS = ['promo_credit', 'promo_reserve'];
 const CURRENCIES = ['vibes-bits', 'usd-cents', 'nano-usd'];

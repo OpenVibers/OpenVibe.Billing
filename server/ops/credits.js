@@ -1,11 +1,11 @@
 'use strict';
 
 /**
- * High-precision inference subledger (AI Exchange D1, D2). All amounts are integer nano-USD (1e-9 USD),
- * represented as JS BigInt. The ledger account for a (subject, project_id) uses kind='inference_credit',
+ * Credits: the prepaid USD balance for metered services (AI Exchange D1, D2). All amounts are integer nano-USD (1e-9 USD),
+ * represented as JS BigInt. The ledger account for a (subject, project_id) uses kind='usd_credit',
  * currency='nano-usd' and owner_subject='<subject>:<project_id>'. Holds are reservations; settlement moves
  * the actual charge to platform_revenue:nano-usd and releases the unused reservation. Sandbox grants create
- * synthetic credit from inference_sandbox:nano-usd and are only available when BILLING_INFERENCE_SANDBOX=1.
+ * synthetic credit from usd_credit_sandbox:nano-usd and are only available when BILLING_CREDITS_SANDBOX=1.
  *
  * Nothing here goes through chargeFor or the Vibes bits ledger.
  */
@@ -19,8 +19,8 @@ const ACTIVE_STATUSES = ['active', 'extended'];
 const TERMINAL_STATUSES = ['settled', 'released', 'expired'];
 
 const A_INF = {
-    credit: (subject, projectId) => ({ kind: 'inference_credit', owner: `${subject}:${projectId}`, currency: CURRENCY }),
-    sandbox: () => ({ kind: 'inference_sandbox', owner: null, currency: CURRENCY }),
+    credit: (subject, projectId) => ({ kind: 'usd_credit', owner: `${subject}:${projectId}`, currency: CURRENCY }),
+    sandbox: () => ({ kind: 'usd_credit_sandbox', owner: null, currency: CURRENCY }),
     revenue: () => ({ kind: 'platform_revenue', owner: null, currency: CURRENCY }),
 };
 
@@ -49,15 +49,15 @@ function parseSubject(v) {
 
 function accountIdOf(owner) {
     const [subject, projectId] = String(owner || ':').split(':');
-    return { kind: 'inference_credit', owner, currency: CURRENCY, subject, projectId };
+    return { kind: 'usd_credit', owner, currency: CURRENCY, subject, projectId };
 }
 
 function assertEnabled(config) {
-    if (!config.inference || !config.inference.enabled) fail(503, 'billing.not_enabled', 'BILLING_INFERENCE_SUBLEDGER is off');
+    if (!config.credits || !config.credits.enabled) fail(503, 'billing.not_enabled', 'BILLING_CREDITS is off');
 }
 
 function assertSandbox(config) {
-    if (!config.inference || !config.inference.sandbox) fail(503, 'billing.sandbox_disabled', 'BILLING_INFERENCE_SANDBOX is off');
+    if (!config.credits || !config.credits.sandbox) fail(503, 'billing.sandbox_disabled', 'BILLING_CREDITS_SANDBOX is off');
 }
 
 async function assertNotFrozen(db) {
@@ -67,11 +67,13 @@ async function assertNotFrozen(db) {
 /** The account row id for a (subject, project_id), selected FOR UPDATE. Creates the account and balance row if absent. */
 async function lockAccount(db, subject, projectId, nowIso) {
     const owner = `${subject}:${projectId}`;
-    let row = await db.prepare(`SELECT a.id FROM accounts a WHERE a.kind = 'inference_credit' AND a.owner_subject = ? AND a.currency = 'nano-usd'`).get(owner);
+    let row = await db.prepare(`SELECT a.id FROM accounts a WHERE a.kind = 'usd_credit' AND a.owner_subject = ? AND a.currency = 'nano-usd'`).get(owner);
     if (!row) {
-        const ins = await db.prepare(`INSERT INTO accounts (kind, owner_subject, currency, created_at) VALUES ('inference_credit', ?, 'nano-usd', ?) RETURNING id`).run(owner, nowIso);
-        row = { id: ins.lastInsertRowid };
-        await db.prepare('INSERT INTO account_balances (account_id, balance, updated_at) VALUES (?, 0, ?)').run(row.id, nowIso);
+        // Two first holds at once: one inserts, the other finds it (the account's unique key), never a 500.
+        await db.prepare(`INSERT INTO accounts (kind, owner_subject, currency, created_at) VALUES ('usd_credit', ?, 'nano-usd', ?)
+            ON CONFLICT DO NOTHING`).run(owner, nowIso);
+        row = await db.prepare(`SELECT a.id FROM accounts a WHERE a.kind = 'usd_credit' AND a.owner_subject = ? AND a.currency = 'nano-usd'`).get(owner);
+        await db.prepare('INSERT INTO account_balances (account_id, balance, updated_at) VALUES (?, 0, ?) ON CONFLICT DO NOTHING').run(row.id, nowIso);
     }
     // Re-select FOR UPDATE to serialize concurrent holds on the same account.
     await db.prepare('SELECT 1 FROM accounts WHERE id = ? FOR UPDATE').get(row.id);
@@ -80,7 +82,7 @@ async function lockAccount(db, subject, projectId, nowIso) {
 
 /** Sum of active holds for an account. */
 async function heldOnAccount(db, accountId) {
-    const r = await db.prepare(`SELECT COALESCE(SUM(held_nano_usd), 0)::text AS held FROM inference_holds
+    const r = await db.prepare(`SELECT COALESCE(SUM(held_nano_usd), 0)::text AS held FROM credit_holds
         WHERE account_id = ? AND status IN ('active', 'extended')`).get(accountId);
     return BigInt(String(r.held));
 }
@@ -92,14 +94,16 @@ async function available(db, accountId) {
     return bal - await heldOnAccount(db, accountId);
 }
 
-function presentHold(row) {
+function presentHold(row, availableAfter = null) {
     return {
         hold_id: row.id,
         subject: { type: 'user', id: row.subject },
         project_id: row.project_id,
         credential_id: row.credential_id || null,
+        service: row.service || 'ai',
         held_nano_usd: String(row.held_nano_usd),
-        available_nano_usd: String(row.held_nano_usd),
+        // What the account has left to hold after this one (null when not read with the hold).
+        available_nano_usd: availableAfter == null ? null : String(availableAfter < 0n ? 0n : availableAfter),
         max_nano_usd: row.max_nano_usd == null ? null : String(row.max_nano_usd),
         rate_version: row.rate_version,
         request_fingerprint: row.request_fingerprint,
@@ -117,6 +121,7 @@ function presentSettlement(row) {
         project_id: row.project_id,
         charge_nano_usd: String(row.charge_nano_usd),
         released_nano_usd: String(row.released_nano_usd),
+        shortfall_nano_usd: String(row.shortfall_nano_usd == null ? 0 : row.shortfall_nano_usd),
         journal_id: row.journal_id,
         usage: row.usage,
         retail: row.retail,
@@ -143,27 +148,36 @@ async function createHold(ctx, input) {
     const fingerprint = text(input.request_fingerprint, 'request_fingerprint', 1024) || fail(422, 'billing.invalid_input', 'request_fingerprint is required');
     const idempotencyKey = text(input.idempotency_key, 'idempotency_key', 128) || fail(422, 'billing.invalid_input', 'idempotency_key is required');
     const credentialId = input.credential_id ? text(input.credential_id, 'credential_id') : null;
-    const leaseSeconds = Math.max(1, Math.min(config.inference.leaseSeconds || 300, 86400));
+    // Which metered service spends the credit (D9): AI inference today; compute and others later.
+    const service = String(input.service == null ? 'ai' : input.service);
+    if (!/^[a-z][a-z0-9-]{0,39}$/.test(service)) fail(422, 'billing.invalid_input', 'service is a lowercase service name (ai, run, ...)');
+    const leaseSeconds = Math.max(1, Math.min(config.credits.leaseSeconds || 300, 86400));
 
     return await money(db, async () => {
         const now = ctx.now();
         const nowIso = iso(now);
-        const existing = await db.prepare('SELECT * FROM inference_holds WHERE idempotency_key = ?').get(idempotencyKey);
+        const existing = await db.prepare('SELECT * FROM credit_holds WHERE idempotency_key = ?').get(idempotencyKey);
         if (existing) {
             if (existing.request_fingerprint !== fingerprint) fail(409, 'billing.hold_key_reused', 'the same idempotency_key with a different fingerprint is already used');
-            return { hold: presentHold(existing), replay: true };
+            return { hold: presentHold(existing, await available(db, existing.account_id)), replay: true };
         }
         const accountId = await lockAccount(db, subject, projectId, nowIso);
+        // The same key at the same moment: the account lock serializes them, so the second sees the first's hold here.
+        const raced = await db.prepare('SELECT * FROM credit_holds WHERE idempotency_key = ?').get(idempotencyKey);
+        if (raced) {
+            if (raced.request_fingerprint !== fingerprint) fail(409, 'billing.hold_key_reused', 'the same idempotency_key with a different fingerprint is already used');
+            return { hold: presentHold(raced, await available(db, raced.account_id)), replay: true };
+        }
         const avail = await available(db, accountId);
         if (avail < maxNano) fail(402, 'billing.insufficient_funds', `insufficient inference credit: ${avail} < ${maxNano} nano-USD`, { available: String(avail), required: String(maxNano) });
 
         const holdId = prefixedId('hld', now);
         const leaseExpires = iso(now + leaseSeconds * 1000);
-        const row = await db.prepare(`INSERT INTO inference_holds
-            (id, idempotency_key, subject, project_id, credential_id, account_id, held_nano_usd, max_nano_usd, rate_version, request_fingerprint, lease_expires_at, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, 'active', ?::timestamptz, ?::timestamptz) RETURNING *`).get(
-            holdId, idempotencyKey, subject, projectId, credentialId, accountId, maxNano, maxNano, rateVersion, fingerprint, leaseExpires, nowIso, nowIso);
-        return { hold: presentHold(row), replay: false };
+        const row = await db.prepare(`INSERT INTO credit_holds
+            (id, idempotency_key, subject, project_id, credential_id, service, account_id, held_nano_usd, max_nano_usd, rate_version, request_fingerprint, lease_expires_at, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, 'active', ?::timestamptz, ?::timestamptz) RETURNING *`).get(
+            holdId, idempotencyKey, subject, projectId, credentialId, service, accountId, maxNano, maxNano, rateVersion, fingerprint, leaseExpires, nowIso, nowIso);
+        return { hold: presentHold(row, avail - maxNano), replay: false };
     });
 }
 
@@ -180,17 +194,18 @@ async function extendHold(ctx, input) {
     return await money(db, async () => {
         const now = ctx.now();
         const nowIso = iso(now);
-        const hold = await db.prepare('SELECT * FROM inference_holds WHERE id = ? FOR UPDATE').get(holdId);
+        const hold = await db.prepare('SELECT * FROM credit_holds WHERE id = ? FOR UPDATE').get(holdId);
         if (!hold) fail(404, 'billing.hold_not_found', `no hold ${holdId}`);
+        // Past its lease but not yet swept, a hold still counts against the balance, so it may still grow: the sweeper alone
+        // decides expiry (a settle that arrives late must not lose billable usage).
         if (TERMINAL_STATUSES.includes(hold.status)) fail(409, 'billing.hold_terminal', `hold ${holdId} is already ${hold.status}`);
-        if (new Date(hold.lease_expires_at).getTime() <= now) fail(409, 'billing.hold_expired', `hold ${holdId} has expired`);
 
         await db.prepare('SELECT 1 FROM accounts WHERE id = ? FOR UPDATE').get(hold.account_id);
         const avail = await available(db, hold.account_id);
         if (avail < addNano) fail(402, 'billing.insufficient_funds', `cannot extend hold: ${avail} < ${addNano} nano-USD available`, { available: String(avail), required: String(addNano) });
 
         const newHeld = BigInt(String(hold.held_nano_usd)) + addNano;
-        const row = await db.prepare(`UPDATE inference_holds SET held_nano_usd = ?, max_nano_usd = ?, status = 'extended', lease_expires_at = GREATEST(lease_expires_at, ?::timestamptz), updated_at = ?::timestamptz WHERE id = ? RETURNING *`).get(
+        const row = await db.prepare(`UPDATE credit_holds SET held_nano_usd = ?, max_nano_usd = ?, status = 'extended', lease_expires_at = GREATEST(lease_expires_at, ?::timestamptz), updated_at = ?::timestamptz WHERE id = ? RETURNING *`).get(
             newHeld, newHeld, iso(now + 60 * 1000), nowIso, holdId);
         return { hold: presentHold(row) };
     });
@@ -233,9 +248,8 @@ async function settleHold(ctx, input) {
     const supplyCost = nano(input.supply_cost_nano_usd || '0', 'supply_cost_nano_usd');
     const attempts = Array.isArray(input.attempts) ? input.attempts : [];
 
-    if (typeof usage.input_tokens !== 'number' || typeof usage.cached_read_tokens !== 'number' ||
-        typeof usage.cache_write_tokens !== 'number' || typeof usage.output_tokens !== 'number' ||
-        usage.input_tokens < 0 || usage.cached_read_tokens < 0 || usage.cache_write_tokens < 0 || usage.output_tokens < 0) {
+    const tokenOk = (v) => Number.isSafeInteger(v) && v >= 0;
+    if (!tokenOk(usage.input_tokens) || !tokenOk(usage.cached_read_tokens) || !tokenOk(usage.cache_write_tokens) || !tokenOk(usage.output_tokens)) {
         fail(422, 'billing.invalid_input', 'usage must have non-negative integer token counts');
     }
     if (!retail.version || typeof retail.nano_usd_per_m !== 'object' || typeof retail.per_request_nano_usd === 'undefined') {
@@ -248,36 +262,52 @@ async function settleHold(ctx, input) {
         const now = ctx.now();
         const nowIso = iso(now);
 
-        const existing = await db.prepare('SELECT * FROM inference_settlements WHERE idempotency_key = ?').get(idempotencyKey);
-        if (existing) return { settlement: presentSettlement(existing), replay: true };
+        const replayOf = (row) => {
+            // A key names one settlement of one hold: the same key for another hold is a conflict, never its answer.
+            if (row.hold_id !== holdId) fail(409, 'billing.settle_key_reused', 'this idempotency_key already settled another hold');
+            return { settlement: presentSettlement(row), replay: true };
+        };
+        const existing = await db.prepare('SELECT * FROM credit_settlements WHERE idempotency_key = ?').get(idempotencyKey);
+        if (existing) return replayOf(existing);
 
-        const hold = await db.prepare('SELECT * FROM inference_holds WHERE id = ? FOR UPDATE').get(holdId);
+        const hold = await db.prepare('SELECT * FROM credit_holds WHERE id = ? FOR UPDATE').get(holdId);
         if (!hold) fail(404, 'billing.hold_not_found', `no hold ${holdId}`);
+        // Two settles at once with one key: the hold lock serializes them; the second sees the first's settlement.
+        const raced = await db.prepare('SELECT * FROM credit_settlements WHERE idempotency_key = ?').get(idempotencyKey);
+        if (raced) return replayOf(raced);
         if (TERMINAL_STATUSES.includes(hold.status)) fail(409, 'billing.hold_terminal', `hold ${holdId} is already ${hold.status}`);
-        if (new Date(hold.lease_expires_at).getTime() <= now) fail(409, 'billing.hold_expired', `hold ${holdId} has expired`);
 
         await db.prepare('SELECT 1 FROM accounts WHERE id = ? FOR UPDATE').get(hold.account_id);
         const held = BigInt(String(hold.held_nano_usd));
-        if (charge > held) fail(402, 'billing.insufficient_funds', `settlement charge ${charge} exceeds hold ${held} nano-USD`);
-        const released = held - charge;
+        // Usage beyond the hold (a stream longer than its estimate that was not extended) is taken from what the account
+        // still has, never below zero; what cannot be collected is recorded as a shortfall for reconciliation, so
+        // billable usage is never silently lost and the balance never goes negative.
+        let collected = charge;
+        let shortfall = 0n;
+        if (charge > held) {
+            const room = held + await available(db, hold.account_id);   // the account's other room (this hold excluded)
+            if (charge > room) { collected = room; shortfall = charge - room; }
+        }
+        const released = collected >= held ? 0n : held - collected;
 
         const journalId = prefixedId('txn', now);
         const { txn } = await post(ctx, {
-            type: 'inference', idempotencyKey: `inference:settle:${idempotencyKey}`, actor: input.actor || ACTOR,
+            type: 'credit', idempotencyKey: `credit:settle:${idempotencyKey}`, actor: input.actor || ACTOR,
             fromSubject: hold.subject, toSubject: null,
-            entries: [entry(A_INF.credit(hold.subject, hold.project_id), -charge), entry(A_INF.revenue(), charge)],
+            entries: [entry(A_INF.credit(hold.subject, hold.project_id), -collected), entry(A_INF.revenue(), collected)],
             metadata: {
-                inference: 'settle', hold_id: holdId, project_id: hold.project_id, credential_id: hold.credential_id,
+                credit: 'settle', hold_id: holdId, project_id: hold.project_id, credential_id: hold.credential_id,
                 usage, retail, byok, supply_cost_nano_usd: String(supplyCost), attempts, released_nano_usd: String(released),
+                charge_nano_usd: String(charge), shortfall_nano_usd: String(shortfall),
             },
         });
 
-        await db.prepare(`UPDATE inference_holds SET status = 'settled', held_nano_usd = 0, updated_at = ?::timestamptz WHERE id = ?`).run(nowIso, holdId);
-        const row = await db.prepare(`INSERT INTO inference_settlements
-            (id, hold_id, idempotency_key, subject, project_id, account_id, charge_nano_usd, released_nano_usd, journal_id, usage, retail, supply_cost_nano_usd, byok, attempts, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?::jsonb, ?::timestamptz) RETURNING *`).get(
+        await db.prepare(`UPDATE credit_holds SET status = 'settled', held_nano_usd = 0, updated_at = ?::timestamptz WHERE id = ?`).run(nowIso, holdId);
+        const row = await db.prepare(`INSERT INTO credit_settlements
+            (id, hold_id, idempotency_key, subject, project_id, account_id, charge_nano_usd, released_nano_usd, shortfall_nano_usd, journal_id, usage, retail, supply_cost_nano_usd, byok, attempts, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?::jsonb, ?::timestamptz) RETURNING *`).get(
             prefixedId('stl', now), holdId, idempotencyKey, hold.subject, hold.project_id, hold.account_id,
-            charge, released, txn.id, JSON.stringify(usage), JSON.stringify(retail), supplyCost, byok, JSON.stringify(attempts), nowIso);
+            collected, released, shortfall, txn.id, JSON.stringify(usage), JSON.stringify(retail), supplyCost, byok, JSON.stringify(attempts), nowIso);
         return { settlement: presentSettlement(row), replay: false };
     });
 }
@@ -294,14 +324,14 @@ async function releaseHold(ctx, input) {
     return await money(db, async () => {
         const now = ctx.now();
         const nowIso = iso(now);
-        const hold = await db.prepare('SELECT * FROM inference_holds WHERE id = ? FOR UPDATE').get(holdId);
+        const hold = await db.prepare('SELECT * FROM credit_holds WHERE id = ? FOR UPDATE').get(holdId);
         if (!hold) fail(404, 'billing.hold_not_found', `no hold ${holdId}`);
         if (hold.status === 'released') return { hold_id: holdId, released_nano_usd: String(hold.max_nano_usd) };
         if (hold.status === 'settled') fail(409, 'billing.hold_terminal', `hold ${holdId} is already settled`);
         if (TERMINAL_STATUSES.includes(hold.status)) fail(409, 'billing.hold_terminal', `hold ${holdId} is already ${hold.status}`);
 
         const released = BigInt(String(hold.held_nano_usd));
-        await db.prepare(`UPDATE inference_holds SET status = 'released', held_nano_usd = 0, updated_at = ?::timestamptz WHERE id = ?`).run(nowIso, holdId);
+        await db.prepare(`UPDATE credit_holds SET status = 'released', held_nano_usd = 0, updated_at = ?::timestamptz WHERE id = ?`).run(nowIso, holdId);
         return { hold_id: holdId, released_nano_usd: String(released) };
     });
 }
@@ -311,20 +341,20 @@ async function releaseHold(ctx, input) {
  */
 async function sweepExpired(ctx) {
     const { db, config } = ctx;
-    if (!config.inference || !config.inference.enabled) return { released: 0 };
+    if (!config.credits || !config.credits.enabled) return { released: 0 };
     if (await isFrozen(db)) return { released: 0, frozen: true };
     const nowIso = iso(ctx.now());
-    const due = await db.prepare(`SELECT id FROM inference_holds WHERE status IN ('active', 'extended') AND lease_expires_at <= ?::timestamptz ORDER BY lease_expires_at, id FOR UPDATE`).all(nowIso);
+    const due = await db.prepare(`SELECT id FROM credit_holds WHERE status IN ('active', 'extended') AND lease_expires_at <= ?::timestamptz ORDER BY lease_expires_at, id FOR UPDATE`).all(nowIso);
     let released = 0;
     for (const { id } of due) {
-        await db.prepare(`UPDATE inference_holds SET status = 'expired', held_nano_usd = 0, updated_at = ?::timestamptz WHERE id = ? AND status IN ('active', 'extended')`).run(nowIso, id);
+        await db.prepare(`UPDATE credit_holds SET status = 'expired', held_nano_usd = 0, updated_at = ?::timestamptz WHERE id = ? AND status IN ('active', 'extended')`).run(nowIso, id);
         released++;
     }
     return { released };
 }
 
 /**
- * Sandbox grant: add synthetic inference credit to an account. Only when BILLING_INFERENCE_SANDBOX=1.
+ * Sandbox grant: add synthetic inference credit to an account. Only when BILLING_CREDITS_SANDBOX=1.
  */
 async function sandboxGrant(ctx, input) {
     const { db, config } = ctx;
@@ -344,12 +374,12 @@ async function sandboxGrant(ctx, input) {
         const accountId = await lockAccount(db, subject, projectId, nowIso);
         const grantId = prefixedId('igr', now);
         const { txn } = await post(ctx, {
-            type: 'inference', idempotencyKey: `inference:sandbox:${grantId}`, actor: input.actor || ACTOR, toSubject: subject,
+            type: 'credit', idempotencyKey: `credit:sandbox:${grantId}`, actor: input.actor || ACTOR, toSubject: subject,
             test: true,
             entries: [entry(A_INF.sandbox(), -amount), entry(A_INF.credit(subject, projectId), amount)],
-            metadata: { inference: 'sandbox_grant', grant_id: grantId, project_id: projectId, reason, amount_nano_usd: String(amount) },
+            metadata: { credit: 'sandbox_grant', grant_id: grantId, project_id: projectId, reason, amount_nano_usd: String(amount) },
         });
-        await db.prepare(`INSERT INTO inference_sandbox_grants (id, subject, project_id, account_id, amount_nano_usd, journal_id, reason, created_at)
+        await db.prepare(`INSERT INTO credit_sandbox_grants (id, subject, project_id, account_id, amount_nano_usd, journal_id, reason, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?::timestamptz)`).run(grantId, subject, projectId, accountId, amount, txn.id, reason, nowIso);
         return { grant_id: grantId, amount_nano_usd: String(amount), balance_nano_usd: String(await balance(db, A_INF.credit(subject, projectId))) };
     });
@@ -357,15 +387,15 @@ async function sandboxGrant(ctx, input) {
 
 /** Read a hold by id. */
 async function findHold(db, id) {
-    const row = await db.prepare('SELECT * FROM inference_holds WHERE id = ?').get(id);
+    const row = await db.prepare('SELECT * FROM credit_holds WHERE id = ?').get(id);
     return row ? presentHold(row) : null;
 }
 
 /** Read a settlement by hold id or id. */
 async function findSettlement(db, { holdId, id } = {}) {
     const row = holdId
-        ? await db.prepare('SELECT * FROM inference_settlements WHERE hold_id = ?').get(holdId)
-        : await db.prepare('SELECT * FROM inference_settlements WHERE id = ?').get(id);
+        ? await db.prepare('SELECT * FROM credit_settlements WHERE hold_id = ?').get(holdId)
+        : await db.prepare('SELECT * FROM credit_settlements WHERE id = ?').get(id);
     return row ? presentSettlement(row) : null;
 }
 

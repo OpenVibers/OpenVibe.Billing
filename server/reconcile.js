@@ -135,7 +135,7 @@ async function reconcile(ctx, { store = true, trigger = 'manual' } = {}) {
 
     const warnings = {
         negative_balances: await db.prepare(`SELECT a.kind, a.owner_subject AS owner, a.currency, b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id
-            WHERE a.kind IN ('user_credit', 'creator_payable', 'payouts_pending', 'promo_credit', 'inference_credit') AND b.balance < 0`).all(),
+            WHERE a.kind IN ('user_credit', 'creator_payable', 'payouts_pending', 'promo_credit', 'usd_credit') AND b.balance < 0`).all(),
         unprocessed_events: await db.prepare('SELECT id, provider, provider_event_id, type, received_at, attempts, last_error FROM provider_events WHERE processed_at IS NULL ORDER BY id').all(),
         rejected_events: (await db.prepare("SELECT id, provider, provider_event_id, type, result FROM provider_events WHERE json_extract(result, '$.effect') = 'rejected'").all())
             .map((r) => ({ ...r, result: JSON.parse(r.result) })),

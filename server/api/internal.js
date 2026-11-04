@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * Internal inference subledger API (AI Exchange D2). Service-token authenticated (audience openvibe.billing),
- * mounted under /internal/inference only when BILLING_INFERENCE_SUBLEDGER=1. This is the authority surface
+ * Internal credits ledger API (AI Exchange D2). Service-token authenticated (audience openvibe.billing),
+ * mounted under /internal/credits only when BILLING_CREDITS=1. This is the authority surface
  * OpenVibe.AI calls to reserve, extend, settle and release inference credit.
  */
 const express = require('express');
@@ -10,11 +10,11 @@ const { http } = require('openvibe-contracts');
 const { BillingError } = require('../ledger');
 const { isFrozen } = require('../ops/common');
 const { actorOf } = require('./auth');
-const inference = require('../ops/inference');
+const inference = require('../ops/credits');
 
 const CAP = {
-    inference: 'billing.inference.hold',
-    sandbox: 'billing.inference.sandbox.grant',
+    credit: 'billing.credit.hold',
+    sandbox: 'billing.credit.sandbox.grant',
 };
 
 function internalRouter({ ctx, auth }) {
@@ -23,22 +23,22 @@ function internalRouter({ ctx, auth }) {
         ? http.sendProblem(res, 503, 'billing.frozen', { detail: 'the economy is frozen', ctx: req.ov })
         : next());
 
-    r.post('/holds', auth.needs(CAP.inference), notFrozen, wrap(async (req, res) => {
+    r.post('/holds', auth.needs(CAP.credit), notFrozen, wrap(async (req, res) => {
         const out = await inference.createHold(ctx, { ...req.body, actor: actorOf(req) });
         res.status(out.replay ? 200 : 201).json(out.hold);
     }));
 
-    r.post('/holds/:id/extend', auth.needs(CAP.inference), notFrozen, wrap(async (req, res) => {
+    r.post('/holds/:id/extend', auth.needs(CAP.credit), notFrozen, wrap(async (req, res) => {
         const out = await inference.extendHold(ctx, { hold_id: req.params.id, add_nano_usd: req.body.add_nano_usd, actor: actorOf(req) });
         res.json(out.hold);
     }));
 
-    r.post('/holds/:id/settle', auth.needs(CAP.inference), notFrozen, wrap(async (req, res) => {
+    r.post('/holds/:id/settle', auth.needs(CAP.credit), notFrozen, wrap(async (req, res) => {
         const out = await inference.settleHold(ctx, { hold_id: req.params.id, ...req.body, actor: actorOf(req) });
         res.status(out.replay ? 200 : 201).json(out.settlement);
     }));
 
-    r.post('/holds/:id/release', auth.needs(CAP.inference), notFrozen, wrap(async (req, res) => {
+    r.post('/holds/:id/release', auth.needs(CAP.credit), notFrozen, wrap(async (req, res) => {
         const out = await inference.releaseHold(ctx, { hold_id: req.params.id, actor: actorOf(req) });
         res.json(out);
     }));

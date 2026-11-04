@@ -23,8 +23,8 @@
     "billing.entitlement.check",
     "billing.ledger.admin",
     "billing.usage.record",
-    "billing.inference.hold",
-    "billing.inference.sandbox.grant"
+    "billing.credit.hold",
+    "billing.credit.sandbox.grant"
   ],
   "eventsProduced": [
     "billing.transaction.settled",
