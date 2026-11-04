@@ -22,7 +22,7 @@ const CAP = {
 };
 
 /**
- * The request body must be the contract's (openvibe-contracts v0.284.0, D9): a caller that sends another shape gets 422
+ * The request body must be the contract's (openvibe-contracts v0.287.0, D9 and D10): a caller that sends another shape gets 422
  * before anything is held or charged, and the ledger code only ever sees validated input.
  */
 function body(schemaId) {

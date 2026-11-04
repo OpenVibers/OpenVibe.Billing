@@ -1,0 +1,21 @@
+{
+  "id": "billing.credit.hold.extend",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Extend an active inference hold (D2): POST /internal/credits/holds/:id/extend. Grows the held amount mid-stream; returns 402 billing.insufficient_funds if the balance is short.",
+  "inputSchema": "billing.credit-hold-extend-request@1",
+  "outputSchema": "billing.credit-hold-create-result@1",
+  "permissions": [
+    "billing:credit:hold"
+  ],
+  "resourceConstraints": [
+    "none"
+  ],
+  "quotaClass": "billing-credit",
+  "events": [],
+  "implementedBy": [
+    "POST /internal/credits/holds/:id/extend"
+  ]
+}

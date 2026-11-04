@@ -85,7 +85,7 @@ async function assertJournalBalances(db, label) {
     const alice = t.user(1);
 
     await check('sandbox grant creates an inference credit account and is marked test', async () => {
-        const r = await fund(alice, '100000');
+        const r = await grant({ subject: { type: 'user', id: alice.id }, project_id: PRJ, amount_nano_usd: '100000' });
         assert.strictEqual(r.status, 201, r.text);
         assert.strictEqual(r.json.amount_nano_usd, '100000');
         assert.strictEqual(r.json.balance_nano_usd, '100000');
@@ -93,7 +93,7 @@ async function assertJournalBalances(db, label) {
         assert.strictEqual(txn.test, 1);
         const entries = (await t.db.prepare('SELECT a.kind, a.owner_subject AS owner, a.currency, e.amount::text AS amount FROM ledger_entries e JOIN accounts a ON a.id = e.account_id WHERE e.txn_id = ?').all(txn.id));
         assert.deepStrictEqual(entries.map((e) => [e.kind, e.owner, e.currency, e.amount]).sort(),
-            [['usd_credit_sandbox', `${alice.id}:${PRJ}`, 'nano-usd', '100000'], ['usd_credit_sandbox', null, 'nano-usd', '-100000']]);
+            [['usd_credit_sandbox', null, 'nano-usd', '-100000'], ['usd_credit_sandbox', `${alice.id}:${PRJ}`, 'nano-usd', '100000']]);
         await assertJournalBalances(t.db, 'after sandbox grant');
     });
 

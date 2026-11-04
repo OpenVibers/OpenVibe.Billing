@@ -1,0 +1,21 @@
+{
+  "id": "billing.credit.hold.release",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Release a credit hold (D2): POST /internal/credits/holds/:id/release. Releases the remaining held amount with nothing charged.",
+  "inputSchema": "common.no-body@1",
+  "outputSchema": "billing.credit-hold-release-result@1",
+  "permissions": [
+    "billing:credit:hold"
+  ],
+  "resourceConstraints": [
+    "none"
+  ],
+  "quotaClass": "billing-credit",
+  "events": [],
+  "implementedBy": [
+    "POST /internal/credits/holds/:id/release"
+  ]
+}

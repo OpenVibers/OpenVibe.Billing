@@ -20,6 +20,8 @@ const proposals = fs.readdirSync(proposalDir).filter((f) => f.endsWith('.json'))
     .map((f) => JSON.parse(fs.readFileSync(path.join(proposalDir, f), 'utf8')));
 const service = JSON.parse(fs.readFileSync(path.join(contractsDir, 'manifests', 'services', 'billing.json'), 'utf8'));
 const routes = fs.readFileSync(path.join(root, 'server', 'api', 'v1.js'), 'utf8');
+// The Credits capabilities (D9) are served by the /internal/credits router (server/api/internal.js), not /api/v1.
+const internalRoutes = fs.readFileSync(path.join(root, 'server', 'api', 'internal.js'), 'utf8');
 
 assert.ok(proposals.length > 0, 'docs/capabilities-proposal has no capability declarations');
 
@@ -36,9 +38,11 @@ for (const p of proposals) {
     for (const impl of p.implementedBy) {
         // 'POST /api/v1/usage' or 'GET|POST /api/v1/admin/freeze'.
         const [methods, url] = impl.split(' ');
-        const route = url.replace(/^\/api\/v1/, '');
+        const internal = /^\/internal\/credits(\/|$)/.test(url);
+        const route = internal ? url.replace(/^\/internal\/credits/, '') : url.replace(/^\/api\/v1/, '');
+        const source = internal ? internalRoutes : routes;
         for (const m of methods.split('|')) {
-            assert.ok(routes.includes(`r.${m.toLowerCase()}('${route}'`), `${p.id}: ${impl} is not a route in server/api/v1.js`);
+            assert.ok(source.includes(`r.${m.toLowerCase()}('${route}'`), `${p.id}: ${impl} is not a route in server/api/${internal ? 'internal' : 'v1'}.js`);
         }
     }
 }

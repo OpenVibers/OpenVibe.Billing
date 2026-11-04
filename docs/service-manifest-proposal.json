@@ -35,7 +35,8 @@
     "billing.cashout.paid",
     "billing.cashout.denied",
     "billing.staff.action",
-    "billing.receipt.external"
+    "billing.receipt.external",
+    "billing.credit.settled"
   ],
   "eventsConsumed": [],
   "namespacesOwned": [

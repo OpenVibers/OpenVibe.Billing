@@ -1,0 +1,21 @@
+{
+  "id": "billing.credit.hold.create",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Create an inference credit hold (D2): POST /internal/credits/holds. Service-authenticated; reserves up to max_nano_usd against a (subject, project_id) account.",
+  "inputSchema": "billing.credit-hold-create-request@1",
+  "outputSchema": "billing.credit-hold-create-result@1",
+  "permissions": [
+    "billing:credit:hold"
+  ],
+  "resourceConstraints": [
+    "none"
+  ],
+  "quotaClass": "billing-credit",
+  "events": [],
+  "implementedBy": [
+    "POST /internal/credits/holds"
+  ]
+}
