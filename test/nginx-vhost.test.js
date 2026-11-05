@@ -35,10 +35,14 @@ assert.ok(tls.indexOf(fromBalance[0]) < tls.indexOf('location ^~ /api/ { return 
 const activity = tls.match(/location = \/api\/me\/activity \{([^}]*)\}/);
 assert.ok(activity && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(activity[1]) && /limit_req /.test(activity[1]), 'a rate-limited location for /api/me/activity');
 assert.ok(tls.indexOf(activity[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
-const charge = tls.match(/location ~ \^\/api\/me\/vibes\/charges\/vch_\[0-9A-HJKMNP-TV-Z\]\{26\}\$ \{([^}]*)\}/);
+// nginx reads an unquoted "{" in a location regex as the block's start ("unknown directive"): quote any regex with a brace.
+for (const m of tls.matchAll(/^\s*location\s+~\*?\s+(\S+)\s+\{/gm)) {
+    assert.ok(!/[{}]/.test(m[1]) || /^".*"$/.test(m[1]), `quote the location regex ${m[1]}: nginx -t fails on an unquoted brace`);
+}
+const charge = tls.match(/location ~ "\^\/api\/me\/vibes\/charges\/vch_\[0-9A-HJKMNP-TV-Z\]\{26\}\$" \{([^}]*)\}/);
 assert.ok(charge && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(charge[1]) && /limit_req /.test(charge[1]), 'a rate-limited location for GET /api/me/vibes/charges/:id');
 assert.ok(tls.indexOf(charge[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
-const chargeAct = tls.match(/location ~ \^\/api\/me\/vibes\/charges\/vch_\[0-9A-HJKMNP-TV-Z\]\{26\}\/\(pay\|cancel\)\$ \{([^}]*)\}/);
+const chargeAct = tls.match(/location ~ "\^\/api\/me\/vibes\/charges\/vch_\[0-9A-HJKMNP-TV-Z\]\{26\}\/\(pay\|cancel\)\$" \{([^}]*)\}/);
 assert.ok(chargeAct && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(chargeAct[1]) && /limit_req /.test(chargeAct[1]), 'a rate-limited location for POST pay/cancel');
 assert.ok(tls.indexOf(chargeAct[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
 const credits = tls.match(/location = \/api\/me\/credits \{([^}]*)\}/);
