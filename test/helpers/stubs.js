@@ -99,7 +99,9 @@ async function startNetwork() {
         const raw = await readBody(req);
         if (req.url === '/api/.well-known/jwks') return send(res, 200, { public_key: publicPem, algorithm: 'RS256' });
         if (req.url === '/oauth/token' && req.method === 'POST') {
-            const body = Object.fromEntries(new URLSearchParams(raw));
+            // openvibe-sdk/sso posts the grant as JSON; the real Network takes that (and this stub keeps the form shape too).
+            const text = String(raw || '');
+            const body = text.trim().startsWith('{') ? JSON.parse(text) : Object.fromEntries(new URLSearchParams(text));
             grants.push(body);
             if (body.client_secret !== 'shh') return send(res, 401, { error: 'invalid_client' });
             if (body.grant_type === 'authorization_code') {

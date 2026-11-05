@@ -9,6 +9,7 @@
 const assert = require('assert');
 const { boot, fund, check, done } = require('./helpers/app');
 const { startNetwork } = require('./helpers/stubs');
+const { createConsoleSso } = require('../server/console/sso');
 
 const SESSION_SECRET = 'console-test-secret-0123456789abcdef-0123456789';
 const DAY = 86_400_000;
@@ -67,6 +68,26 @@ const DAY = 86_400_000;
     assert.strictEqual(tip.status, 201, tip.text);
 
     let s;   // the staff session cookie
+
+    await check('the SDK sign-in module builds the billing authorize URL', () => {
+        const client = createConsoleSso({ ctx: { config: t.config }, keys: {}, fetchImpl: async () => { throw new Error('no fetch in this test'); } });
+        const started = client.start();
+        const u = new URL(started.url);
+        assert.strictEqual(u.origin + u.pathname, 'https://openvibe.network/oauth/authorize');
+        assert.strictEqual(u.searchParams.get('client_id'), 'billing');
+        assert.strictEqual(u.searchParams.get('redirect_uri'), 'https://billing.test/auth/callback');
+        assert.strictEqual(u.searchParams.get('code_challenge_method'), 'S256');
+        assert.match(u.searchParams.get('code_challenge'), /^[A-Za-z0-9_-]{43}$/);
+        assert.match(started.state, /^[A-Za-z0-9_-]{32}$/);
+        assert.match(started.verifier, /^[A-Za-z0-9_-]{43}$/);
+    });
+
+    await check('GET /auth/health answers whether the Network accepts the billing client', async () => {
+        const r = await get('/auth/health');
+        assert.strictEqual(r.status, 200);
+        assert.deepStrictEqual(JSON.parse(r.text), { ok: true, client: 'ok' });
+        assert.strictEqual(r.headers.get('cache-control'), 'no-store');
+    });
 
     await check('sign-in redirects to the Network with PKCE S256 and a signed, host-only flow cookie', async () => {
         const login = await get('/auth/login?next=/cashouts');
