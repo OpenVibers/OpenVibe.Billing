@@ -48,4 +48,8 @@ const topups = tls.match(/location = \/api\/me\/credits\/topups \{([^}]*)\}/);
 assert.ok(topups && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(topups[1]) && /limit_req /.test(topups[1]), 'a rate-limited location for POST /api/me/credits/topups');
 assert.ok(tls.indexOf(topups[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
 assert.match(tls, /location \^~ \/api\/v1 \{ deny all; \}/);
-console.log('nginx vhost: the policy is indexable, the rest noindex; /api/me/vibes, /api/me/balance, /api/me/balance/transfers, /api/me/vibes/from-balance, /api/me/activity, /api/me/credits and /api/me/credits/topups public, /api/v1 loopback only');
+// Vibes Pay's app API is the one public /api/v1 prefix, rate limited in its own zone, before the deny.
+const vibesApi = tls.match(/location \^~ \/api\/v1\/vibes\/ \{([^}]*)\}/);
+assert.ok(vibesApi && /limit_req zone=ovbilling_apps/.test(vibesApi[1]) && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(vibesApi[1]), 'a rate-limited public location for /api/v1/vibes/');
+assert.ok(tls.indexOf(vibesApi[0]) < tls.indexOf('location ^~ /api/v1 { deny all; }'), 'before the /api/v1 deny');
+console.log('nginx vhost: the policy is indexable, the rest noindex; /api/me/vibes, /api/me/balance, /api/me/balance/transfers, /api/me/vibes/from-balance, /api/me/activity, /api/me/credits and /api/me/credits/topups public; /api/v1/vibes/ public to apps (app tokens); the rest of /api/v1 loopback only');
