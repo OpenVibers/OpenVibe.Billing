@@ -102,6 +102,8 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
     if (!cc.staffSubjects.length && config.nodeEnv !== 'test') log.warn('[Billing] console: BILLING_STAFF_SUBJECTS is empty — nobody can sign in');
     if (unavailable) log.warn(`[Billing] console disabled: ${unavailable}`);
     const sessions = createSessions(ctx, { secret: secret || 'unavailable' });
+    // openvibe-sdk/sso owns the OAuth handshake and /auth/health; the staff session below stays this site's.
+    const consoleSso = sso.createConsoleSso({ ctx, keys, fetchImpl });
 
     const send = (res, status, htmlText) => res.status(status).type('html').send(htmlText);
     const ipHash = (req) => sessions.ipHash(req.ip);
@@ -175,11 +177,17 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
 
     // ── Sign-in ──────────────────────────────────────────────
     r.get('/auth/login', (req, res) => {
-        const state = random(32);
-        const { verifier, challenge } = sso.pkcePair();
-        sessions.setFlow(res, { s: state, v: verifier, n: sanitizeNext(req.query.next) });
-        res.redirect(302, sso.authorizeUrl(config, { state, challenge }));
+        const started = consoleSso.start();
+        sessions.setFlow(res, { s: started.state, v: started.verifier, n: sanitizeNext(req.query.next) });
+        res.redirect(302, started.url);
     });
+
+    // GET /auth/health: does the Network accept this site's OAuth client? 503 only when it refuses it.
+    r.get('/auth/health', wrap(async (req, res) => {
+        const client = await consoleSso.checkClient();
+        res.setHeader('Cache-Control', 'no-store');
+        return res.status(client === 'invalid' ? 503 : 200).json({ ok: client !== 'invalid', client });
+    }));
 
     r.get('/auth/callback', wrap(async (req, res) => {
         const flow = sessions.takeFlow(req, res);
@@ -191,7 +199,7 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
         try {
             if (!keys.loaded()) await keys.refresh();
             if (!keys.loaded()) throw new Error('the Network key is not loaded');
-            who = await sso.exchange(ctx, { code: req.query.code, verifier: flow.v, keys, fetchImpl });
+            who = await consoleSso.exchange({ code: req.query.code, verifier: flow.v });
         } catch (e) {
             log.warn(`[Billing] console sign-in failed: ${e.message}`);
             return send(res, e.status && e.status < 500 ? 400 : 502, pages.signIn({ message: 'OpenVibe.Network did not confirm the sign-in. Please try again.' }));
