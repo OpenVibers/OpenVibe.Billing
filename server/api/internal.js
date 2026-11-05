@@ -23,7 +23,7 @@ const CAP = {
 };
 
 /**
- * The request body must be the contract's (openvibe-contracts v0.289.0, D9/D10/D12): a caller that sends another shape
+ * The request body must be the contract's (openvibe-contracts v0.289.1, D9/D10/D12): a caller that sends another shape
  * gets 422 before anything is held or charged, and the ledger code only ever sees validated input. D12's request
  * schema makes project_id optional (a personal hold); an app subject still always names its project.
  */

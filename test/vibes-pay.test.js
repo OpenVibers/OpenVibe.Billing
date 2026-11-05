@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const http = require('http');
 const { boot, fund, check, done } = require('./helpers/app');
 const { validate } = require('openvibe-contracts');
+const { createVibesClient } = require('openvibe-sdk/vibes');
 const vibesWebhooks = require('../server/ops/vibes-webhooks');
 
 const APP = 'app_01JAB2C3D4E5F6G7H8J9K0MNPQ';
@@ -16,6 +17,9 @@ const PRJ = 'prj_01JAB2C3D4E5F6G7H8J9K0MNPQ';
 const PRJ2 = 'prj_01JAB2C3D4E5F6G7H8J9K0MNP2';
 const KEK = 'k1:' + crypto.randomBytes(32).toString('base64');
 const CAP = ['billing.vibes.charge', 'billing.vibes.read'];
+// The released SDK's webhook verifier, exactly as an app uses it: openvibe-sdk/vibes webhooks.verify.
+const sdkVibes = createVibesClient({ appToken: 'test-app-token', billingUrl: 'https://billing.example' });
+const verify = (raw, header, secret, now) => sdkVibes.webhooks.verify(raw, header, secret, { now });
 
 function startHook() {
     const received = [];
@@ -24,8 +28,9 @@ function startHook() {
         const chunks = [];
         req.on('data', (c) => chunks.push(c));
         req.on('end', () => {
-            if (state.failStatus) { res.writeHead(state.failStatus); res.end('no'); return; }
-            received.push({ headers: req.headers, raw: Buffer.concat(chunks).toString('utf8') });
+            const delivery = { headers: req.headers, raw: Buffer.concat(chunks).toString('utf8'), failed: Boolean(state.failStatus) };
+            received.push(delivery);
+            if (delivery.failed) { res.writeHead(state.failStatus); res.end('no'); return; }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end('{"ok":true}');
         });
@@ -36,11 +41,9 @@ function startHook() {
     })));
 }
 
-function signatureOk(raw, header, secret) {
+function signatureTime(header) {
     const parts = Object.fromEntries(String(header || '').split(',').map((p) => p.split('=')));
-    if (!/^\d{1,12}$/.test(String(parts.t || '')) || !/^[0-9a-f]{64}$/i.test(String(parts.v2 || ''))) return false;
-    const expected = crypto.createHmac('sha256', secret).update(`${parts.t}.`).update(raw).digest('hex');
-    return crypto.timingSafeEqual(Buffer.from(parts.v2, 'hex'), Buffer.from(expected, 'hex'));
+    return Number(parts.t);
 }
 
 async function journalBalanced(db, label) {
@@ -184,7 +187,7 @@ async function journalBalanced(db, label) {
             assert.strictEqual(out.delivered, 1, JSON.stringify(out));
             assert.strictEqual(hook.received.length, 1);
             const delivery = hook.received[0];
-            assert.ok(signatureOk(delivery.raw, delivery.headers['x-openvibe-signature-v2'], secret), 'the HMAC-SHA256 signature verifies');
+            assert.ok(verify(delivery.raw, delivery.headers['x-openvibe-signature-v2'], secret, t.ctx.now()), 'openvibe-sdk/vibes verifies the HMAC-SHA256 signature');
             assert.strictEqual(delivery.headers['x-openvibe-event'], 'billing.vibes.charge.paid');
             const body = JSON.parse(delivery.raw);
             const valid = validate('billing.vibes.charge.paid@1', body);
@@ -232,7 +235,7 @@ async function journalBalanced(db, label) {
             const out = await vibesWebhooks.deliverDue(t.ctx);
             assert.strictEqual(out.delivered, 1, JSON.stringify(out));
             const delivery = hook.received[hook.received.length - 1];
-            assert.ok(signatureOk(delivery.raw, delivery.headers['x-openvibe-signature-v2'], secret));
+            assert.ok(verify(delivery.raw, delivery.headers['x-openvibe-signature-v2'], secret, t.ctx.now()));
             const body = JSON.parse(delivery.raw);
             assert.ok(validate('billing.vibes.charge.refunded@1', body).valid);
             assert.strictEqual(body.status, 'refunded');
@@ -292,13 +295,21 @@ async function journalBalanced(db, label) {
             assert.strictEqual(Number(row.last_status), 500);
             assert.ok(row.delivered_at == null);
             assert.ok(new Date(row.next_attempt_at).getTime() > t.ctx.now(), 'the retry is scheduled in the future');
+            const firstTry = hook.received[hook.received.length - 1];
+            assert.ok(firstTry.failed);
+            assert.ok(verify(firstTry.raw, firstTry.headers['x-openvibe-signature-v2'], secret, t.ctx.now()), 'the failed attempt was signed too');
             hook.state.failStatus = 0;
+            t.clock.offset += 2000;   // a retry is a new delivery attempt: a fresh t, still inside the 300 s tolerance
             await t.db.prepare('UPDATE vibes_webhook_outbox SET next_attempt_at = ?::timestamptz WHERE charge_id = ?').run(new Date(t.ctx.now() - 1000).toISOString(), c.id);
             const second = await vibesWebhooks.deliverDue(t.ctx);
             assert.strictEqual(second.delivered, 1, JSON.stringify(second));
             const done = await t.db.prepare('SELECT * FROM vibes_webhook_outbox WHERE charge_id = ?').get(c.id);
             assert.ok(done.delivered_at);
             assert.strictEqual(Number(done.attempts), 2);
+            const retry = hook.received[hook.received.length - 1];
+            assert.ok(!retry.failed);
+            assert.ok(verify(retry.raw, retry.headers['x-openvibe-signature-v2'], secret, t.ctx.now()), 'the retried delivery verifies with openvibe-sdk/vibes');
+            assert.ok(signatureTime(retry.headers['x-openvibe-signature-v2']) > signatureTime(firstTry.headers['x-openvibe-signature-v2']), 'the retry carries a fresh t');
         });
 
         await check('the project owner cashes out the project wallet through the existing cashout path', async () => {

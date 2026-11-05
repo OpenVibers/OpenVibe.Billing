@@ -90,8 +90,9 @@ X-OpenVibe-Event: billing.vibes.charge.paid | billing.vibes.charge.refunded
 The body is `billing.vibes.charge.paid@1` or `billing.vibes.charge.refunded@1`. It carries the charge
 fields, `status`, the whole `amount`, `sandbox` and an opaque `payer_ref` that is random and stable per
 (app, person). It never carries a person id, username or email. A 2xx is delivered; anything else is
-retried after 15 s, 30 s, 1 min, 2 min, 5 min, 15 min, 1 h and 6 h, then abandoned. `openvibe-sdk/vibes`
-verifies the header with `webhooks.verify(rawBody, signature, secret)`.
+retried after 15 s, 30 s, 1 min, 2 min, 5 min, 15 min, 1 h and 6 h, then abandoned. Every attempt signs
+again with a fresh `t`; `openvibe-sdk` v0.84.0 verifies the header with
+`webhooks.verify(rawBody, signature, secret)` against the raw body and the ±300 s window.
 
 The same payload is published to OpenVibe.Events as `billing.vibes.charge.paid` / `.refunded`, so
 first-party products can consume it without a webhook.
