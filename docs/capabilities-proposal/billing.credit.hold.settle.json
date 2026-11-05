@@ -1,0 +1,21 @@
+{
+  "id": "billing.credit.hold.settle",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Settle a credit hold (D2): POST /internal/credits/holds/:id/settle. Records measured usage and the immutable retail rate version, charges the project account and releases the unused hold. Idempotent: replays return the same settlement.",
+  "inputSchema": "billing.credit-hold-settle-request@1",
+  "outputSchema": "billing.credit-hold-settle-result@1",
+  "permissions": [
+    "billing:credit:settle"
+  ],
+  "resourceConstraints": [
+    "none"
+  ],
+  "quotaClass": "billing-credit",
+  "events": [],
+  "implementedBy": [
+    "POST /internal/credits/holds/:id/settle"
+  ]
+}

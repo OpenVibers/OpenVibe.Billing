@@ -15,6 +15,7 @@ async function outstanding(db) {
     return {
         credit_bits: await sum('user_credit', 'vibes-bits'),
         payable_bits: await sum('creator_payable', 'vibes-bits'),
+        project_payable_bits: await sum('project_payable', 'vibes-bits'),
         payouts_pending_bits: await sum('payouts_pending', 'vibes-bits'),
         platform_revenue_cents: await sum('platform_revenue', 'usd-cents'),
         chargeback_loss_cents: await sum('chargeback_loss', 'usd-cents'),

@@ -31,6 +31,7 @@ const promo = require('../ops/promo');
 const rating = require('../ops/rating');
 const tiers = require('../ops/tiers');
 const { stats } = require('../ops/stats');
+const vibes = require('../ops/vibes');
 
 const CAP = {
     intent: 'billing.intent.create',
@@ -44,6 +45,8 @@ const CAP = {
     stats: 'billing.stats.read',
     admin: 'billing.ledger.admin',
     usage: 'billing.usage.record',
+    vibesCharge: 'billing.vibes.charge',
+    vibesRead: 'billing.vibes.read',
 };
 
 function v1Router({ ctx, auth, adapters, limits }) {
@@ -157,7 +160,10 @@ function v1Router({ ctx, auth, adapters, limits }) {
     // ── Cashouts ─────────────────────────────────────────────
     r.post('/cashouts', ...write(CAP.cashoutRequest, async (req, res) => {
         const b = req.body || {};
-        const out = await cashouts.request(ctx, { subject: userSubject(b.subject), amount: b.amount, payout_method: b.payout_method, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
+        const out = await cashouts.request(ctx, {
+            subject: userSubject(b.subject), amount: b.amount, payout_method: b.payout_method,
+            projectId: b.project_id, idempotencyKey: req.idempotencyKey, actor: actorOf(req),
+        });
         res.status(201).json({ cashout: cashouts.present(out.cashout) });
     }, limits.budget('billing.cashout.request', person('subject'))));
     r.get('/cashouts', ...read(CAP.cashoutManage, async (req, res) => {
@@ -296,6 +302,53 @@ function v1Router({ ctx, auth, adapters, limits }) {
         res.status(out.replayed ? 200 : 201).json({ record: out.record });
     }));
     r.get('/usage', ...read(CAP.admin, async (req, res) => res.json(await usage.list(db, req.query))));
+
+    // ── Vibes Pay (D12): a developer app sells an item for whole Vibes ──
+    // The app authenticates with its own Network app token (billing.vibes.charge); the person pays on the pay sheet
+    // through /api/me/vibes/charges/:id. A charge is idempotent on the app's reference, and only its own app may read
+    // or refund it.
+    const appWrite = (handler) => [auth.appOnly(CAP.vibesCharge), notFrozen,
+        limits.budget('billing.vibes.charge.create', () => null), wrap(handler)];
+    r.post('/vibes/charges', ...appWrite(async (req, res) => {
+        const out = await vibes.createCharge(ctx, req.principal, req.body || {});
+        res.status(out.replay ? 200 : 201).json(out.charge);
+    }));
+    r.get('/vibes/charges/:id', auth.appOnly(CAP.vibesCharge), wrap(async (req, res) => {
+        res.json((await vibes.getChargeForApp(ctx, req.principal, req.params.id)).charge);
+    }));
+    r.post('/vibes/charges/:id/refund', auth.appOnly(CAP.vibesCharge), notFrozen,
+        limits.budget('billing.vibes.charge.refund', () => null), wrap(async (req, res) => {
+            const out = await vibes.refundCharge(ctx, req.principal, req.params.id, req.body || {});
+            res.status(out.replay ? 200 : 201).json(out.charge);
+        }));
+    // The app's own test grant: sandbox Vibes for a person, never real ones.
+    r.post('/vibes/sandbox/grants', auth.appOnly(CAP.vibesCharge), notFrozen,
+        limits.budget('billing.vibes.sandbox.grant', () => null), wrap(async (req, res) => {
+            res.status(201).json(await vibes.sandboxGrant(ctx, req.principal, req.body || {}));
+        }));
+    // The person who delegated this app reads their own Vibes (billing.vibes.read; no first-party route is widened).
+    r.get('/vibes/me', auth.appOnly(CAP.vibesRead), wrap(async (req, res) => {
+        res.json(await vibes.walletForApp(ctx, req.principal));
+    }));
+    // Webhook settings for the app's own charges. The secret is write-only: PUT answers it once when generated.
+    r.get('/vibes/webhook', auth.appOnly(CAP.vibesCharge), wrap(async (req, res) => {
+        const out = await ctx.vibesWebhooks.get(req.principal.appId);
+        res.json({
+            app_id: req.principal.appId, url: out.url, configured: Boolean(out.url && out.marker),
+            secret_set: Boolean(out.marker), secret_hint: out.marker ? out.marker.hint : null,
+            sealed: out.sealed, updated_at: out.marker ? out.marker.set_at : null,
+        });
+    }));
+    r.put('/vibes/webhook', auth.appOnly(CAP.vibesCharge), notFrozen,
+        limits.budget('billing.vibes.webhook', () => null), wrap(async (req, res) => {
+            const b = req.body || {};
+            const url = ctx.vibesWebhooks.safeUrl(b.url, ctx.config);
+            res.json(await ctx.vibesWebhooks.configure(req.principal.appId, { url, secret: b.secret, rotate: b.rotate_secret === true }));
+        }));
+    r.delete('/vibes/webhook', auth.appOnly(CAP.vibesCharge), notFrozen,
+        limits.budget('billing.vibes.webhook', () => null), wrap(async (req, res) => {
+            res.json(await ctx.vibesWebhooks.remove(req.principal.appId));
+        }));
 
     // ── Admin (billing.ledger.admin) ─────────────────────────
     r.get('/admin/freeze', ...read(CAP.admin, async (req, res) => res.json(await admin.freezeState(db))));

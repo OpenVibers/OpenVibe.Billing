@@ -167,6 +167,8 @@ function loadConfig(env = process.env) {
             enabled: env.BILLING_JOBS !== 'off',
             sweepIntervalMs: int(env.BILLING_SWEEP_INTERVAL_MS, 60 * 60 * 1000),
             webhookRetryMs: int(env.BILLING_WEBHOOK_RETRY_MS, 60 * 1000),
+            // Vibes Pay app webhooks (D12): due deliveries from vibes_webhook_outbox, retried with backoff.
+            vibesWebhookIntervalMs: Math.max(0, int(env.BILLING_VIBES_WEBHOOK_INTERVAL_MS, 5000)),
             // Scheduled reconciliation (0 turns it off): stored like any other run; passing scheduled
             // runs older than reconcileKeepDays are pruned, failed ones are kept.
             reconcileIntervalMs: int(env.BILLING_RECONCILE_INTERVAL_MS, 60 * 60 * 1000),
@@ -186,6 +188,32 @@ function loadConfig(env = process.env) {
             // A provider receipt still unprocessed this long after it arrived (economy not frozen)
             // fails reconciliation: the provider was paid and the ledger does not show it yet.
             staleReceiptMin: int(env.BILLING_RECONCILE_STALE_RECEIPT_MIN, 60),
+        },
+        credits: {
+            // AI Exchange D2/D12: high-precision Balance ledger. Off by default; no inference money moves without it.
+            enabled: bool(env.BILLING_CREDITS),
+            // Synthetic inference credit grants, for development and integration tests only.
+            sandbox: bool(env.BILLING_CREDITS_SANDBOX),
+            // Default hold lease duration in seconds; extended holds get at least one extra minute.
+            leaseSeconds: Math.max(1, Math.min(86400, int(env.BILLING_INFERENCE_LEASE_SECONDS, 300))),
+            // Background sweeper interval for expired holds (0 = off, default off until the subledger is enabled).
+            sweepIntervalMs: int(env.BILLING_INFERENCE_SWEEP_MS, 0),
+        },
+
+        // D12 `billing.vibes`: Vibes Pay limits and Get Vibes with Balance. The defaults are closed; the store in
+        // server/config-store.js applies the owner's values live, with these env names as x-env pins.
+        vibes: {
+            pay: bool(env.BILLING_VIBES_PAY),
+            maxChargeVibes: Math.max(0, int(env.BILLING_VIBES_MAX_CHARGE, 0)),
+            dailyAppSpendVibesPerPerson: Math.max(0, int(env.BILLING_VIBES_DAILY_APP_SPEND, 0)),
+            fromBalance: bool(env.BILLING_VIBES_FROM_BALANCE),
+            // D12 step 4: the pay sheet lives on openvibe.network; a charge's expires_at is this far after creation.
+            payBaseUrl: trim(env.BILLING_VIBES_PAY_BASE_URL || 'https://openvibe.network'),
+            chargeTtlSeconds: Math.max(1, Math.min(86_400, int(env.BILLING_VIBES_CHARGE_TTL_SECONDS, 1800))),
+            // Test grants and sandbox charges (like BILLING_CREDITS_SANDBOX): off by default, worth nothing.
+            sandbox: bool(env.BILLING_VIBES_SANDBOX),
+            // Development only: let a webhook point at a private address. Production always applies the egress guard.
+            allowPrivateWebhooks: bool(env.BILLING_VIBES_ALLOW_PRIVATE_WEBHOOKS),
         },
 
         // Staff console (server/console): Network SSO (authorization code + PKCE S256, OAuth

@@ -51,6 +51,8 @@ promo write changes both in one transaction.
   schema in [migrations/](migrations/))
 - provider webhooks (PowerChat, Stripe, PayPal, CCBill, NOWPayments): they land here and nowhere else
 - the `billing.*` events and the public billing policy page (`/policy`, every number from the rates)
+- Vibes Pay (D12): app charges, the project's `project_payable` Vibes wallet, its signed webhooks and sandbox test
+  Vibes ([docs/vibes-pay.md](docs/vibes-pay.md))
 
 ## Does not own
 
@@ -64,7 +66,7 @@ promo write changes both in one transaction.
 - OpenVibe.Network (JWKS for service tokens; SSO with PKCE for the staff console; `identity.subject.resolve` for the Live import)
 - OpenVibe.Events (the SDK outbox relay, when `EVENTS_URL` and the OAuth client secret are set)
 - the payment providers whose secrets are configured (none in production today)
-- `openvibe-contracts` v0.222.0, `openvibe-sdk` v0.82.0 (service tokens, per-person limits, `openvibe-sdk/db`, `openvibe-sdk/service`), `openvibe-shared` v4.109.2, pinned by release tarball
+- `openvibe-contracts` v0.289.1, `openvibe-sdk` v0.84.0 (service tokens, per-person limits, `openvibe-sdk/db`, `openvibe-sdk/service`, `openvibe-sdk/vibes`), `openvibe-shared` v4.110.0, pinned by release tarball
 - **PostgreSQL 18 and Valkey 9** (OpenVibe.Host `roles/data/`, ADR-035): every read and write is async through
   `openvibe-sdk/db`; Valkey holds the per-person limit counters (optional: without `VALKEY_URL` they count in the process)
 
@@ -73,10 +75,11 @@ promo write changes both in one transaction.
 Implemented here (the service manifest's `capabilities`, audience `openvibe.billing`; routes under
 [API](#api)): `billing.intent.create`, `billing.transfer.create`, `billing.balance.read`,
 `billing.cashout.request`, `billing.cashout.manage`, `billing.subscription.manage`,
-`billing.entitlement.check`, `billing.ledger.admin` and `billing.usage.record` (usage readings; released in
-Contracts v0.85.0). Callers today are Live (after the cutover),
-Tips (`billing.intent.create`, `billing.transfer.create`) and VIP (`billing.intent.create`,
-`billing.subscription.manage`, `billing.entitlement.check`).
+`billing.entitlement.check`, `billing.ledger.admin`, `billing.usage.record` (usage readings; released in
+Contracts v0.85.0), and the public `billing.vibes.charge` and `billing.vibes.read` for developer apps (D12).
+Callers today are Live (after the cutover),
+Tips (`billing.intent.create`, `billing.transfer.create`), VIP (`billing.intent.create`,
+`billing.subscription.manage`, `billing.entitlement.check`) and a developer app with its own app token for Vibes Pay.
 
 Called elsewhere, as the service principal `billing`: `events.event.publish` (Events) and
 `identity.subject.resolve` (Network, the Live import).
@@ -107,6 +110,13 @@ Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
   same transaction and verified by reconciliation. Funds checks run inside the transaction that moves
   the money, and every money transaction is SERIALIZABLE (`ledger.js` `money()`, retried on a
   serialization failure), so two movements that each passed a check cannot both commit.
+- **Vibes Pay** (`server/ops/vibes.js`, `server/ops/vibes-webhooks.js`, [docs/vibes-pay.md](docs/vibes-pay.md)):
+  an app creates a charge (whole Vibes, idempotent on its reference), the person pays it on the pay sheet, and the
+  Vibes move once from `user_credit` to `project_payable:project:<prj_id>`; a project owner cashes out through the
+  existing cashout path. Each paid/refunded charge publishes `billing.vibes.charge.paid@1`/`.refunded@1` to Events
+  and queues a signed HMAC-SHA256 webhook in `vibes_webhook_outbox`, retried with backoff. Sandbox apps use
+  `vibes_credit_sandbox`/`project_payable_sandbox` and test transactions only. The owner's `billing.vibes` limits
+  and the economy freeze are checked inside the money transaction.
 - **Two currencies.** Money arrives in cents and becomes bits through the `fx_conversion` account pair
   at the recorded value rate (`bits_per_usd`, 100 today); reconciliation checks that each transaction's
   cents side mirrors its bits side. Anything a payment exceeds the bits' value by is `platform_revenue`.
@@ -119,7 +129,22 @@ Production: `/opt/openvibe.billing`, env `/etc/openvibe/billing.env`, unit
   settles once whatever event, retry or API call carries it.
 - **Freeze** (ADR-012 rule 11): `settings.freeze`; while on, every mutating endpoint answers
   `503 billing.frozen`, reads work, webhooks are stored (202) and processed in arrival order after
-  unfreeze. Jobs pause.
+  unfreeze. Jobs pause. The owner's `money_writes_frozen` switch keeps its own audited path
+  (`/api/admin/money`); it is not configuration and no rollback may move it.
+- **Owner settings (D11)** ([server/config-store.js](server/config-store.js)): the namespace
+  `billing.credits` holds the Balance switch, the sandbox grants, the top-up switch, its amounts and
+  fee, and the hold lease, through openvibe-shared/config. Each key keeps the environment variable it
+  had as an `x-env` pin: while that variable is set its value wins and a write is `409
+  config.pinned_in_env`; otherwise the owner sets it from Network's AI tab and it applies live. The
+  routes are `/internal/config` (capability `billing.config.manage`, Network's service token), with the
+  owner's `usr_` id in `X-OV-Subject` and `X-OV-Fresh: 1` for the danger keys (`credits`, `topup`,
+  `topup_amounts_cents`, `topup_fee_bps`). Every activation writes a `staff_audit` row with the keys,
+  actor and revision, never a value. With `OV_CONFIG_KEKS` set the store seals secrets and reseals old
+  plaintext rows at boot; this namespace has no secret-class keys, so it reports `sealed` but exposes no
+  value. `billing.vibes` holds the Vibes Pay switch and limit, the daily app spend per person and the
+  `from_balance` switch (`vibes_pay` and `from_balance` are danger keys); `GET /api/me/balance`, the transfer
+  and the Vibes purchase are in [docs/balance.md](docs/balance.md); `GET /api/me/activity` is the person's own
+  movement list for Network's wallet.
 - **Outbox**: openvibe-sdk/events stores pending envelopes in `service_outbox` and relays them with Billing's service token. The legacy `outbox` table stays through the N-1 rollback window. Events include `billing.transaction.settled|reversed`, `billing.entitlement.changed`,
   `billing.subscription.canceled`, `billing.cashout.requested|paid|denied`, `billing.staff.action`,
   `billing.receipt.external`, written in the same transaction as the effect (events.event-envelope@1,
@@ -228,6 +253,7 @@ Contracts service manifests name (never a wildcard), never cached, limited to 30
 | `POST /api/v1/admin/sweep`, `GET /api/v1/admin/import-holds` | `billing.ledger.admin` | renewal sweep now; unmapped import users |
 | `POST /webhooks/<provider>` | provider signature | `powerchat`, `stripe`, `paypal`, `ccbill` (GET too), `nowpayments` |
 | `GET /metrics` | direct loopback caller | Prometheus text (openvibe-shared/metrics): HTTP golden signals, process, `release_info`, and `billing_*` gauges — freeze, authority, receipts by state, oldest pending receipt, EXTERNAL receipts, outbox backlog, cashouts, the latest reconciliation. 404 to anything a proxy relayed; nginx answers 404 on the public host |
+| `GET\|POST /internal/config[/:namespace[/history\|rollback]]`, `PUT\|DELETE …/secrets/:key` | `billing.config.manage` | owner settings (D11): namespace summaries with the schema, values, pins and `sealed`; apply a change (danger keys need `X-OV-Fresh: 1`); history and rollback. Network's AI tab is the only caller; nginx 404s `/internal/` on the public host |
 
 The existing capabilities and service manifest are released in openvibe-contracts (v0.8.0;
 `billing.staff.action` since v0.17.0). `billing.usage.record` is released in Contracts v0.85.0: input is
@@ -487,7 +513,7 @@ PowerChat purchase settling end to end after the cutover.
 Part of the [OpenVibe network](https://openvibe.network). Built in the open by [OpenVibers](https://github.com/OpenVibers).
 
 <!-- versions:start -->
-- openvibe-contracts: v0.222.0
-- openvibe-sdk: v0.82.0
-- openvibe-shared: v4.109.2
+- openvibe-contracts: v0.289.1
+- openvibe-sdk: v0.84.0
+- openvibe-shared: v4.110.0
 <!-- versions:end -->

@@ -19,6 +19,7 @@
 const { post, getTxn, balance, money } = require('../ledger');
 const { enqueue } = require('../outbox');
 const { A, entry, fail, text } = require('./common');
+const { A_INF, NANO_PER_CENT } = require('./credits');
 const { summary } = require('./purchases');
 const intents = require('./intents');
 
@@ -68,6 +69,32 @@ async function reverseReceipt(ctx, input) {
             }
             Object.assign(meta, { bits_reversed: b, bits_clawed_back: clawed, unrecovered_bits: unrecovered });
             review = unrecovered > 0;
+        } else if (orig.type === 'credit' && orig.metadata.credit === 'topup') {
+            // A Balance top-up (D9/D12) is reversed in nano-USD: the part of the credited amount this refund covers is
+            // debited from usd_credit by what the account still holds (never below zero). The spent part is the
+            // person's debt, in its own ledger account and a row reconciliation reports; it is never written off.
+            const projectId = orig.metadata.project_id == null || orig.metadata.project_id === '' ? null : String(orig.metadata.project_id);
+            const amountNano = BigInt(orig.metadata.amount_nano_usd || 0);
+            if (amountNano <= 0n) fail(422, 'billing.not_reversible', `top-up transaction ${orig.id} has no Balance amount`);
+            const totalPaid = Number(orig.metadata.paid_cents) || paid;
+            const cumBefore = (amountNano * BigInt(done)) / BigInt(totalPaid);
+            const cumAfter = (amountNano * BigInt(done + cents)) / BigInt(totalPaid);
+            const creditPart = cumAfter - cumBefore;
+            const held = await balance(db, A_INF.credit(orig.to_subject, projectId));
+            const clawed = creditPart <= 0n || held <= 0n ? 0n : (held < creditPart ? held : creditPart);
+            const debt = creditPart - clawed;
+            const centsNano = BigInt(cents) * NANO_PER_CENT;
+            const revenuePart = centsNano - creditPart;
+            entries.push(entry(A_INF.clearing(orig.provider), centsNano));
+            if (clawed > 0n) entries.push(entry(A_INF.credit(orig.to_subject, projectId), -clawed));
+            if (revenuePart > 0n) entries.push(entry(A_INF.revenue(), -revenuePart));
+            if (debt > 0n) entries.push(entry(A_INF.debt(), -debt));
+            Object.assign(meta, {
+                credit: 'topup_refund', credit_topup: true, project_id: projectId, amount_nano_usd: String(amountNano), paid_nano_usd: String(centsNano),
+                credit_revoked_nano_usd: String(creditPart), clawed_nano_usd: String(clawed), debt_nano_usd: String(debt),
+                revenue_reversed_nano_usd: String(revenuePart),
+            });
+            review = debt > 0n;
         } else if (orig.type === 'subscription' || orig.type === 'donation') {
             if (orig.entries.length) {
                 entries.push(entry(A.clearing(orig.provider), cents), entry(lossOrRefund, -cents));
@@ -95,6 +122,12 @@ async function reverseReceipt(ctx, input) {
             sourceEventId: input.sourceEventId,
             metadata: { ...meta, rates: rates.snapshot() },
         });
+        if (orig.type === 'credit' && orig.metadata.credit === 'topup' && BigInt(meta.debt_nano_usd || 0) > 0n) {
+            await require('./topups').recordDebt(ctx, {
+                topupTxnId: orig.id, transactionId: txn.id, reversalRef: input.reversalRef || '', subject: orig.to_subject,
+                projectId: meta.project_id, provider: orig.provider, amountNano: BigInt(meta.debt_nano_usd), reason: kind,
+            });
+        }
         if (orig.type === 'subscription') revoked = await require('./subscriptions').revokeForTxn(ctx, orig.id, kind);
         if (done + cents >= paid && orig.metadata.intent_id) await intents.setStatus(ctx, orig.metadata.intent_id, 'refunded');
         await enqueue(ctx, {

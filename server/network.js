@@ -6,9 +6,12 @@
  *   keys      the Network's RS256 signing keys: openvibe-sdk/auth createNetworkKeys (OV_NETWORK_PUBLIC_KEY pinned,
  *             else the JWKS, retried every 30 s until it loads, refreshed every 15 minutes, a rotation followed on
  *             an unknown kid) — verifies service tokens and the console's sign-in
- *   identity  Live user ids → canonical subjects via POST /internal/identity/resolve-batch
- *             { system: 'live', type: 'user', ids } with a client-credentials token
+ *   identity  Live user ids → canonical subjects, and subject ids → their public names, via
+ *             POST /internal/identity/resolve-batch with a client-credentials token
  *             (audience openvibe.network, capability identity.subject.resolve)
+ *   projects  the projects a person administers (GET /internal/projects?subject=usr_…, capability
+ *             network.project.member.read) and one membership (GET /internal/projects/:id/members/:subject),
+ *             with Billing's own service token
  */
 const { serviceAuth } = require('openvibe-contracts');
 const { createNetworkKeys } = require('openvibe-sdk/auth');
@@ -44,6 +47,23 @@ function createIdentity(config, { fetchImpl = globalThis.fetch } = {}) {
         return data.results;
     }
 
+    /** Subject ids → Map(subject id → { username, display_name } | null), for public names only. */
+    async function profiles(subjectIds) {
+        const out = new Map();
+        const list = [...new Set(subjectIds.map(String))];
+        for (let i = 0; i < list.length; i += BATCH) {
+            const chunk = list.slice(i, i + BATCH);
+            const results = await post({ subject_ids: chunk });
+            for (const k of chunk) {
+                const p = results[k];
+                out.set(k, p && p.subject && p.subject.type === 'user'
+                    ? { username: typeof p.username === 'string' ? p.username : null, display_name: typeof p.display_name === 'string' ? p.display_name : null }
+                    : null);
+            }
+        }
+        return out;
+    }
+
     /** Live user ids → Map(String(id) → subject id | null). */
     async function resolveLiveUsers(liveIds) {
         const out = new Map();
@@ -58,7 +78,107 @@ function createIdentity(config, { fetchImpl = globalThis.fetch } = {}) {
         }
         return out;
     }
-    return { resolveLiveUsers };
+    return { resolveLiveUsers, profiles };
 }
 
-module.exports = { createKeyProvider, createIdentity };
+/**
+ * Network's project-membership reads, with Billing's service token. A person's own token never authorises them:
+ * Network states the role, and Billing only lists or moves money for admin/owner memberships of unarchived projects.
+ */
+const PROJECT_ADMINS = new Set(['admin', 'owner']);
+function createProjects(config, { fetchImpl = globalThis.fetch } = {}) {
+    const base = config.network.internalUrl;
+    const tokens = serviceAuth.createTokenClient({
+        tokenUrl: `${base}/oauth/token`,
+        clientId: config.oauth.clientId,
+        clientSecret: config.oauth.clientSecret,
+        audience: 'openvibe.network',
+        scope: 'network.project.member.read',
+        fetchImpl,
+    });
+
+    async function get(path, { retried = false } = {}) {
+        const res = await fetchImpl(`${base}${path}`, {
+            method: 'GET',
+            headers: { Accept: 'application/json', ...(await tokens.authHeaders()) },
+            signal: AbortSignal.timeout(10000),
+        });
+        if (res.status === 401 && !retried) { tokens.invalidate(); return await get(path, { retried: true }); }
+        const data = await res.json().catch(() => null);
+        if (res.status === 404) return { status: 404, data: null };
+        if (!res.ok || data == null) throw new Error(`network project read ${res.status}: ${(data && (data.detail || data.error)) || 'bad response'}`);
+        return { status: res.status, data };
+    }
+
+    /** The person's memberships, filtered to the projects they administer (admin or owner, not archived). */
+    async function administered(subject) {
+        const out = await get(`/internal/projects?subject=${encodeURIComponent(subject)}`);
+        if (!Array.isArray(out.data.projects)) throw new Error('network project list: bad response');
+        return out.data.projects.filter((membership) => !membership.archived && PROJECT_ADMINS.has(membership.role));
+    }
+
+    /** One membership; null when the person is not a member (Network answers 404 for a non-member and an unknown project alike). */
+    async function member(projectId, subject) {
+        const out = await get(`/internal/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(subject)}`);
+        return out.status === 404 ? null : out.data;
+    }
+
+    return { administered, member };
+}
+
+/**
+ * Network's app registry: the name (and icon, when Network carries one) of a developer app, for the pay sheet.
+ * One read of the app's project (GET /internal/projects/:project_id, network.project.read). Best effort: a
+ * Network hiccup must not hide a charge, and Network's own pay sheet fills the name from dev_apps anyway.
+ */
+function createApps(config, { fetchImpl = globalThis.fetch, log = console } = {}) {
+    const base = config.network.internalUrl;
+    const tokens = serviceAuth.createTokenClient({
+        tokenUrl: `${base}/oauth/token`,
+        clientId: config.oauth.clientId,
+        clientSecret: config.oauth.clientSecret,
+        audience: 'openvibe.network',
+        scope: 'network.project.read',
+        fetchImpl,
+    });
+    const cache = new Map();
+    const TTL_MS = 60 * 1000;
+    let warned = false;
+
+    async function get(path, { retried = false } = {}) {
+        const res = await fetchImpl(`${base}${path}`, {
+            method: 'GET',
+            headers: { Accept: 'application/json', ...(await tokens.authHeaders()) },
+            signal: AbortSignal.timeout(10000),
+        });
+        if (res.status === 401 && !retried) { tokens.invalidate(); return await get(path, { retried: true }); }
+        const data = await res.json().catch(() => null);
+        if (!res.ok || data == null) throw new Error(`network app read ${res.status}`);
+        return data;
+    }
+
+    /** { id, name, icon } for one app; name/icon are null when Network does not know it (or the read failed). */
+    async function app(projectId, appId) {
+        const key = `${projectId}:${appId}`;
+        const hit = cache.get(key);
+        if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
+        let value = { id: appId, name: null, icon: null };
+        try {
+            const out = await get(`/internal/projects/${encodeURIComponent(projectId)}`);
+            const found = (out.apps || []).find((a) => a && a.id === appId);
+            if (found) value = { id: appId, name: found.name || null, icon: found.icon || found.icon_url || null };
+        } catch (err) {
+            if (!warned) {
+                warned = true;
+                // The error names neither a person nor a secret; it is a service permission or a Network outage.
+                if (log && log.warn) log.warn(`[Billing] app registry read failed (${err && err.message ? err.message : 'network'}); the pay sheet falls back to the app id`);
+            }
+        }
+        cache.set(key, { at: Date.now(), value });
+        return value;
+    }
+
+    return { app };
+}
+
+module.exports = { createKeyProvider, createIdentity, createProjects, createApps };

@@ -1,0 +1,21 @@
+{
+  "id": "billing.vibes.read",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "public",
+  "description": "Read a person's own Vibes as an app the person approved (D12): GET /api/v1/vibes/me with a person-delegated app token answers billing.vibes-wallet@1 — the Vibes to spend, the creator payable that can be cashed out (never into Balance) and today's bits_per_usd. The app sees only the person who approved it, never another person's Vibes.",
+  "permissions": [
+    "billing:vibes:read"
+  ],
+  "resourceConstraints": [
+    "owner"
+  ],
+  "quotaClass": "billing-vibes-read",
+  "events": [],
+  "implementedBy": [
+    "GET /api/v1/vibes/me"
+  ],
+  "inputSchema": "common.no-body@1",
+  "outputSchema": "billing.vibes-wallet@1"
+}

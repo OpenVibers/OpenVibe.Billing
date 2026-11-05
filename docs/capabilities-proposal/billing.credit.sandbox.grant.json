@@ -1,0 +1,21 @@
+{
+  "id": "billing.credit.sandbox.grant",
+  "version": "1.0",
+  "owner": "billing",
+  "status": "active",
+  "visibility": "internal",
+  "description": "Grant synthetic credit to a (subject, project) for tests and staging (D9): POST /internal/credits/sandbox/grants. Refused unless BILLING_CREDITS_SANDBOX=1; a test transaction, never money.",
+  "inputSchema": "billing.credit-sandbox-grant-request@1",
+  "outputSchema": "billing.credit-sandbox-grant-result@1",
+  "permissions": [
+    "billing:credit:sandbox"
+  ],
+  "resourceConstraints": [
+    "none"
+  ],
+  "quotaClass": "billing-credit",
+  "events": [],
+  "implementedBy": [
+    "POST /internal/credits/sandbox/grants"
+  ]
+}

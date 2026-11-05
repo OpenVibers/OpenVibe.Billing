@@ -60,6 +60,7 @@ function createCcbill(cfg) {
         if (price == null) return { effect: 'none', reason: 'sale carried no price — not credited', review: true };
         if (!txId) return { effect: 'none', reason: 'sale without a transaction id', review: true };
         const receipt = { provider: 'ccbill', receiptRef: `ccbill:${txId}`, paidCents: Math.round(Number(price) * 100) };
+        if (intent.kind === 'credits_topup') return { effect: 'credits_topup', args: { ...receipt, intentId: intent.id, idempotencyKey: key, actor } };
         if (intent.kind === 'purchase') return { effect: 'purchase', args: { ...receipt, intentId: intent.id, idempotencyKey: key, actor } };
         if (receipt.paidCents + 1 < intent.amount_cents) return { effect: 'none', reason: 'underpaid subscription sale — review', review: true };
         return { effect: 'subscription', args: { subscriber: intent.subject, streamer: intent.streamer_subject, source: 'receipt', intentId: intent.id, receipt, idempotencyKey: key, actor } };

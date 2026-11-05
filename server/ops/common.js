@@ -20,6 +20,15 @@ const A = {
     promo: (s) => ({ kind: 'promo_credit', owner: s, currency: BITS }),
     promoReserve: () => ({ kind: 'promo_reserve', owner: null, currency: BITS }),
     payable: (s) => ({ kind: 'creator_payable', owner: s, currency: BITS }),
+    // D12 Vibes Pay: a project's received Vibes wait here until its owner cashes them out through the existing
+    // cashout path. A separate kind from creator_payable because the owner is a project, not a person: a personal
+    // cashout, account export or tip-refund must never see a project's money.
+    projectPayable: (projectId) => ({ kind: 'project_payable', owner: `project:${projectId}`, currency: BITS }),
+    // Sandbox Vibes (D12): the app's test pocket for a person, the app's test project wallet, and the issuer the
+    // grants come from. All three are test-only and never mixed with the real kinds above.
+    vibesSandbox: (appId, subject) => ({ kind: 'vibes_credit_sandbox', owner: `sandbox:${appId}:user:${subject}`, currency: BITS }),
+    projectPayableSandbox: (appId, projectId) => ({ kind: 'project_payable_sandbox', owner: `sandbox:${appId}:project:${projectId}`, currency: BITS }),
+    vibesSandboxIssuer: () => ({ kind: 'vibes_sandbox', owner: null, currency: BITS }),
     pending: (s) => ({ kind: 'payouts_pending', owner: s, currency: BITS }),
     clearing: (provider) => ({ kind: 'provider_clearing', owner: provider, currency: CENTS }),
     revenue: (currency) => ({ kind: 'platform_revenue', owner: null, currency }),

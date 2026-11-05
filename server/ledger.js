@@ -24,6 +24,20 @@
  */
 const { ids } = require('openvibe-contracts');
 
+const NANO_USD = 'nano-usd';
+const isBigCurrency = (currency) => currency === NANO_USD;
+const PG_BIGINT_MAX = 9223372036854775807n;
+
+/** Parse a bigint column value (returned as text via ::text) into the right JS type for its currency. */
+function parseMoney(value, currency) {
+    if (value == null) return isBigCurrency(currency) ? 0n : 0;
+    if (isBigCurrency(currency)) return BigInt(String(value));
+    return Number(value);
+}
+
+/** Zero value matching the currency's numeric type. */
+function zeroFor(currency) { return isBigCurrency(currency) ? 0n : 0; }
+
 class BillingError extends Error {
     constructor(status, code, detail, extra) {
         super(detail || code);
@@ -46,11 +60,11 @@ async function accountId(db, { kind, owner = null, currency }, nowIso) {
     return Number(r.lastInsertRowid);
 }
 
-/** Cached balance of an account (0 when it does not exist yet). */
+/** Cached balance of an account (0 when it does not exist yet). Returns BigInt for nano-usd, Number otherwise. */
 async function balance(db, { kind, owner = null, currency }) {
-    const row = await db.prepare(`SELECT b.balance FROM accounts a JOIN account_balances b ON b.account_id = a.id
+    const row = await db.prepare(`SELECT b.balance::text AS balance FROM accounts a JOIN account_balances b ON b.account_id = a.id
         WHERE a.kind = ? AND a.owner_subject IS NOT DISTINCT FROM ? AND a.currency = ?`).get(kind, owner, currency);
-    return row ? row.balance : 0;
+    return parseMoney(row ? row.balance : null, currency);
 }
 
 function parseTxn(row) {
@@ -59,8 +73,9 @@ function parseTxn(row) {
 }
 
 async function entriesOf(db, txnId) {
-    return await db.prepare(`SELECT a.kind, a.owner_subject AS owner, a.currency, e.amount FROM ledger_entries e
+    const rows = await db.prepare(`SELECT a.kind, a.owner_subject AS owner, a.currency, e.amount::text AS amount FROM ledger_entries e
         JOIN accounts a ON a.id = e.account_id WHERE e.txn_id = ? ORDER BY a.currency, a.kind, a.owner_subject`).all(txnId);
+    return rows.map((r) => ({ kind: r.kind, owner: r.owner, currency: r.currency, amount: parseMoney(r.amount, r.currency) }));
 }
 
 async function getTxn(db, id) {
@@ -91,18 +106,31 @@ async function post(ctx, spec) {
         const merged = new Map();
         const sums = new Map();
         for (const e of spec.entries || []) {
-            if (!Number.isInteger(e.amount)) throw new BillingError(500, 'ledger.bad_amount', `non-integer amount ${e.amount}`);
-            if (!Number.isSafeInteger(e.amount)) throw new BillingError(422, 'billing.amount_overflow', `amount ${e.amount} is beyond the exact integer range`);
-            if (e.amount === 0) continue;
+            const isBig = typeof e.amount === 'bigint';
+            if (isBigCurrency(e.currency)) {
+                if (!isBig) throw new BillingError(500, 'ledger.bad_amount', `${e.currency} amounts must be BigInt`);
+                if (e.amount > PG_BIGINT_MAX || e.amount < -PG_BIGINT_MAX) throw new BillingError(422, 'billing.amount_overflow', `amount ${e.amount} ${e.currency} does not fit in the ledger column`);
+            } else {
+                if (isBig) throw new BillingError(500, 'ledger.bad_amount', `${e.currency} amounts must be Number`);
+                if (!Number.isInteger(e.amount)) throw new BillingError(500, 'ledger.bad_amount', `non-integer amount ${e.amount}`);
+                if (!Number.isSafeInteger(e.amount)) throw new BillingError(422, 'billing.amount_overflow', `amount ${e.amount} is beyond the exact integer range`);
+            }
+            if (e.amount == 0) continue; // loose: 0n == 0
             const key = `${e.kind}|${e.owner == null ? '' : e.owner}|${e.currency}`;
-            const m = merged.get(key) || { kind: e.kind, owner: e.owner == null ? null : e.owner, currency: e.currency, amount: 0 };
+            const m = merged.get(key) || { kind: e.kind, owner: e.owner == null ? null : e.owner, currency: e.currency, amount: zeroFor(e.currency) };
             m.amount += e.amount;
             merged.set(key, m);
-            sums.set(e.currency, (sums.get(e.currency) || 0) + e.amount);
+            const curSum = sums.get(e.currency) ?? zeroFor(e.currency);
+            sums.set(e.currency, curSum + e.amount);
         }
         for (const [currency, sum] of sums) {
-            if (!Number.isSafeInteger(sum)) throw new BillingError(422, 'billing.amount_overflow', `entries in ${currency} overflow the exact integer range`);
-            if (sum !== 0) throw new BillingError(500, 'ledger.unbalanced', `entries sum to ${sum} ${currency}, not zero`, { entries: spec.entries });
+            if (isBigCurrency(currency)) {
+                if (typeof sum !== 'bigint') throw new BillingError(500, 'ledger.unbalanced', `entries in ${currency} are not all BigInt`, { entries: spec.entries });
+                if (sum !== 0n) throw new BillingError(500, 'ledger.unbalanced', `entries sum to ${sum} ${currency}, not zero`, { entries: spec.entries });
+            } else {
+                if (!Number.isSafeInteger(sum)) throw new BillingError(422, 'billing.amount_overflow', `entries in ${currency} overflow the exact integer range`);
+                if (sum !== 0) throw new BillingError(500, 'ledger.unbalanced', `entries sum to ${sum} ${currency}, not zero`, { entries: spec.entries });
+            }
         }
 
         const id = newTxnId(ms);
@@ -117,14 +145,19 @@ async function post(ctx, spec) {
         const insEntry = db.prepare('INSERT INTO ledger_entries (txn_id, account_id, amount) VALUES (?, ?, ?)');
         const bump = db.prepare('UPDATE account_balances SET balance = balance + ?, updated_at = ? WHERE account_id = ?');
         for (const m of merged.values()) {
-            if (!Number.isSafeInteger(m.amount)) throw new BillingError(422, 'billing.amount_overflow', `the ${m.kind} entry overflows the exact integer range`);
-            if (m.amount === 0) continue;
-            if (!Number.isSafeInteger(await balance(db, m) + m.amount)) {
+            const isBig = isBigCurrency(m.currency);
+            if (!isBig && !Number.isSafeInteger(m.amount)) throw new BillingError(422, 'billing.amount_overflow', `the ${m.kind} entry overflows the exact integer range`);
+            if (m.amount == 0) continue;
+            const have = await balance(db, m);
+            const would = have + m.amount;
+            if (isBig) {
+                if (would > PG_BIGINT_MAX || would < -PG_BIGINT_MAX) throw new BillingError(422, 'billing.amount_overflow', `${m.kind}${m.owner ? `:${m.owner}` : ''} would leave the bigint range`);
+            } else if (!Number.isSafeInteger(would)) {
                 throw new BillingError(422, 'billing.amount_overflow', `${m.kind}${m.owner ? `:${m.owner}` : ''} would leave the exact integer range`);
             }
         }
         for (const m of merged.values()) {
-            if (m.amount === 0) continue;
+            if (m.amount == 0) continue;
             const acct = await accountId(db, m, nowIso);
             await insEntry.run(id, acct, m.amount);
             await bump.run(m.amount, nowIso, acct);
@@ -147,7 +180,8 @@ async function money(db, fn) {
 async function requireFunds(db, account, amount, what = 'balance') {
     const have = await balance(db, account);
     if (have < amount) {
-        throw new BillingError(409, 'billing.insufficient_funds', `insufficient ${what}: ${have} < ${amount} ${account.currency}`, { available: have, required: amount });
+        const extra = isBigCurrency(account.currency) ? { available: String(have), required: String(amount) } : { available: have, required: amount };
+        throw new BillingError(409, 'billing.insufficient_funds', `insufficient ${what}: ${have} < ${amount} ${account.currency}`, extra);
     }
     return have;
 }
@@ -161,7 +195,7 @@ function present(txn) {
         from_subject: txn.from_subject || null, to_subject: txn.to_subject || null,
         provider: txn.provider || null, receipt_ref: txn.receipt_ref || null,
         actor: txn.actor, metadata: txn.metadata, created_at: txn.created_at,
-        entries: (txn.entries || []).map((e) => ({ account: { kind: e.kind, owner: e.owner, currency: e.currency }, amount: e.amount })),
+        entries: (txn.entries || []).map((e) => ({ account: { kind: e.kind, owner: e.owner, currency: e.currency }, amount: isBigCurrency(e.currency) ? String(e.amount) : e.amount })),
     };
 }
 

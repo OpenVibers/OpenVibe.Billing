@@ -30,6 +30,13 @@ const BUDGETS = {
     // Someone buying Vibes or subscribing starts one, and perhaps retries it once or twice; dozens are card
     // testing. Tips' supporters are also capped at 20 unpaid checkouts a day there.
     'billing.intent.create': { minute: 5, hour: 30 },
+    // Starting a Balance top-up (POST /api/me/credits/topups) opens a provider checkout for real money; the same
+    // budget as a purchase checkout, counted per signed-in person.
+    'billing.credits.topup.create': { minute: 5, hour: 30 },
+    // Moving Balance to a project (POST /api/me/balance/transfers) is a wallet write, not a checkout.
+    'billing.balance.transfer': { minute: 10, hour: 100 },
+    // Getting Vibes with Balance (POST /api/me/vibes/from-balance): a few buys at a time.
+    'billing.vibes.from_balance': { minute: 5, hour: 30 },
     // A tip, donation or paid interaction from a person's credit: one a second at most, above Tips' own
     // 20 a minute per supporter, so no real supporter meets it.
     'billing.transfer.create': { minute: 60, hour: 1200 },
@@ -44,6 +51,14 @@ const BUDGETS = {
     'billing.recycle': { minute: 10, hour: 60 },
     // A subscription period paid from credit: a person subscribes to a few channels at a time.
     'billing.subscription.create': { minute: 10, hour: 60 },
+    // Vibes Pay (D12): an app creates charges and refunds them from its server; a person pays and cancels on the pay
+    // sheet. The owner's billing.vibes limits (amount, daily spend, on/off) are separate and checked by ops/vibes.js.
+    'billing.vibes.charge.create': { minute: 60, hour: 1200 },
+    'billing.vibes.charge.refund': { minute: 20, hour: 200 },
+    'billing.vibes.pay': { minute: 30, hour: 300 },
+    'billing.vibes.cancel': { minute: 30, hour: 300 },
+    'billing.vibes.sandbox.grant': { minute: 30, hour: 300 },
+    'billing.vibes.webhook': { minute: 10, hour: 60 },
 };
 
 /** The bare usr_… id from a SubjectRef or a bare id, else null. */

@@ -49,6 +49,7 @@ function createNowpayments(cfg, { fetchImpl = globalThis.fetch } = {}) {
         if (!intent) return { effect: 'none', reason: 'payment without a Billing intent' };
         if (String(b.price_currency || 'usd').toLowerCase() !== 'usd' || b.price_amount == null) return { effect: 'none', reason: 'payment without a USD price', review: true };
         const receipt = { provider: 'nowpayments', receiptRef: `nowpayments:${b.payment_id}`, paidCents: Math.round(Number(b.price_amount) * 100) };
+        if (intent.kind === 'credits_topup') return { effect: 'credits_topup', args: { ...receipt, intentId: intent.id, idempotencyKey: key, actor } };
         if (intent.kind === 'purchase') return { effect: 'purchase', args: { ...receipt, intentId: intent.id, idempotencyKey: key, actor } };
         if (receipt.paidCents + 1 < intent.amount_cents) return { effect: 'none', reason: 'underpaid subscription — review', review: true };
         return { effect: 'subscription', args: { subscriber: intent.subject, streamer: intent.streamer_subject, source: 'receipt', intentId: intent.id, receipt, idempotencyKey: key, actor } };
