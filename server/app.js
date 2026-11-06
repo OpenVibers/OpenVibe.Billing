@@ -137,7 +137,11 @@ async function createApp(opts = {}) {
     app.use('/internal/credits', express.json({ limit: '64kb' }), internalRouter({ ctx, auth }));
     // Per-person limits on the money-creating routes (api/actor-limits.js); the webhooks above never are.
     const limits = createActorLimits({ config, db, now: opts.limitsNow || (() => Date.now()), registry: metrics.registry, log, valkey });
-    app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters, limits }));
+    // Subject assertions on the money routes (ADR-003, the 2026-11-06 amendment; plan H1).
+    // The registry carries the counters: the number of per-person calls that still come without an
+    // assertion is what the flag plan waits for.
+    const subjectAssertion = require('./api/subject-assertion').createSubjectAssertion({ config, log, registry: metrics.registry });
+    app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters, limits, subjectAssertion }));
     // A signed-in person's own Vibes, for the shared navbar on every OpenVibe site (api/me.js; user tokens, CORS for owned sites).
     app.use('/api/me', require('./api/me').meRouter({ ctx, config, keys, limits, adapters }));
 
