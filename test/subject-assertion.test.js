@@ -97,6 +97,13 @@ const { boot, fund, check, done } = require('./helpers/app');
         assert.strictEqual(second.json.code, 'assertion.replayed');
     });
 
+    await check('the counters the flag plan waits for are on /metrics', async () => {
+        const m = await fetch(`${t.base}/metrics`).then((r) => r.text());
+        assert.ok(/billing_subject_assertion_calls\{state="asserted"\}/.test(m), 'the calls that carried an assertion are counted');
+        assert.ok(/billing_subject_assertion_calls\{state="unasserted"\}/.test(m), 'the calls that came without one are counted');
+        assert.ok(!/usr_[0-9A-Z]{26}/.test(m), 'no subject ever appears in metrics');
+    });
+
     await check('a balance read for a person is a per-person route too', async () => {
         const r = await t2.call('GET', `/api/v1/balances/${payer.id}`, { cap: ['billing.balance.read'] });
         assert.strictEqual(r.status, 403, r.text);
