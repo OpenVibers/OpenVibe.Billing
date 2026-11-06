@@ -322,7 +322,11 @@ function v1Router({ ctx, auth, adapters, limits, subjectAssertion }) {
     // reading's own idempotency_key (no Idempotency-Key header): a replay is 200 with the stored row, a new one 201.
     r.post('/usage', auth.needs(CAP.usage), wrap(async (req, res) => {
         const b = req.body || {};
-        await assertion.person(req, b.subject ? userSubject(b.subject, 'subject') : null);
+        // A reading names its subject in its own way (platform.usage-sample@1 allows any subject string, and a
+        // project's own readings may use a project-local id). Only a canonical person subject (usr_…) can be
+        // checked against an assertion, so only that one is.
+        const readSubject = String(b.subject || '');
+        await assertion.person(req, /^usr_[0-9A-HJKMNP-TV-Z]{26}$/.test(readSubject) ? readSubject : null);
         const out = await usage.record(ctx, req.body, { principal: req.principal.sub });
         if (out.replayed) res.setHeader('Idempotent-Replayed', 'true');
         res.status(out.replayed ? 200 : 201).json({ record: out.record });

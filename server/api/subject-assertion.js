@@ -43,7 +43,7 @@ function createSubjectAssertion({ config, log = console }) {
     async function verify(req) {
         const raw = String((req.headers && req.headers[HEADER]) || '').trim();
         if (!raw) return { present: false, ok: false, code: null, reason: null };
-        const r = await verifier.verify(raw, { act: req.principal && req.principal.sub ? req.principal.sub : undefined });
+        const r = await verifier.verify(raw, { caller: req.principal && req.principal.sub ? req.principal.sub : undefined });
         if (!r.ok) return { present: true, ok: false, code: r.code, reason: r.reason };
         return { present: true, ok: true, claims: r.claims };
     }
