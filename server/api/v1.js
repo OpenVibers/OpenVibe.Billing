@@ -49,7 +49,7 @@ const CAP = {
     vibesRead: 'billing.vibes.read',
 };
 
-function v1Router({ ctx, auth, adapters, limits }) {
+function v1Router({ ctx, auth, adapters, limits, subjectAssertion }) {
     const r = express.Router();
     const { db } = ctx;
     const idem = idempotent(db, ctx.now);
@@ -64,6 +64,9 @@ function v1Router({ ctx, auth, adapters, limits }) {
     const read = (cap, handler, limit) => [auth.needs(cap), ...(limit ? [limit] : []), wrap(handler)];
     // Who a money route is counted against (api/actor-limits.js): the person the body names.
     const person = (field) => (req) => personOf(req.body && req.body[field]);
+    // The person a money route names must be the person the assertion names (plan H1: ADR-003, the
+    // 2026-11-06 amendment). Without the module (an old caller) nothing is checked.
+    const assertion = subjectAssertion || { person: async () => null };
     const txnOut = (t, extra = {}) => ({ transaction: presentTxn(t), ...extra });
     const pathSubject = (v) => userSubject(String(v), 'subject');
 
@@ -86,6 +89,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
     // ── Checkout intents ─────────────────────────────────────
     r.post('/intents', ...write(CAP.intent, async (req, res) => {
         const b = req.body || {};
+        await assertion.person(req, b.subject ? userSubject(b.subject, 'subject') : null);
         const adapter = adapters[String(b.provider || '').toLowerCase()];
         if (!adapter) fail(422, 'billing.invalid_input', `unknown provider ${b.provider}`);
         if (!adapter.enabled) fail(409, 'billing.provider_disabled', `${adapter.name} is not enabled on Billing`);
@@ -125,6 +129,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
     // ── Purchases: settle a provider receipt (operator/reconciler grade) ──
     r.post('/purchases/settle', ...write(CAP.admin, async (req, res) => {
         const b = req.body || {};
+        await assertion.person(req, b.subject ? userSubject(b.subject, 'subject') : null);
         if (!b.provider || !b.provider_ref) fail(422, 'billing.invalid_input', 'provider and provider_ref (the provider payment id) are required');
         const out = await purchases.settle(ctx, {
             provider: String(b.provider).toLowerCase(), receiptRef: `${String(b.provider).toLowerCase()}:${b.provider_ref}`,
@@ -137,6 +142,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
     // ── Transfers (tips / donations / paid interactions) ─────
     r.post('/transfers', ...write(CAP.transfer, async (req, res) => {
         const b = req.body || {};
+        await assertion.person(req, b.from ? userSubject(b.from, 'from') : null);
         const out = await transfers.create(ctx, {
             from: userSubject(b.from, 'from'), to: userSubject(b.to, 'to'), amount: b.amount, kind: b.kind, target: b.target,
             message: b.message, idempotencyKey: req.idempotencyKey, actor: actorOf(req), traceId: req.ov.traceId,
@@ -153,6 +159,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
     r.post('/recycle', ...write(CAP.cashoutRequest, async (req, res) => {
         const b = req.body || {};
         const subject = userSubject(b.subject);
+        await assertion.person(req, subject);
         const out = await cashouts.recycle(ctx, { subject, amount: b.amount, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.status(201).json(txnOut(out.txn, { balance: await balanceOf(subject) }));
     }, limits.budget('billing.recycle', person('subject'))));
@@ -160,6 +167,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
     // ── Cashouts ─────────────────────────────────────────────
     r.post('/cashouts', ...write(CAP.cashoutRequest, async (req, res) => {
         const b = req.body || {};
+        await assertion.person(req, b.subject ? userSubject(b.subject, 'subject') : null);
         const out = await cashouts.request(ctx, {
             subject: userSubject(b.subject), amount: b.amount, payout_method: b.payout_method,
             projectId: b.project_id, idempotencyKey: req.idempotencyKey, actor: actorOf(req),
@@ -167,12 +175,14 @@ function v1Router({ ctx, auth, adapters, limits }) {
         res.status(201).json({ cashout: cashouts.present(out.cashout) });
     }, limits.budget('billing.cashout.request', person('subject'))));
     r.get('/cashouts', ...read(CAP.cashoutManage, async (req, res) => {
+        await assertion.person(req, req.query.subject ? pathSubject(req.query.subject) : null);
         const list = await cashouts.list(db, { status: req.query.status, subject: req.query.subject, limit: Number(req.query.limit) || 100 });
         res.json({ cashouts: list.map(cashouts.present) });
     }));
     r.get('/cashouts/:id', ...read([CAP.cashoutManage, CAP.cashoutRequest], async (req, res) => {
         const c = await cashouts.find(db, req.params.id);
         if (!c) fail(404, 'billing.cashout_not_found', `no cashout ${req.params.id}`);
+        await assertion.person(req, c.subject);
         res.json({ cashout: cashouts.present(c) });
     }));
     r.post('/cashouts/:id/approve', ...write(CAP.cashoutManage, async (req, res) => {
@@ -200,8 +210,10 @@ function v1Router({ ctx, auth, adapters, limits }) {
             const provider = String(rc.provider).toLowerCase();
             receipt = { provider, receiptRef: `${provider}:${rc.provider_ref}`, paidCents: rc.amount_cents, feeCents: rc.fee_cents, route: rc.route, providerRef: rc.subscription_ref || null, test: !!rc.test };
         }
+        const subscriber = userSubject(b.subscriber, 'subscriber');
+        await assertion.person(req, subscriber);
         const out = await subscriptions.pay(ctx, {
-            subscriber: userSubject(b.subscriber, 'subscriber'), streamer: userSubject(b.streamer, 'streamer'), source,
+            subscriber, streamer: userSubject(b.streamer, 'streamer'), source,
             // A tier is priced by Billing (ops/tiers.js); an explicit price_cents only applies without one.
             tier: b.tier, priceCents: b.tier != null ? undefined : b.price_cents,
             autoRenew: b.auto_renew, receipt, idempotencyKey: req.idempotencyKey, actor: actorOf(req),
@@ -224,6 +236,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
         res.json({ tier });
     }));
     r.get('/subscriptions', ...read([CAP.entitlement, CAP.subscription], async (req, res) => {
+        await assertion.person(req, req.query.subscriber ? pathSubject(req.query.subscriber) : null);
         const list = await subscriptions.list(db, {
             subscriber: req.query.subscriber ? pathSubject(req.query.subscriber) : null,
             streamer: req.query.streamer ? pathSubject(req.query.streamer) : null,
@@ -234,9 +247,12 @@ function v1Router({ ctx, auth, adapters, limits }) {
     r.get('/subscriptions/:id', ...read([CAP.entitlement, CAP.subscription], async (req, res) => {
         const s = await subscriptions.find(db, req.params.id);
         if (!s) fail(404, 'billing.subscription_not_found', `no subscription ${req.params.id}`);
+        await assertion.person(req, s.subscriber);
         res.json({ subscription: subscriptions.present(s), entitlement: await subscriptions.entitlement(db, s.subscriber, s.streamer, ctx.now()) });
     }));
     r.post('/subscriptions/:id/cancel', ...write(CAP.subscription, async (req, res) => {
+        const s = await subscriptions.find(db, req.params.id);
+        if (s) await assertion.person(req, s.subscriber);
         const out = await subscriptions.cancel(ctx, { id: req.params.id, actor: actorOf(req) }, adapters);
         res.json({ subscription: subscriptions.present(out.subscription), provider_sync: out.provider_sync });
     }));
@@ -253,6 +269,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
     }));
     r.get('/entitlements/:subject', ...read(CAP.entitlement, async (req, res) => {
         const subject = pathSubject(req.params.subject);
+        await assertion.person(req, subject);
         if (req.query.streamer) return res.json(await subscriptions.entitlement(db, subject, pathSubject(req.query.streamer), ctx.now()));
         return res.json({ subject: { type: 'user', id: subject }, entitlements: await subscriptions.activeEntitlements(db, subject, ctx.now()) });
     }));
@@ -268,11 +285,16 @@ function v1Router({ ctx, auth, adapters, limits }) {
             payable_value_cents: ctx.rates.valueCents(payable), bits_per_usd: ctx.rates.bitsPerUsd,
         };
     }
-    r.get('/balances/:subject', ...read(CAP.balance, async (req, res) => res.json(await balanceOf(pathSubject(req.params.subject)))));
+    r.get('/balances/:subject', ...read(CAP.balance, async (req, res) => {
+        const subject = pathSubject(req.params.subject);
+        await assertion.person(req, subject);
+        return res.json(await balanceOf(subject));
+    }));
 
     r.get('/transactions', ...read(CAP.balance, async (req, res) => {
         const subject = req.query.subject ? pathSubject(req.query.subject) : null;
         if (!subject) fail(422, 'billing.invalid_input', 'subject is required');
+        await assertion.person(req, subject);
         const limit = Math.min(200, positiveInt(req.query.limit || 50, 'limit'));
         let cur = null;
         if (req.query.cursor) {
@@ -289,6 +311,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
     r.get('/transactions/:id', ...read(CAP.balance, async (req, res) => {
         const t = await getTxn(db, req.params.id);
         if (!t) fail(404, 'billing.transaction_not_found', `no transaction ${req.params.id}`);
+        await assertion.person(req, t.from_subject);
         const reversals = (await db.prepare('SELECT id FROM transactions WHERE reverses_txn = ? ORDER BY created_at').all(t.id)).map((x) => x.id);
         res.json({ transaction: presentTxn(t), reversed_by: reversals });
     }));
@@ -297,6 +320,8 @@ function v1Router({ ctx, auth, adapters, limits }) {
     // Stored and reported; never charged here (the rating sweep, ops/rating.js, charges later). Not a money movement, so accepted while frozen; idempotent by the
     // reading's own idempotency_key (no Idempotency-Key header): a replay is 200 with the stored row, a new one 201.
     r.post('/usage', auth.needs(CAP.usage), wrap(async (req, res) => {
+        const b = req.body || {};
+        await assertion.person(req, b.subject ? userSubject(b.subject, 'subject') : null);
         const out = await usage.record(ctx, req.body, { principal: req.principal.sub });
         if (out.replayed) res.setHeader('Idempotent-Replayed', 'true');
         res.status(out.replayed ? 200 : 201).json({ record: out.record });
@@ -402,6 +427,7 @@ function v1Router({ ctx, auth, adapters, limits }) {
     }));
     r.post('/admin/promo/grant', ...write(CAP.admin, async (req, res) => {
         const b = req.body || {};
+        await assertion.person(req, b.subject ? userSubject(b.subject, 'subject') : null);
         const out = await promo.grant(ctx, { subject: b.subject, service: b.service, bits: b.bits, period: b.period, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.status(201).json({ allowance: out.allowance, ...txnOut(out.txn) });
     }));

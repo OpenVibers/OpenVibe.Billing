@@ -85,6 +85,13 @@ function loadConfig(env = process.env) {
             publicKey: env.OV_NETWORK_PUBLIC_KEY ? env.OV_NETWORK_PUBLIC_KEY.replace(/\\n/g, '\n') : null,
         },
         audience: env.BILLING_AUDIENCE || 'openvibe.billing',
+        // Subject assertions (ADR-003, the 2026-11-06 amendment; plan H1): a money route that names
+        // a person carries the person's own Network-signed assertion (X-OV-Subject-Assertion).
+        // BILLING_REQUIRE_SUBJECT_ASSERTION=on refuses the old way (the service vouching for its
+        // person) and turns the check on for every per-person route.
+        subjectAssertion: {
+            required: String(env.BILLING_REQUIRE_SUBJECT_ASSERTION || 'off').toLowerCase() === 'on',
+        },
         // Per-person limits on /api/v1's money-creating routes (server/api/actor-limits.js, roadmap WS-R
         // task 4). minute/hour: a person's history reads; the money routes set tighter numbers there.
         // BILLING_LIMITS=off counts nobody (a rollback lever).
