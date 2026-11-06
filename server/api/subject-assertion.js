@@ -22,7 +22,7 @@
  *
  * The flag turns on once every caller sends assertions (the callers' PRs are part of this change).
  */
-const { createSubjectAssertionVerifier } = require('openvibe-sdk/auth');
+const { createSubjectAssertionVerifier } = require('openvibe-sdk/assertions');
 const { fail } = require('../ops/common');
 
 /** The header a money call carries the assertion in. */
@@ -63,6 +63,9 @@ function createSubjectAssertion({ config, log = console }) {
             return null;
         }
         if (!v.ok) {
+            // An assertion minted for another service is never accepted here, flag or no flag: it is
+            // another service's proof, carried here.
+            if (v.code === 'assertion.actor_mismatch') { counters.refused += 1; fail(403, v.code, v.reason); }
             counters.invalid += 1;
             if (required()) fail(403, v.code, v.reason);
             // While the flag is off a stale or broken assertion does not stop the money: the old

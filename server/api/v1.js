@@ -127,9 +127,10 @@ function v1Router({ ctx, auth, adapters, limits, subjectAssertion }) {
     }));
 
     // ── Purchases: settle a provider receipt (operator/reconciler grade) ──
+    // The operator settles a provider receipt: a staff action about a payment, not a service acting
+    // for a person, so it carries no subject assertion.
     r.post('/purchases/settle', ...write(CAP.admin, async (req, res) => {
         const b = req.body || {};
-        await assertion.person(req, b.subject ? userSubject(b.subject, 'subject') : null);
         if (!b.provider || !b.provider_ref) fail(422, 'billing.invalid_input', 'provider and provider_ref (the provider payment id) are required');
         const out = await purchases.settle(ctx, {
             provider: String(b.provider).toLowerCase(), receiptRef: `${String(b.provider).toLowerCase()}:${b.provider_ref}`,
@@ -425,9 +426,9 @@ function v1Router({ ctx, auth, adapters, limits, subjectAssertion }) {
         const out = await admin.adjust(ctx, { from: b.from, to: b.to, amount: b.amount, reason: b.reason, relatesTo: b.relates_to, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.status(201).json(txnOut(out.txn));
     }));
+    // A staff grant of promo credit: an operator action, not a service acting for a person.
     r.post('/admin/promo/grant', ...write(CAP.admin, async (req, res) => {
         const b = req.body || {};
-        await assertion.person(req, b.subject ? userSubject(b.subject, 'subject') : null);
         const out = await promo.grant(ctx, { subject: b.subject, service: b.service, bits: b.bits, period: b.period, idempotencyKey: req.idempotencyKey, actor: actorOf(req) });
         res.status(201).json({ allowance: out.allowance, ...txnOut(out.txn) });
     }));

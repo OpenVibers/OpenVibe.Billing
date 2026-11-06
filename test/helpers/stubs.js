@@ -25,6 +25,9 @@ async function startNetwork() {
     const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
     const publicPem = publicKey.export({ type: 'spki', format: 'pem' });
     const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+    // The subject-assertion key (ES256): Network publishes it beside the RS256 key, and the stub
+    // signs assertions with it so a test can play the caller that carries one.
+    const assertionKeys = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
     const legacy = {};          // live user id → subject id
     const resolveCalls = [];
     const grants = [];
@@ -35,6 +38,18 @@ async function startNetwork() {
     let issuer = 'http://network.test';
     const state = { down: false };
 
+    const b64url = (b) => Buffer.from(b).toString('base64url');
+    /** A subject assertion, as Network signs it: the person, the audience, the service it was minted for. */
+    function signAssertion({ subject, audience = 'openvibe.billing', act = 'svc:live', expSec = 60, kid = 'ov-network-assertion-1', jti } = {}) {
+        const now = Math.floor(Date.now() / 1000);
+        const header = b64url(JSON.stringify({ alg: 'ES256', typ: 'JWT', kid }));
+        const body = b64url(JSON.stringify({
+            iss: issuer, sub: subject, aud: audience, act, jti: jti || `as_${crypto.randomBytes(8).toString('hex')}`,
+            iat: now, exp: now + expSec,
+        }));
+        const sig = crypto.sign('sha256', Buffer.from(`${header}.${body}`), { key: assertionKeys.privateKey, dsaEncoding: 'ieee-p1363' });
+        return `${header}.${body}.${b64url(sig)}`;
+    }
     function signService({ sub = 'svc:live', aud = ['openvibe.billing'], cap = [], expSec = 300, iss } = {}) {
         const now = Math.floor(Date.now() / 1000);
         return serviceAuth.signServiceToken({ iss: iss || issuer, sub, actor_type: 'service', aud, cap, iat: now, exp: now + expSec, jti: crypto.randomBytes(8).toString('hex') }, privatePem);
@@ -97,7 +112,18 @@ async function startNetwork() {
 
     const server = http.createServer(async (req, res) => {
         const raw = await readBody(req);
-        if (req.url === '/api/.well-known/jwks') return send(res, 200, { public_key: publicPem, algorithm: 'RS256' });
+        if (req.url === '/api/.well-known/jwks') {
+            // Both keys, as Network publishes them: the RS256 session key and the ES256 assertion key.
+            const rsa = publicKey.export({ format: 'jwk' });
+            const ec = assertionKeys.publicKey.export({ format: 'jwk' });
+            return send(res, 200, {
+                public_key: publicPem, algorithm: 'RS256',
+                keys: [
+                    { ...rsa, use: 'sig', alg: 'RS256', kid: 'ov-network-1' },
+                    { ...ec, use: 'sig', alg: 'ES256', kid: 'ov-network-assertion-1' },
+                ],
+            });
+        }
         if (req.url === '/oauth/token' && req.method === 'POST') {
             // openvibe-sdk/sso posts the grant as JSON; the real Network takes that (and this stub keeps the form shape too).
             const text = String(raw || '');
@@ -175,7 +201,7 @@ async function startNetwork() {
     issuer = url;
     // A person's Network session token, as the browser holds it (the shared navbar sends it).
     const signUser = (u) => userToken({ role: 'user', username: 'someone', nowMs: Date.now(), ...u });
-    return { url, publicPem, signService, signApp, signUser, addUser, addMembership, addProject, addApp, memberships, projects, apps, publicNames, authorize, revoked, legacy, resolveCalls, grants, state, close: () => new Promise((r) => server.close(r)) };
+    return { url, publicPem, signService, signApp, signUser, signAssertion, addUser, addMembership, addProject, addApp, memberships, projects, apps, publicNames, authorize, revoked, legacy, resolveCalls, grants, state, close: () => new Promise((r) => server.close(r)) };
 }
 
 async function startStripe() {
