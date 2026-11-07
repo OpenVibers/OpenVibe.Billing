@@ -55,7 +55,11 @@ const SECRETS = [PANEL_KEY, LIVE_KEY, BAD_KEY, WEBHOOK];
         assert.deepStrictEqual([p['stripe.webhook_secret']['x-required-for'], p['stripe.webhook_secret']['x-owner-input'].test], ['Card payments', true]);
         assert.strictEqual(p['stripe.publishable_key']['x-required-for'], undefined, 'optional: today\'s checkout does not need it');
         assert.strictEqual(p['stripe.live']['x-danger'], true);
-        assert.deepStrictEqual(r.json.classification, {}, 'nothing stored yet');
+        // The summary classifies every field of the schema, set or not (openvibe-shared 4.125.0), so the
+        // classification is not empty; what must be empty is the stored value.
+        // 2026-11-07, the openvibe-shared v4.126.0 pin round.
+        assert.deepStrictEqual(r.json.values, {}, 'nothing stored yet');
+        for (const k of Object.keys(p)) assert.ok(r.json.classification[k], k + ' is classified before anyone sets it');
         assert.strictEqual(r.json.sealed, true);
     });
 
