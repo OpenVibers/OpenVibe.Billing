@@ -12,8 +12,14 @@
  * BILLING_INFERENCE_LEASE_SECONDS as its pin; when neither is set the loader's 300 s default applies.
  *
  * `credits`, `topup` and the two top-up terms are danger keys (they open or move money). There are no secret-class
- * keys in this namespace: Billing's provider credentials stay in the service's environment, so the
- * write-only `/secrets/:key` route refuses every key here with 422 config.not_secret.
+ * keys in this namespace, so the write-only `/secrets/:key` route refuses every key here with 422 config.not_secret.
+ *
+ * `billing.cards` (the owner-setup design of 2026-11-07) holds the card processor: the Stripe secret key, the
+ * publishable key and the webhook signing secret (secret class: write-only, sealed with the service's KEK, never
+ * shown again) and the live switch (x-danger). Its keys carry `x-owner-input` so the admin panel's Setup tab lists them
+ * under Money. They have no x-env pin: the value entered in the panel wins when it is set, and STRIPE_SECRET_KEY,
+ * STRIPE_PUBLISHABLE_KEY and STRIPE_WEBHOOK_SECRET from the environment stay the fallback, read at use time
+ * (stripeSettings below), so nothing changes until the owner enters a key.
  */
 const config = require('openvibe-shared/config');
 const { MAX_RECEIPT_CENTS } = require('./ops/common');
@@ -24,44 +30,47 @@ const NAMESPACE = 'billing.credits';
 const GROUP = 'Balance';
 const VIBES_NAMESPACE = 'billing.vibes';
 const VIBES_GROUP = 'Vibes';
+const CARDS_NAMESPACE = 'billing.cards';
+const CARDS_GROUP = 'Card payments';
 
 const SCHEMA = {
     $schema: 'https://json-schema.org/draft/2020-12/schema',
-    title: 'Billing Balance',
-    description: 'Balance ledger and the owner terms of the checkout top-up.',
+    title: 'Balance',
+    description: 'The Balance people pay for AI and apps with, and the terms on which they can top it up by card. Change these when you open Balance, start offering top-ups, or change the amounts and the fee.',
     type: 'object',
     additionalProperties: false,
     properties: {
         credits: {
             type: 'boolean', default: false,
-            title: 'Balance ledger', description: 'Open the Balance ledger: the internal hold/settle API and the person\'s Balance routes.',
+            title: 'Open Balance', description: 'When on, people have a Balance: services can hold and spend it, and people see it on their account. Off (the default) answers that Balance is closed. Turning it off again stops new holds; nothing already spent is undone.',
             'x-group': GROUP, 'x-env': 'BILLING_CREDITS', 'x-danger': true,
         },
         sandbox: {
             type: 'boolean', default: false,
-            title: 'Sandbox credit grants', description: 'Allow synthetic sandbox credit grants, for development and integration tests only.',
+            title: 'Free test Balance', description: 'When on, test accounts can be given made-up Balance to try paid features without paying. For development and integration tests only; off (the default) in production.',
             'x-group': GROUP, 'x-env': 'BILLING_CREDITS_SANDBOX',
         },
         topup: {
             type: 'boolean', default: false,
-            title: 'Balance top-up', description: 'Offer checkout top-ups of Balance through the payment providers.',
+            title: 'Let people top up by card', description: 'When on, people can add to their Balance through the card processor, at the amounts and fee below. Off (the default) hides top-ups. Turning it off stops new top-ups; paid ones stay paid.',
             'x-group': GROUP, 'x-env': 'BILLING_CREDITS_TOPUP', 'x-danger': true,
         },
         topup_amounts_cents: {
             type: 'array', items: { type: 'integer', minimum: 1, maximum: MAX_RECEIPT_CENTS }, minItems: 1, uniqueItems: true,
-            title: 'Top-up amounts (cents)', description: 'The only amounts a person may top up, in whole USD cents.',
+            title: 'Top-up amounts (cents)', description: 'The only amounts a person may pick when topping up, in US cents: [500, 1000, 2500] offers $5, $10 and $25. Unset, top-ups say they are not set up yet.',
+            'x-example': '500, 1000, 2500',
             'x-group': GROUP, 'x-env': 'BILLING_CREDITS_TOPUP_AMOUNTS_CENTS', 'x-danger': true,
         },
         topup_fee_bps: {
             type: 'integer', minimum: 0, maximum: 10_000,
-            title: 'Top-up fee (bps)', description: 'Fee in basis points charged on top of the top-up at checkout; 0 is a real, configured fee.',
+            title: 'Top-up fee', 'x-unit': 'bps', 'x-example': 300,
+            description: 'The fee added on top of a top-up at checkout, in hundredths of a percent: 300 is 3%, so a $10 top-up costs $10.30. 0 is a real setting (no fee); unset, top-ups say they are not set up yet.',
             'x-group': GROUP, 'x-env': 'BILLING_CREDITS_TOPUP_FEE_BPS', 'x-danger': true,
         },
-        // The unit is seconds; Shared 4.110.0's x-unit only accepts nano_usd, ms and bps, so it is in the title
-        // rather than an x-unit that would make createConfigStore throw.
+        // Shared 4.122.0's x-unit accepts seconds.
         hold_lease_seconds: {
-            type: 'integer', minimum: 1, maximum: 86_400, default: 300,
-            title: 'Hold lease (seconds)', description: 'How long a Balance hold lasts before it expires.',
+            type: 'integer', minimum: 1, maximum: 86_400, default: 300, 'x-unit': 'seconds',
+            title: 'How long a hold lasts', description: 'Seconds a service may keep Balance on hold before spending it (default 300, five minutes). Longer lets slow AI requests finish; shorter gives unspent Balance back sooner.',
             'x-group': GROUP, 'x-env': 'BILLING_INFERENCE_LEASE_SECONDS',
         },
     },
@@ -69,33 +78,138 @@ const SCHEMA = {
 
 const VIBES_SCHEMA = {
     $schema: 'https://json-schema.org/draft/2020-12/schema',
-    title: 'Billing Vibes',
-    description: 'Vibes Pay limits and the switch that lets a person get Vibes with Balance.',
+    title: 'Vibes',
+    description: 'Vibes are the coins people spend inside apps. These settings decide whether apps may charge Vibes, how much, and whether people can buy Vibes with their Balance.',
     type: 'object',
     additionalProperties: false,
     properties: {
         vibes_pay: {
             type: 'boolean', default: false,
-            title: 'Vibes Pay', description: 'Let apps charge Vibes on the pay sheet. Turning it on enables spending real Vibes.',
+            title: 'Let apps charge Vibes', description: 'When on, apps can ask a person to pay Vibes on the pay sheet, and real Vibes are spent. Off (the default) refuses every app charge. Turning it off again stops new charges at once.',
             'x-group': VIBES_GROUP, 'x-env': 'BILLING_VIBES_PAY', 'x-danger': true,
         },
         max_charge_vibes: {
             type: 'integer', minimum: 0, maximum: 10_000_000, default: 0,
-            title: 'Largest single charge (Vibes)', description: 'The most Vibes one app charge may ask for; 0 closes app charges.',
+            title: 'Largest single charge (Vibes)', 'x-example': 500,
+            description: 'The most Vibes one app charge may ask for (default 0, which refuses every charge). Higher allows bigger purchases in apps; lower limits what one mistake can cost.',
             'x-group': VIBES_GROUP, 'x-env': 'BILLING_VIBES_MAX_CHARGE',
         },
         daily_app_spend_vibes_per_person: {
             type: 'integer', minimum: 0, maximum: 10_000_000, default: 0,
-            title: 'Daily app spend per person (Vibes)', description: 'The most Vibes one person may spend in apps in a day; 0 closes app spending.',
+            title: 'Most a person may spend in apps a day (Vibes)', 'x-example': 2000,
+            description: 'The most Vibes one person may spend in all apps together in one UTC day (default 0, which refuses all app spending). Lower protects people from spending too much.',
             'x-group': VIBES_GROUP, 'x-env': 'BILLING_VIBES_DAILY_APP_SPEND',
         },
         from_balance: {
             type: 'boolean', default: false,
-            title: 'Get Vibes with Balance', description: 'Let a person buy Vibes with their Balance, at the pack value rate.',
+            title: 'Let people buy Vibes with Balance', description: 'When on, a person can turn Balance into Vibes at the same rate as a Vibes pack. Off (the default) offers Vibes packs only. Turning it off stops new purchases; Vibes already bought stay.',
             'x-group': VIBES_GROUP, 'x-env': 'BILLING_VIBES_FROM_BALANCE', 'x-danger': true,
         },
     },
 };
+
+/**
+ * The card processor (Stripe). The three keys are secret class: write-only through /secrets/:key, sealed with the
+ * KEK, shown only as the last four characters. No x-env pin: the panel's value wins and the environment is the
+ * fallback, read at use time by stripeSettings().
+ */
+const CARDS_SCHEMA = {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    title: 'Card payments',
+    description: 'The card processor that takes payments for Balance top-ups, purchases and subscriptions (Stripe). Change these when you connect your Stripe account, rotate a key, or are ready to take real payments.',
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+        'stripe.secret_key': {
+            type: 'string', minLength: 8, maxLength: 512, pattern: '^(sk|rk)_(test|live)_[A-Za-z0-9]+$',
+            title: 'Stripe secret key', 'x-group': CARDS_GROUP, 'x-example': 'sk_live_…',
+            description: 'The key Billing uses to open Stripe checkouts and cancel subscriptions. Without it (and the webhook signing secret) card payments stay off. A test key (sk_test_…) charges no real card.',
+            'x-owner-input': {
+                group: 'money',
+                unlocks: 'Lets people pay by card: Balance top-ups, purchases and subscriptions open a Stripe checkout. Without it card payments stay off.',
+                get_it_at: 'https://dashboard.stripe.com/apikeys',
+                get_it_how: 'Copy the Secret key (sk_live_… for real payments, sk_test_… to try it), or create a restricted key that may write Checkout Sessions and Subscriptions.',
+                test: true,
+            },
+            'x-required-for': 'Card payments',
+        },
+        'stripe.publishable_key': {
+            type: 'string', minLength: 8, maxLength: 512, pattern: '^pk_(test|live)_[A-Za-z0-9]+$',
+            title: 'Stripe publishable key', 'x-group': CARDS_GROUP, 'x-example': 'pk_live_…',
+            description: 'The public key a page needs to show Stripe\'s card form inside OpenVibe. Billing\'s checkout sends people to Stripe\'s own page today, so nothing needs it yet; it is kept for an in-page form.',
+            'x-owner-input': {
+                group: 'money',
+                unlocks: 'Lets a page show Stripe\'s card form inside OpenVibe instead of sending people to Stripe\'s checkout page. Optional: today\'s checkout works without it.',
+                get_it_at: 'https://dashboard.stripe.com/apikeys',
+                get_it_how: 'Copy the Publishable key from the same page as the secret key, in the same mode (pk_live_… with sk_live_…).',
+                test: false,
+            },
+        },
+        'stripe.webhook_secret': {
+            type: 'string', minLength: 8, maxLength: 512, pattern: '^whsec_[A-Za-z0-9+/=_-]+$',
+            title: 'Stripe webhook signing secret', 'x-group': CARDS_GROUP, 'x-example': 'whsec_…',
+            description: 'The secret Stripe signs its payment notices with, so Billing only believes notices that really come from Stripe. Without it card payments stay off, because a paid checkout could never be confirmed.',
+            'x-owner-input': {
+                group: 'money',
+                unlocks: 'Lets Billing confirm card payments: Stripe tells Billing when a checkout is paid, refunded or disputed. Without it card payments stay off.',
+                get_it_at: 'https://dashboard.stripe.com/webhooks',
+                get_it_how: 'Add an endpoint for https://billing.openvibe.network/webhooks/stripe with the checkout, invoice, charge and subscription events, then reveal its Signing secret (whsec_…).',
+                test: true,
+            },
+            'x-required-for': 'Card payments',
+        },
+        'stripe.live': {
+            type: 'boolean', title: 'Take real card payments', 'x-group': CARDS_GROUP, 'x-danger': true,
+            description: 'On: only a live key (sk_live_…) is used and real cards are charged. Off: only a test key (sk_test_…) is used and no real card is charged. Not set (the default): the key decides, as before this switch. Turning it off stops real charges at once.',
+            'x-owner-input': {
+                group: 'money',
+                unlocks: 'Decides whether card payments charge real cards. Turn it on once a test payment has gone through; turn it off to stop real charges at once.',
+                get_it_at: 'https://dashboard.stripe.com/account/onboarding',
+                get_it_how: 'Finish Stripe\'s account activation first (business details and a bank account), or Stripe refuses live payments.',
+                test: false,
+            },
+        },
+    },
+};
+const CARD_SECRET_KEYS = new Set(['stripe.secret_key', 'stripe.publishable_key', 'stripe.webhook_secret']);
+const cardsClassify = (key) => (CARD_SECRET_KEYS.has(key) ? 'secret' : 'internal');
+
+/**
+ * The Stripe settings the adapter reads at use time: the panel's value when one is set, else the environment's
+ * (`base`, the loader's STRIPE_* values). `live` false or true makes a key of the other mode unusable (the adapter
+ * stays off and says why); unset keeps today's behaviour.
+ */
+function stripeSettings(store, base = {}) {
+    const pick = (key, fallback) => {
+        const v = store ? store.get(key) : undefined;
+        return typeof v === 'string' && v ? { value: v, source: 'vault' } : { value: fallback || '', source: fallback ? 'env' : null };
+    };
+    const out = {
+        apiBase: base.apiBase,
+        toleranceSec: base.toleranceSec,
+        get secretKey() { return pick('stripe.secret_key', base.secretKey).value; },
+        get publishableKey() { return pick('stripe.publishable_key', base.publishableKey).value; },
+        get webhookSecret() { return pick('stripe.webhook_secret', base.webhookSecret).value; },
+        get live() { const v = store ? store.get('stripe.live') : undefined; return typeof v === 'boolean' ? v : null; },
+        /** Where a value comes from (vault, env or null) and the env name it falls back to. */
+        source(key) {
+            const env = { 'stripe.secret_key': 'STRIPE_SECRET_KEY', 'stripe.publishable_key': 'STRIPE_PUBLISHABLE_KEY', 'stripe.webhook_secret': 'STRIPE_WEBHOOK_SECRET' }[key];
+            const fallback = { 'stripe.secret_key': base.secretKey, 'stripe.publishable_key': base.publishableKey, 'stripe.webhook_secret': base.webhookSecret }[key];
+            return { ...pick(key, fallback), env };
+        },
+        /** null when the key may be used, else the reason it may not (a key of the other mode than the live switch). */
+        get modeProblem() {
+            const live = out.live;
+            const key = out.secretKey;
+            if (live === null || !key) return null;
+            const isLive = /^(sk|rk)_live_/.test(key);
+            if (live && !isLive) return 'the live switch is on but the secret key is a test key';
+            if (!live && isLive) return 'the live switch is off but the secret key is a live key';
+            return null;
+        },
+    };
+    return out;
+}
 
 const AMOUNT_RE = /^[0-9]+$/;
 
@@ -241,7 +355,22 @@ async function createVibesConfig({ db, env, log = console, schema = VIBES_SCHEMA
     });
 }
 
+/** The D11 `billing.cards` namespace: the card processor's keys (sealed) and the live switch. */
+async function createCardsConfig({ db, env, log = console, schema = CARDS_SCHEMA }) {
+    const store = await config.createConfigStore({
+        db, service: SERVICE, namespace: CARDS_NAMESPACE, schema,
+        env: env || {},
+        classify: cardsClassify,
+        onChange: async (change) => await auditChange(db, { ...change, namespace: CARDS_NAMESPACE, service: SERVICE }, log),
+        log,
+    });
+    if (store.sealed) {
+        try { await store.reseal(); } catch (err) { log.warn(`[config] ${CARDS_NAMESPACE} reseal at boot failed: ${err && err.message ? err.message.split('\n')[0] : 'unknown error'}`); }
+    }
+    return store;
+}
+
 module.exports = {
-    SERVICE, NAMESPACE, VIBES_NAMESPACE, SCHEMA, VIBES_SCHEMA, parseAmounts, storeEnv, valuesFromEnv, applyValues,
-    vibesStoreEnv, applyVibesValues, createBillingConfig, createVibesConfig, auditChange,
+    SERVICE, NAMESPACE, VIBES_NAMESPACE, CARDS_NAMESPACE, SCHEMA, VIBES_SCHEMA, CARDS_SCHEMA, parseAmounts, storeEnv, valuesFromEnv, applyValues,
+    vibesStoreEnv, applyVibesValues, createBillingConfig, createVibesConfig, createCardsConfig, stripeSettings, auditChange,
 };

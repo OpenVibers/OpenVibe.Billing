@@ -6,8 +6,9 @@
  * Only Network's service token holds `billing.config.manage`; every route is guarded by it (server/api/auth.js).
  * The acting subject is the owner's usr_ id in X-OV-Subject, and only for a caller that holds the capability;
  * X-OV-Fresh: 1 is required for a write to an x-danger key, so a stale session can never turn Balance or the
- * top-up switch on. Both namespaces (`billing.credits`, `billing.vibes`) are served here; their onChange writes
- * Billing's audit line (server/config-store.js).
+ * top-up switch on. The namespaces (`billing.credits`, `billing.vibes`, `billing.cards`) are served here; their
+ * onChange writes Billing's audit line (server/config-store.js). POST /internal/config/:namespace/test/:key is the
+ * Setup tab's Test button for the Stripe keys (server/owner-inputs.js).
  *
  * The paths are full paths (the router is mounted at the app root) so the capability declaration's
  * implementedBy list points at real routes.
@@ -15,6 +16,7 @@
 const express = require('express');
 const { capabilities } = require('openvibe-contracts');
 const { adminRoutes } = require('openvibe-shared/config');
+const { testRoute, testStripeKey, testStripeWebhook } = require('./owner-inputs');
 
 const CAP = 'billing.config.manage';
 const USER_SUBJECT_RE = /^usr_[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -23,7 +25,7 @@ function internalConfigRouter({ ctx, auth }) {
     const r = express.Router();
     // The store is the only caller of the config routes, so its body parser needs to run only on these paths.
     r.use('/internal/config', express.json({ limit: '64kb' }));
-    const routes = adminRoutes([ctx.configStore, ctx.vibesConfigStore], {
+    const routes = adminRoutes([ctx.configStore, ctx.vibesConfigStore, ...(ctx.cardsConfigStore ? [ctx.cardsConfigStore] : [])], {
         requireAdmin: auth.needs(CAP),
         basePath: '/internal/config',
         actor: (req) => {
@@ -42,6 +44,20 @@ function internalConfigRouter({ ctx, auth }) {
     r.post('/internal/config/:namespace/rollback', routes.rollback);
     r.put('/internal/config/:namespace/secrets/:key', routes.secretPut);
     r.delete('/internal/config/:namespace/secrets/:key', routes.secretDelete);
+    // The Setup tab's Test button (owner-setup design): one read-only Stripe call with the stored key, one line back.
+    r.post('/internal/config/:namespace/test/:key', auth.needs(CAP), testRoute({
+        log: ctx.log,
+        now: ctx.now,
+        resolve: (namespace, key) => {
+            const stripe = ctx.config.providers.stripe;
+            if (namespace !== 'billing.cards' || !stripe || typeof stripe.source !== 'function') return null;
+            if (key !== 'stripe.secret_key' && key !== 'stripe.webhook_secret') return null;
+            return stripe.source(key);
+        },
+        run: (namespace, key, value) => (key === 'stripe.secret_key'
+            ? testStripeKey(ctx.config.providers.stripe, value, { fetchImpl: ctx.fetchImpl || globalThis.fetch })
+            : testStripeWebhook(ctx.config.providers.stripe, value, { fetchImpl: ctx.fetchImpl || globalThis.fetch })),
+    }));
     return r;
 }
 
