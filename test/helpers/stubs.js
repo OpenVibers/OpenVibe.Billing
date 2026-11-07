@@ -212,6 +212,16 @@ async function startStripe() {
         calls.push({ method: req.method, url: req.url, body: Object.fromEntries(new URLSearchParams(raw)), auth: req.headers.authorization });
         if (state.fail) return send(res, 500, { error: { message: 'stripe is down' } });
         if (req.url === '/checkout/sessions') return send(res, 200, { id: `cs_test_${calls.length}`, url: `https://checkout.stripe.test/cs_${calls.length}` });
+        // The owner-setup test hook's read-only calls: the account for a key, and the webhook endpoints.
+        const bearer = String(req.headers.authorization || '').replace(/^Bearer /, '');
+        if (req.method === 'GET' && req.url === '/account') {
+            if (!(state.goodKeys || ['sk_test_x']).includes(bearer)) return send(res, 401, { error: { message: `Invalid API Key provided: ${bearer}` } });
+            return send(res, 200, { id: 'acct_TEST1', charges_enabled: true, settings: { dashboard: { display_name: 'OpenVibe test' } } });
+        }
+        if (req.method === 'GET' && req.url.startsWith('/webhook_endpoints')) {
+            if (!(state.goodKeys || ['sk_test_x']).includes(bearer)) return send(res, 401, { error: { message: `Invalid API Key provided: ${bearer}` } });
+            return send(res, 200, { data: state.endpoints || [{ id: 'we_1', status: 'enabled', url: 'https://billing.openvibe.network/webhooks/stripe' }] });
+        }
         const m = req.url.match(/^\/subscriptions\/([^/]+)$/);
         if (m) return send(res, 200, { id: decodeURIComponent(m[1]), cancel_at_period_end: true });
         send(res, 404, { error: { message: 'no route' } });

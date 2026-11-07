@@ -1,8 +1,11 @@
 'use strict';
 
 /**
- * Stripe adapter (DISABLED unless STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set; card rails
- * are off in production). Ported from Live server/monetization/payments.js, with what Live lacked:
+ * Stripe adapter (DISABLED unless a secret key and a webhook signing secret are set; card rails
+ * are off in production). The keys are read at use time from `cfg` (stripeSettings in config-store.js:
+ * the owner's sealed billing.cards value when set, else STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET), so a key
+ * entered in the admin panel takes effect without a restart. With the live switch set, a key of the other
+ * mode leaves the adapter off. Ported from Live server/monetization/payments.js, with what Live lacked:
  *
  *   checkout.session.completed  mode=payment → purchase settle (receipt stripe:<payment_intent>);
  *                               mode=subscription → links the Stripe subscription to the intent
@@ -18,7 +21,7 @@ const intents = require('../ops/intents');
 const subscriptions = require('../ops/subscriptions');
 
 function createStripe(cfg, { fetchImpl = globalThis.fetch } = {}) {
-    const enabled = !!(cfg.secretKey && cfg.webhookSecret);
+    const isEnabled = () => !!(cfg.secretKey && cfg.webhookSecret && !cfg.modeProblem);
 
     async function api(method, path, params) {
         const res = await fetchImpl(`${cfg.apiBase}${path}`, {
@@ -155,7 +158,7 @@ function createStripe(cfg, { fetchImpl = globalThis.fetch } = {}) {
         return await api('POST', `/subscriptions/${encodeURIComponent(stripeSubscriptionId)}`, p);
     }
 
-    return { name: 'stripe', enabled, verify, parse, interpret, createCheckout, cancelAtPeriodEnd };
+    return { name: 'stripe', get enabled() { return isEnabled(); }, verify, parse, interpret, createCheckout, cancelAtPeriodEnd };
 }
 
 module.exports = { createStripe };

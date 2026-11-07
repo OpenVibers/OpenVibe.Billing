@@ -26,7 +26,7 @@ const { createKeyProvider, createIdentity, createProjects, createApps } = requir
 const { createAuth } = require('./api/auth');
 const { v1Router } = require('./api/v1');
 const { internalRouter } = require('./api/internal');
-const { createBillingConfig, createVibesConfig, applyValues, applyVibesValues } = require('./config-store');
+const { createBillingConfig, createVibesConfig, createCardsConfig, stripeSettings, applyValues, applyVibesValues } = require('./config-store');
 const { internalConfigRouter } = require('./internal-config');
 const { createVibesWebhooks } = require('./ops/vibes-webhooks');
 const { createActorLimits } = require('./api/actor-limits');
@@ -57,7 +57,7 @@ async function createApp(opts = {}) {
     });
     // ctx.env is the raw environment the owner-settings store reads its x-env pins from; the service reads the
     // settings themselves through ctx.configStore (D11). Tests pass their own env through here.
-    const ctx = { db, config, env: opts.env || process.env, rates: createRates(config.rates), now: opts.now || (() => Date.now()), network: identity, log, outbox };
+    const ctx = { db, config, env: opts.env || process.env, rates: createRates(config.rates), now: opts.now || (() => Date.now()), network: identity, log, outbox, fetchImpl };
     // D11 owner settings: `billing.credits` is the source of the Balance switches, the top-up terms and the
     // hold lease; `billing.vibes` holds the Vibes Pay limits and the Get Vibes with Balance switch. The env pins
     // keep today's variables winning while they are set; a change applies live.
@@ -65,6 +65,10 @@ async function createApp(opts = {}) {
     applyValues(config, ctx.configStore.get());
     ctx.vibesConfigStore = await createVibesConfig({ db, env: ctx.env, log, onActivate: (values) => applyVibesValues(config, values) });
     applyVibesValues(config, ctx.vibesConfigStore.get());
+    // The card processor's keys and live switch (`billing.cards`, owner-setup design): the Stripe adapter reads them at
+    // use time, the panel's sealed value first and the environment's STRIPE_* as the fallback.
+    ctx.cardsConfigStore = await createCardsConfig({ db, env: ctx.env, log });
+    config.providers.stripe = stripeSettings(ctx.cardsConfigStore, config.providers.stripe);
     // Network's project-membership reads (D12): the projects a person administers and one role check.
     ctx.projects = opts.projects || createProjects(config, { fetchImpl });
     // Network's app registry (D12 Vibes Pay): the app name/icon on the pay sheet. Best effort; Network's own

@@ -137,7 +137,9 @@ function loadConfig(env = process.env) {
                 maxSkewMs: int(env.POWERCHAT_MAX_SKEW_MS, 15 * 60 * 1000),
             },
             stripe: {
+                // The environment's values; the owner's billing.cards namespace wins when set (config-store.js stripeSettings).
                 secretKey: env.STRIPE_SECRET_KEY || '',
+                publishableKey: env.STRIPE_PUBLISHABLE_KEY || '',
                 webhookSecret: env.STRIPE_WEBHOOK_SECRET || '',
                 apiBase: trim(env.STRIPE_API_BASE || 'https://api.stripe.com/v1'),
                 toleranceSec: int(env.STRIPE_TOLERANCE_SEC, 300),

@@ -50,8 +50,9 @@ const KEK = 'k1:' + crypto.randomBytes(32).toString('base64');
         assert.deepStrictEqual([p.topup_amounts_cents.type, p.topup_amounts_cents.items.type, p.topup_amounts_cents['x-env'], p.topup_amounts_cents['x-danger']], ['array', 'integer', 'BILLING_CREDITS_TOPUP_AMOUNTS_CENTS', true]);
         assert.deepStrictEqual([p.topup_fee_bps.minimum, p.topup_fee_bps.maximum, p.topup_fee_bps['x-danger']], [0, 10_000, true]);
         assert.strictEqual(p.hold_lease_seconds['x-env'], 'BILLING_INFERENCE_LEASE_SECONDS');
-        // The brief's x-unit is "seconds"; Shared 4.110.0 only accepts nano_usd, ms and bps, so the unit is in the title.
-        assert.strictEqual(p.hold_lease_seconds['x-unit'], undefined);
+        // Shared 4.122.0 accepts the seconds unit; the fee is in basis points.
+        assert.strictEqual(p.hold_lease_seconds['x-unit'], 'seconds');
+        assert.strictEqual(p.topup_fee_bps['x-unit'], 'bps');
         assert.strictEqual(t.ctx.config.credits.enabled, false);
         const { topupTerms } = require('../server/ops/credits');
         assert.strictEqual(topupTerms(t.ctx).configured, false);
