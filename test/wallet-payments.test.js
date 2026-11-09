@@ -83,6 +83,12 @@ const { checkout } = require('../server/ops/wallet-checkout');
         await assert.rejects(checkout(t.ctx, adapters, alice.id, 'vibes', body), (e) => e.code === 'billing.checkout_pending');
         assert.strictEqual(calls, 1);
     });
+    await check('the Live owner switch also refuses store charges and checkouts', async () => {
+        t.network.state.moneyFrozen = true;
+        await assert.rejects(pay(order('vibes', 1)), (e) => e.code === 'billing.frozen');
+        await assert.rejects(checkout(t.ctx, {}, alice.id, 'vibes', { provider: 'stripe', vibes: 100, idempotency_key: 'owner-freeze-test' }), (e) => e.code === 'billing.frozen');
+        t.network.state.moneyFrozen = false;
+    });
     await check('freeze refuses new store charges and checkouts', async () => {
         await t.call('POST', '/api/v1/admin/freeze', { body: { on: true, reason: 'wallet test' } });
         const before = debited.size;

@@ -1,7 +1,7 @@
 'use strict';
 
 const { balance } = require('../ledger');
-const { A, fail, isFrozen } = require('./common');
+const { A, fail } = require('./common');
 const { presentBalance } = require('./balance');
 const { activity } = require('./activity');
 
@@ -24,7 +24,7 @@ async function wallet(ctx, subject, authorization) {
     const [coins, history, vibes, personal, recent, frozen, ai] = await Promise.all([
         coinsRead(ctx, authorization, ''), coinsRead(ctx, authorization, '/history?limit=5&offset=0'),
         balance(ctx.db, A.credit(subject)), presentBalance(ctx, subject), activity(ctx, subject, { limit: 5 }),
-        isFrozen(ctx.db),
+        require('./wallet-freeze').walletFrozen(ctx),
         ctx.db.prepare(`SELECT 1 AS used FROM credit_settlements s JOIN credit_holds h ON h.id = s.hold_id
             WHERE s.subject = ? AND h.service = 'ai' AND s.created_at >= ? LIMIT 1`)
             .get(subject, new Date(new Date(ctx.now()).toISOString().slice(0, 7) + '-01T00:00:00Z').toISOString()),

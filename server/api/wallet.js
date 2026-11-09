@@ -14,7 +14,7 @@ function walletRouter({ ctx, config, keys, limits, adapters }) {
         const origin = req.get('origin');
         res.set({ 'Cache-Control': 'private, no-store', Vary: 'Origin' });
         if (origin && firstPartyOrigins().has(origin)) res.set({
-            'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key',
+            'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Headers': 'Authorization, Content-Type, Traceparent, X-OpenVibe-Request-Id, Idempotency-Key',
             'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Max-Age': '600',
         });
         if (req.method === 'OPTIONS') return res.sendStatus(204);

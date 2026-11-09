@@ -27,7 +27,7 @@ async function checkout(ctx, adapters, subject, kind, input) {
         fail(409, 'billing.checkout_pending', 'The original checkout is being confirmed. Do not start another payment.');
     }
     if (ctx.config.authority !== 'billing') fail(409, 'billing.not_authoritative', 'Billing is not the active ledger');
-    await assertNotFrozen(ctx);
+    await require('./wallet-freeze').assertWalletWritable(ctx);
     const adapter = adapters[provider];
     if (!adapter || !adapter.enabled || !adapter.createCheckout) fail(409, 'billing.provider_disabled', 'Choose an available checkout provider');
     const available = offers(ctx, adapters);

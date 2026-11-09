@@ -9,6 +9,7 @@ const { boot, fund, check, done } = require('./helpers/app');
     const token = t.network.signUser({ subject_id: alice.id });
     let coins = 0, history = [], down = false, requests = 0;
     t.ctx.fetchImpl = async (url, opts) => {
+        if (url.endsWith('/api/payments/wallet-state')) return { ok: true, json: async () => ({ money_writes_frozen: false }) };
         requests++;
         assert.strictEqual(opts.headers.Authorization, `Bearer ${token}`);
         assert.strictEqual(opts.credentials, 'omit');

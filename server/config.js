@@ -198,6 +198,7 @@ function loadConfig(env = process.env) {
             // fails reconciliation: the provider was paid and the ledger does not show it yet.
             staleReceiptMin: int(env.BILLING_RECONCILE_STALE_RECEIPT_MIN, 60),
         },
+        liveUrl: String(env.LIVE_URL || 'https://openvibe.live').replace(/\/+$/, ''),
         inventoryUrl: String(env.INVENTORY_URL || 'https://inventory.openvibe.network').replace(/\/+$/, ''),
 
         credits: {

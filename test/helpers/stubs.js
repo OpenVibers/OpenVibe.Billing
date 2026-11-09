@@ -111,6 +111,7 @@ async function startNetwork() {
     }
 
     const server = http.createServer(async (req, res) => {
+        if (req.url === '/api/payments/wallet-state') return send(res, 200, { money_writes_frozen: !!state.moneyFrozen });
         const raw = await readBody(req);
         if (req.url === '/api/.well-known/jwks') {
             // Both keys, as Network publishes them: the RS256 session key and the ES256 assertion key.

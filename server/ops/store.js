@@ -17,7 +17,7 @@ function createStoreSpender(ctx) {
         if (saved && saved.subject !== subject) fail(404, 'billing.purchase_not_found', 'No such purchase');
         if (saved && saved.payment_id) return present(saved);
         if (ctx.config.authority !== 'billing') fail(409, 'billing.not_authoritative', 'Billing is not the active ledger');
-        await assertNotFrozen(ctx);
+        await require('./wallet-freeze').assertWalletWritable(ctx);
         if (!saved) {
             let quote;
             try {
