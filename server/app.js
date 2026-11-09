@@ -151,7 +151,16 @@ async function createApp(opts = {}) {
     app.use('/api/me', require('./api/me').meRouter({ ctx, config, keys, limits, adapters }));
 
     // The billing policy is public and indexable; the staff console and the API are not.
-    app.get(['/checkout/success', '/checkout/cancel'], (_req, res) => res.redirect(303, 'https://openvibe.network/wallet'));
+    app.get('/checkout/cancel', (_req, res) => res.redirect(303, 'https://openvibe.network/wallet'));
+    app.get('/checkout/success', async (req, res) => {
+        res.set('Cache-Control', 'no-store');
+        try {
+            await require('./ops/wallet-checkout').completeReturn(ctx, adapters, req.query.token);
+            return res.redirect(303, 'https://openvibe.network/wallet');
+        } catch (e) {
+            return res.status(e.status || 502).type('text').send('Your payment is not confirmed yet. Reload this page to check the same payment. Do not start another payment.');
+        }
+    });
     app.get('/robots.txt', (req, res) => res.type('text/plain').send('User-agent: *\nAllow: /policy\nDisallow: /\n'));
     app.use(require('./policy').policyRouter({ config }));
     app.use(consoleRouter({ ctx, adapters, keys, fetchImpl }));

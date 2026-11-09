@@ -6,6 +6,8 @@
 
 `POST /api/v1/me/store/spend` takes only `{purchase_id}`. Billing obtains the immutable order from configured Inventory with the person's bearer. Vibes spending and its receipt commit atomically, with funds and freeze checks. OpenCoins debits go to Network with Billing's service token and a deterministic order key; an uncertain reply is recovered by replaying that key. Inventory grants only after matching the confirmed payment. Ledger writes stay in their current authoritative service; Inventory has no balance copy.
 
+PayPal returns to Billing, which captures the approved server-owned order with a stable provider request key and settles through the existing receipt path. Reloading a completed return does not capture again. Other providers settle through their verified webhooks. A failed return asks the buyer to check the same payment, never to create another one.
+
 The owner switch is read from LIVE_URL (default https://openvibe.live) at /api/payments/wallet-state. If that read fails, balances remain readable and wallet writes pause.
 
 Rollout prerequisites: `INVENTORY_URL` defaults to Inventory's public origin. Network must grant Billing `network.coins.debit` for audience `openvibe.network`, scoped to app `billing`, before OpenCoins purchases work. The existing owner settings must enable and configure checkout providers and top-ups. Consuming sites must allow `https://billing.openvibe.network` and `https://inventory.openvibe.network` in connect-src when pinning the Shared wallet release. Nothing here changes production grants, prices, settings or deployment.

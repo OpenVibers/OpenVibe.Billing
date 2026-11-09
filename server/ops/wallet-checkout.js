@@ -1,6 +1,6 @@
 'use strict';
 const crypto = require('crypto');
-const { fail, assertNotFrozen, positiveInt } = require('./common');
+const { fail, positiveInt } = require('./common');
 const { idempotencyKey } = require('./balance');
 const { topupTerms } = require('./credits');
 const intents = require('./intents');
@@ -53,4 +53,19 @@ async function checkout(ctx, adapters, subject, kind, input) {
     return result;
 }
 
-module.exports = { offers, checkout };
+async function completeReturn(ctx, adapters, token) {
+    if (token == null) return; // Providers with webhook settlement need no browser capture.
+    if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{6,128}$/.test(token)) fail(422, 'billing.invalid_order', 'Invalid payment return');
+    const intent = await intents.findByProviderRef(ctx.db, 'paypal', token);
+    if (!intent) fail(404, 'billing.intent_not_found', 'Payment order not found');
+    if (intent.settled_txn) return;
+    await require('./wallet-freeze').assertWalletWritable(ctx);
+    const adapter = adapters.paypal;
+    if (!adapter || !adapter.enabled || !adapter.capture) fail(409, 'billing.provider_disabled', 'PayPal is unavailable');
+    // The token only selects a server-owned intent. PayPal verifies the buyer's approval and the paid amount.
+    const plan = await adapter.capture(ctx, intent);
+    if (!['purchase', 'credits_topup'].includes(plan.effect)) fail(409, 'billing.payment_pending', 'Payment is not confirmed yet');
+    await require('../ledger').money(ctx.db, () => require('../providers').applyPlan(ctx, plan, { id: null }));
+}
+
+module.exports = { offers, checkout, completeReturn };
