@@ -145,6 +145,7 @@ async function createApp(opts = {}) {
     // The registry carries the counters: the number of per-person calls that still come without an
     // assertion is what the flag plan waits for.
     const subjectAssertion = require('./api/subject-assertion').createSubjectAssertion({ config, log, registry: metrics.registry });
+    app.use('/api/v1/me', require('./api/wallet').walletRouter({ ctx, config, keys, limits, adapters }));
     app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters, limits, subjectAssertion }));
     // A signed-in person's own Vibes, for the shared navbar on every OpenVibe site (api/me.js; user tokens, CORS for owned sites).
     app.use('/api/me', require('./api/me').meRouter({ ctx, config, keys, limits, adapters }));
