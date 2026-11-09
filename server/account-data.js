@@ -19,6 +19,8 @@ const { createAccountData, TOPICS } = require('openvibe-sdk/account-data');
 const ledger = 'money records: the ledger must still balance and reconcile, and payments are records the law requires us to keep';
 
 const TABLES = [
+    { table: 'wallet_store_payments', subject: 'subject', file: 'store-payments.json', columns: ['purchase_id', 'currency', 'amount', 'item_id', 'name', 'payment_id', 'created_at'], erase: { keep: ledger } },
+    { table: 'wallet_checkouts', subject: 'subject', file: 'wallet-checkouts.json', columns: ['idempotency_key', 'created_at'], erase: { keep: ledger } },
     { table: 'transactions', subject: 'from_subject', file: 'transactions-sent.json', columns: ['id', 'type', 'status', 'from_subject', 'to_subject', 'provider', 'reverses_txn', 'test', 'metadata', 'created_at'], erase: { keep: ledger } },
     { table: 'transactions', subject: 'to_subject', file: 'transactions-received.json', columns: ['id', 'type', 'status', 'from_subject', 'to_subject', 'provider', 'reverses_txn', 'test', 'metadata', 'created_at'], erase: { keep: ledger }, kind: 'transactions_received' },
     { table: 'payment_intents', subject: 'subject', file: 'checkouts.json', columns: ['id', 'provider', 'kind', 'streamer_subject', 'amount_cents', 'fee_cents', 'bits', 'route', 'auto_renew', 'status', 'settled_txn', 'created_at', 'updated_at'], erase: { keep: ledger } },

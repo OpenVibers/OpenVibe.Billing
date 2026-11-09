@@ -198,6 +198,8 @@ function loadConfig(env = process.env) {
             // fails reconciliation: the provider was paid and the ledger does not show it yet.
             staleReceiptMin: int(env.BILLING_RECONCILE_STALE_RECEIPT_MIN, 60),
         },
+        inventoryUrl: String(env.INVENTORY_URL || 'https://inventory.openvibe.network').replace(/\/+$/, ''),
+
         credits: {
             // AI Exchange D2/D12: high-precision Balance ledger. Off by default; no inference money moves without it.
             enabled: bool(env.BILLING_CREDITS),

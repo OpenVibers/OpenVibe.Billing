@@ -55,6 +55,7 @@ function labelFor(t, { settlement, projectName, creatorName }) {
         const name = app ? String(app).slice(0, APP_NAME_MAX) : null;
         return { label: name ? `Paid ${name}` : 'Paid an app', detail: m.description ? String(m.description).slice(0, 120) : '' };
     }
+    if (t.type === 'purchase' && m.store_purchase) return { label: `Bought ${String(m.item_name || 'an item').slice(0, 120)}`, detail: 'Inventory' };
     if (t.type === 'purchase') {
         const n = Number(m.bits || m.vibes || m.amount_bits || 0);
         return { label: 'Got Vibes', detail: n ? `${n} Vibes` : '' };
