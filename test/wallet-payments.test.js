@@ -75,6 +75,13 @@ const { checkout } = require('../server/ops/wallet-checkout');
         assert.strictEqual(r.status, 200, r.text); assert.strictEqual(r.json.intent.subject.id, alice.id);
         assert.strictEqual(r.json.intent.project_id, null);
     });
+    await check('the wallet names each checkout provider and its hosted checkout host', async () => {
+        const { offers } = require('../server/ops/wallet-checkout');
+        const providers = offers(t.ctx, t.app.locals.adapters).providers;
+        const stripe = providers.find((p) => p.name === 'stripe');
+        assert.deepStrictEqual(stripe, { name: 'stripe', hosts: ['checkout.stripe.com'] }, 'the sheet may follow only this host');
+        assert(providers.every((p) => Array.isArray(p.hosts)), 'every provider names its hosts');
+    });
     await check('an uncertain provider response leaves one durable claim, never a second checkout', async () => {
         let calls = 0;
         const adapters = { stripe: { name: 'stripe', enabled: true, createCheckout: async () => { calls++; throw new Error('lost reply'); } } };

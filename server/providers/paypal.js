@@ -108,7 +108,9 @@ function createPaypal(cfg, { fetchImpl = globalThis.fetch } = {}) {
         return await settlePlan(ctx, { ...cap, custom_id: cap.custom_id || intent.id }, `paypal-capture:${cap.id}`, { principal: 'provider:paypal', capture: cap.id });
     }
 
-    return { name: 'paypal', enabled, verify, parse, interpret, createCheckout, capture };
+    // The approval page the wallet may follow to, matching the environment the API base names.
+    const checkoutHosts = /sandbox/i.test(String(cfg.apiBase || '')) ? ['www.sandbox.paypal.com'] : ['www.paypal.com'];
+    return { name: 'paypal', enabled, verify, parse, interpret, createCheckout, capture, checkoutHosts };
 }
 
 module.exports = { createPaypal };

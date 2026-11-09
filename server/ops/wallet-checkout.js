@@ -8,7 +8,9 @@ const intents = require('./intents');
 function offers(ctx, adapters) {
     const terms = topupTerms(ctx);
     return {
-        providers: Object.values(adapters).filter((a) => a.enabled && a.createCheckout).map((a) => a.name),
+        // Each provider names the hosts its hosted checkout may use; the wallet follows a checkout_url only to one
+        // of them (or to Billing itself) and refuses anything else.
+        providers: Object.values(adapters).filter((a) => a.enabled && a.createCheckout).map((a) => ({ name: a.name, hosts: Array.isArray(a.checkoutHosts) ? a.checkoutHosts : [] })),
         vibes: { minimum: ctx.rates.minPurchaseBits, maximum: ctx.rates.maxBits, price_tiers: ctx.rates.priceTiers },
         topup: { enabled: !!(ctx.config.credits.enabled && terms.enabled && terms.configured),
             amounts_cents: terms.configured ? terms.amountsCents : [], fee_bps: terms.feeBps },
