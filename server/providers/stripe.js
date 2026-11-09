@@ -158,7 +158,9 @@ function createStripe(cfg, { fetchImpl = globalThis.fetch } = {}) {
         return await api('POST', `/subscriptions/${encodeURIComponent(stripeSubscriptionId)}`, p);
     }
 
-    return { name: 'stripe', get enabled() { return isEnabled(); }, verify, parse, interpret, createCheckout, cancelAtPeriodEnd };
+    // The hosted checkout page the wallet may follow to (the session's url), never the API host.
+    const checkoutHosts = ['checkout.stripe.com'];
+    return { name: 'stripe', get enabled() { return isEnabled(); }, verify, parse, interpret, createCheckout, cancelAtPeriodEnd, checkoutHosts };
 }
 
 module.exports = { createStripe };

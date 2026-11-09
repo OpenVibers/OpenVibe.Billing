@@ -78,7 +78,9 @@ function createCcbill(cfg) {
         return { url: `https://api.ccbill.com/wap-frontflex/flexforms/${cfg.flexformId}?${qs}`, providerRef: null };
     }
 
-    return { name: 'ccbill', enabled, verify, parse, interpret, createCheckout };
+    // The hosted flexform page the wallet may follow to.
+    const checkoutHosts = ['api.ccbill.com'];
+    return { name: 'ccbill', enabled, verify, parse, interpret, createCheckout, checkoutHosts };
 }
 
 module.exports = { createCcbill };

@@ -18,7 +18,7 @@ async function boot(opts = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'billing-test-'));
     const env = {
         NODE_ENV: 'test',
-        OV_NETWORK_INTERNAL_URL: network.url,
+        OV_NETWORK_INTERNAL_URL: network.url, LIVE_URL: network.url,
         OV_NETWORK_ISSUER: network.url,
         OV_OAUTH_CLIENT_ID: 'billing',
         OV_OAUTH_CLIENT_SECRET: 'shh',

@@ -69,7 +69,9 @@ function createNowpayments(cfg, { fetchImpl = globalThis.fetch } = {}) {
         return { url: j.invoice_url, providerRef: String(j.id || j.invoice_id || '') || null };
     }
 
-    return { name: 'nowpayments', enabled, verify, parse, interpret, createCheckout };
+    // The hosted invoice page the wallet may follow to (invoice_url), never the API host.
+    const checkoutHosts = ['nowpayments.io', 'www.nowpayments.io'];
+    return { name: 'nowpayments', enabled, verify, parse, interpret, createCheckout, checkoutHosts };
 }
 
 module.exports = { createNowpayments, sortObject };

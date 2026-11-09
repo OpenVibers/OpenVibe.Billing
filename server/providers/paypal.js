@@ -101,14 +101,16 @@ function createPaypal(cfg, { fetchImpl = globalThis.fetch } = {}) {
     /** Capture an approved order; returns a settlement plan built from the capture. */
     async function capture(ctx, intent) {
         const j = await json(`${cfg.apiBase}/v2/checkout/orders/${encodeURIComponent(intent.provider_ref)}/capture`, {
-            method: 'POST', headers: { Authorization: `Bearer ${await token()}`, 'Content-Type': 'application/json' }, body: '{}',
+            method: 'POST', headers: { Authorization: `Bearer ${await token()}`, 'Content-Type': 'application/json', 'PayPal-Request-Id': intent.id }, body: '{}',
         });
         const cap = j.purchase_units && j.purchase_units[0] && j.purchase_units[0].payments && j.purchase_units[0].payments.captures && j.purchase_units[0].payments.captures[0];
         if (j.status !== 'COMPLETED' || !cap) return { effect: 'none', reason: `order ${j.status}` };
         return await settlePlan(ctx, { ...cap, custom_id: cap.custom_id || intent.id }, `paypal-capture:${cap.id}`, { principal: 'provider:paypal', capture: cap.id });
     }
 
-    return { name: 'paypal', enabled, verify, parse, interpret, createCheckout, capture };
+    // The approval page the wallet may follow to, matching the environment the API base names.
+    const checkoutHosts = /sandbox/i.test(String(cfg.apiBase || '')) ? ['www.sandbox.paypal.com'] : ['www.paypal.com'];
+    return { name: 'paypal', enabled, verify, parse, interpret, createCheckout, capture, checkoutHosts };
 }
 
 module.exports = { createPaypal };

@@ -145,11 +145,22 @@ async function createApp(opts = {}) {
     // The registry carries the counters: the number of per-person calls that still come without an
     // assertion is what the flag plan waits for.
     const subjectAssertion = require('./api/subject-assertion').createSubjectAssertion({ config, log, registry: metrics.registry });
+    app.use('/api/v1/me', require('./api/wallet').walletRouter({ ctx, config, keys, limits, adapters }));
     app.use('/api/v1', express.json({ limit: '64kb' }), v1Router({ ctx, auth, adapters, limits, subjectAssertion }));
     // A signed-in person's own Vibes, for the shared navbar on every OpenVibe site (api/me.js; user tokens, CORS for owned sites).
     app.use('/api/me', require('./api/me').meRouter({ ctx, config, keys, limits, adapters }));
 
     // The billing policy is public and indexable; the staff console and the API are not.
+    app.get('/checkout/cancel', (_req, res) => res.redirect(303, 'https://openvibe.network/wallet'));
+    app.get('/checkout/success', async (req, res) => {
+        res.set('Cache-Control', 'no-store');
+        try {
+            await require('./ops/wallet-checkout').completeReturn(ctx, adapters, req.query.token);
+            return res.redirect(303, 'https://openvibe.network/wallet');
+        } catch (e) {
+            return res.status(e.status || 502).type('text').send('Your payment is not confirmed yet. Reload this page to check the same payment. Do not start another payment.');
+        }
+    });
     app.get('/robots.txt', (req, res) => res.type('text/plain').send('User-agent: *\nAllow: /policy\nDisallow: /\n'));
     app.use(require('./policy').policyRouter({ config }));
     app.use(consoleRouter({ ctx, adapters, keys, fetchImpl }));
