@@ -2,6 +2,9 @@
 
 > The isolated money ledger: providers, receipts, subscriptions, entitlements, refunds and payouts.
 
+**Docs:** https://openvibe.services · **For AI:** https://openvibe.network/llms.txt
+**Run it:** `npm ci && npm run dev` (Node 22 or newer) · **Tests:** `npm test`
+
 **Status:** alpha — **the money ledger of the OpenVibe network since 2026-10-17** (the cutover below, 04:50–04:56 UTC):
 `BILLING_AUTHORITY=billing` in Billing and OpenVibe.Live, PowerChat deliveries settle here, and Live's own money tables
 are read-only. Deployed on the host since 2026-09-23 (`/opt/openvibe.billing`, API on `127.0.0.1:4600`); it ran in
