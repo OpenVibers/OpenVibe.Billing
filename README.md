@@ -66,7 +66,7 @@ promo write changes both in one transaction.
 - OpenVibe.Network (JWKS for service tokens; SSO with PKCE for the staff console; `identity.subject.resolve` for the Live import)
 - OpenVibe.Events (the SDK outbox relay, when `EVENTS_URL` and the OAuth client secret are set)
 - the payment providers whose secrets are configured (none in production today)
-- `openvibe-contracts` v0.338.0, `openvibe-sdk` v0.94.0 (service tokens, per-person limits, `openvibe-sdk/db`, `openvibe-sdk/service`, `openvibe-sdk/vibes`), `openvibe-shared` v4.161.0, pinned by release tarball
+- `openvibe-contracts` v0.338.0, `openvibe-sdk` v0.94.0 (service tokens, per-person limits, `openvibe-sdk/db`, `openvibe-sdk/service`, `openvibe-sdk/vibes`), `openvibe-shared` v4.163.0, pinned by release tarball
 - **PostgreSQL 18 and Valkey 9** (OpenVibe.Host `roles/data/`, ADR-035): every read and write is async through
   `openvibe-sdk/db`; Valkey holds the per-person limit counters (optional: without `VALKEY_URL` they count in the process)
 
@@ -515,5 +515,5 @@ Part of the [OpenVibe network](https://openvibe.network). Built in the open by [
 <!-- versions:start -->
 - openvibe-contracts: v0.338.0
 - openvibe-sdk: v0.94.0
-- openvibe-shared: v4.161.0
+- openvibe-shared: v4.163.0
 <!-- versions:end -->
