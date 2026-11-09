@@ -23,8 +23,13 @@ const { createServiceOutbox, outboxSchema } = require('openvibe-sdk/events');
         const sent = { ...event, event_id: 'evt_legacy_sent' };
         await db.query('INSERT INTO outbox (event_id, event, created_at, sent_at) VALUES ($1, $2, $3, $4)',
             [sent.event_id, JSON.stringify(sent), sent.timestamp, event.timestamp]);
-        const ddl = fs.readFileSync(path.join(migrations, '0006_sdk_outbox.sql'), 'utf8');
-        assert.ok(ddl.includes(outboxSchema('service_outbox')));
+        // The SDK's outbox schema is covered by 0006 and the migrations after it: a statement the SDK added later
+        // (0.99.0's rejected_at index) lands in a new migration (0016), never in one that has run.
+        const fromSix = fs.readdirSync(migrations).filter((f) => /^\d{4}_.*\.sql$/.test(f) && f >= '0006_').sort();
+        const ddl = fromSix.map((f) => fs.readFileSync(path.join(migrations, f), 'utf8')).join('\n');
+        for (const statement of outboxSchema('service_outbox').split(';').map((x) => x.trim()).filter(Boolean)) {
+            assert.ok(ddl.includes(statement), `a migration from 0006 on carries: ${statement.slice(0, 80)}`);
+        }
         fs.copyFileSync(path.join(migrations, '0006_sdk_outbox.sql'), path.join(dir, '0006_sdk_outbox.sql'));
         await db.migrate({ dir, log: { log() {} } });
         const rows = await db.many('SELECT event_id, envelope, created_at, attempts FROM service_outbox');
