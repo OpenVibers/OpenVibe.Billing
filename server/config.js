@@ -200,6 +200,8 @@ function loadConfig(env = process.env) {
         },
         liveUrl: String(env.LIVE_URL || 'https://openvibe.live').replace(/\/+$/, ''),
         inventoryUrl: String(env.INVENTORY_URL || 'https://inventory.openvibe.network').replace(/\/+$/, ''),
+        // The quest catalog names a quest in an OpenCoins reason (billing.money-reason@1); public, cached.
+        quests: { url: String(env.QUESTS_URL || 'https://openvibe.quest').replace(/\/+$/, '') },
 
         credits: {
             // AI Exchange D2/D12: high-precision Balance ledger. Off by default; no inference money moves without it.

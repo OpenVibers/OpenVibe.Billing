@@ -5,11 +5,14 @@
  * touched their Balance (`usd_credit`, user:<usr_id>) or their spendable Vibes (`user_credit`). A transaction that
  * moved both (Get Vibes with Balance) has two rows with the same id, so the wallet can group them.
  *
- * Labels are the public words: Added money, AI usage, Got Vibes, Tipped @name, Paid <app>, Moved to <project>,
- * Refund. Only a creator's public name is read from Network; no other subject id, email or project secret is in a
- * row. Balance amounts are signed nano-USD decimal strings; Vibes are signed whole integers.
+ * Each row is the public words (openvibe-contracts billing.money-reason@1): `label` is the phrase without the
+ * amount ("for a tip to @alice"), `subject` is the thing it was for with its own name and address, and
+ * `reason_key` is the ledger's own key for support. Only a creator's public name is read from Network; no other
+ * subject id, email or project secret is in a row. Balance amounts are signed nano-USD decimal strings; Vibes are
+ * signed whole integers.
  */
 const { fail, userSubject } = require('./common');
+const money = require('../money/reasons');
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
@@ -34,41 +37,52 @@ function modelOf(attempt) {
     return model ? model.slice(0, 120) : null;
 }
 
+/** The reason key this journal row means: Billing's type, refined by the metadata that separates its shapes. */
+function keyOf(t, m) {
+    if (t.type === 'credit' && m.credit === 'settle') return 'credit:settle';
+    if (t.type === 'credit' && m.credit === 'topup') return 'credit:topup';
+    if (t.type === 'purchase' && m.balance === 'vibes_from_balance') return 'purchase:vibes_from_balance';
+    if (t.type === 'purchase' && m.store_purchase) return 'purchase:store';
+    if (t.type === 'purchase' && (m.vibes_charge || m.vibes_charge_id || m.charge === 'vibes_pay' || m.app_name)) return 'purchase:app';
+    if (t.type === 'purchase') return 'purchase:vibes';
+    return String(t.type || '');
+}
+
+function appNameOf(m) {
+    const app = m.app_name || (m.app && typeof m.app === 'object' ? m.app.name : null) || (m.app && typeof m.app !== 'object' ? m.app : null);
+    return app ? String(app).slice(0, APP_NAME_MAX) : null;
+}
+
 function labelFor(t, { settlement, projectName, creatorName }) {
     const m = parseJson(t.metadata);
-    if (t.type === 'credit' && m.credit === 'settle') {
+    const key = keyOf(t, m);
+    let subject = null;
+    let detail = '';
+    if (key === 'credit:settle') {
         const attempts = settlement && Array.isArray(settlement.attempts) ? settlement.attempts : [];
         const model = modelOf(attempts[attempts.length - 1]);
         const requests = attempts.length || 1;
-        return { label: 'AI usage', detail: [model, `${requests} request${requests === 1 ? '' : 's'}`].filter(Boolean).join(' · ') };
+        detail = [model, `${requests} request${requests === 1 ? '' : 's'}`].filter(Boolean).join(' · ');
+    } else if (key === 'credit:topup') {
+        detail = PROVIDERS[String(t.provider || m.provider || '').toLowerCase()] || titleCase(t.provider || m.provider || '');
+    } else if (key === 'purchase:app' || key === 'vibes_charge') {
+        const name = appNameOf(m);
+        if (name) subject = { name };
+        detail = m.description ? String(m.description).slice(0, 120) : '';
+    } else if (key === 'purchase:store') {
+        subject = { name: String(m.item_name || 'an item').slice(0, 120) };
+        detail = 'Inventory';
+    } else if (key === 'balance_transfer') {
+        if (projectName) subject = { name: String(projectName).slice(0, 120), url: m.to_project_id ? `https://openvibe.services/projects/${encodeURIComponent(String(m.to_project_id))}` : null };
+    } else if (key === 'donation' || key === 'subscription' || key === 'subscription_share') {
+        if (creatorName) subject = { name: `@${creatorName}`, url: `https://openvibe.live/@${encodeURIComponent(String(creatorName))}` };
+    } else if (key === 'refund' || key === 'vibes_refund') {
+        detail = 'Returned';
+    } else if (key === 'cashout_request' || key === 'cashout_paid') {
+        detail = 'Payable';
     }
-    if (t.type === 'credit' && m.credit === 'topup') {
-        const provider = PROVIDERS[String(t.provider || m.provider || '').toLowerCase()] || titleCase(t.provider || m.provider || '');
-        return { label: 'Added money', detail: provider };
-    }
-    if (t.type === 'purchase' && m.balance === 'vibes_from_balance') {
-        const n = Number(m.vibes || 0);
-        return { label: 'Got Vibes', detail: n ? `${n} Vibes` : '' };
-    }
-    if ((t.type === 'purchase' && (m.vibes_charge || m.vibes_charge_id || m.charge === 'vibes_pay' || m.app_name)) || t.type === 'vibes_charge') {
-        const app = m.app_name || (m.app && typeof m.app === 'object' ? m.app.name : null) || (m.app && typeof m.app !== 'object' ? m.app : null);
-        const name = app ? String(app).slice(0, APP_NAME_MAX) : null;
-        return { label: name ? `Paid ${name}` : 'Paid an app', detail: m.description ? String(m.description).slice(0, 120) : '' };
-    }
-    if (t.type === 'purchase' && m.store_purchase) return { label: `Bought ${String(m.item_name || 'an item').slice(0, 120)}`, detail: 'Inventory' };
-    if (t.type === 'purchase') {
-        const n = Number(m.bits || m.vibes || m.amount_bits || 0);
-        return { label: 'Got Vibes', detail: n ? `${n} Vibes` : '' };
-    }
-    if (t.type === 'balance_transfer') {
-        return { label: projectName ? `Moved to ${projectName}` : 'Moved to a project', detail: '' };
-    }
-    if (t.type === 'donation') {
-        return { label: creatorName ? `Tipped @${creatorName}` : 'Tipped a creator', detail: '' };
-    }
-    if (t.type === 'refund' || t.type === 'vibes_refund') return { label: 'Refund', detail: 'Returned' };
-    if (t.type === 'cashout_request' || t.type === 'cashout_paid') return { label: 'Cash out', detail: 'Payable' };
-    return { label: titleCase(t.type) || 'Activity', detail: '' };
+    const d = money.describe(key, { site: 'billing', subject });
+    return { label: d.text, detail, subject: d.subject, reason_key: d.key };
 }
 
 /**
@@ -143,8 +157,9 @@ async function activity(ctx, rawSubject, { limit = DEFAULT_LIMIT, before = null 
         if (cur.txn.type === 'balance_transfer') projectName = projects.get(meta.to_project_id) || null;
         const creator = names.get(cur.txn.to_subject);
         const d = labelFor(cur.txn, { settlement: settlementOf.get(t.id), projectName, creatorName: creator && creator.username ? creator.username : null });
-        if (cur.nano !== 0n) out.push({ id: t.id, at: t.created_at, kind: 'balance', label: d.label, detail: d.detail, amount: cur.nano.toString() });
-        if (cur.vibes !== 0) out.push({ id: t.id, at: t.created_at, kind: 'vibes', label: d.label, detail: d.detail, amount: cur.vibes });
+        const common = { label: d.label, detail: d.detail, subject: d.subject, reason_key: d.reason_key };
+        if (cur.nano !== 0n) out.push({ id: t.id, at: t.created_at, kind: 'balance', amount: cur.nano.toString(), ...common });
+        if (cur.vibes !== 0) out.push({ id: t.id, at: t.created_at, kind: 'vibes', amount: cur.vibes, ...common });
     }
     return { activity: out, next_before: more ? page[page.length - 1].id : null };
 }
