@@ -1,6 +1,6 @@
 'use strict';
 /**
- * The same list as openvibe-contracts/lib/money-reasons.js (0.390.0), copied so Billing answers with the plain words
+ * The same list as openvibe-contracts/lib/money-reasons.js (0.392.0), copied so Billing answers with the plain words
  * before its installed contract package carries the module. reasons.js prefers the contract's copy when it is there.
  *
  * Money reasons: the plain words for a ledger row (2026-11-10).
@@ -68,6 +68,7 @@ const KINDS = Object.freeze([
     Object.freeze({ id: 'app-payment', match: 'vibes_charge', site: 'billing', subject: 'app', text: 'for paying {name}', fallback: 'an app' }),
     Object.freeze({ id: 'app-purchase', match: 'purchase:app', site: 'billing', subject: 'app', text: 'for paying {name}', fallback: 'an app' }),
     Object.freeze({ id: 'tip', match: 'donation', site: 'billing', subject: 'creator', text: 'for a tip to {name}', fallback: 'a creator' }),
+    Object.freeze({ id: 'tip-received', match: 'donation:received', site: 'billing', subject: 'creator', text: 'for a tip from {name}', fallback: 'someone' }),
     Object.freeze({ id: 'subscription', match: 'subscription', site: 'billing', subject: 'creator', text: 'for a subscription to {name}', fallback: 'a creator' }),
     Object.freeze({ id: 'subscription-share', match: 'subscription_share', site: 'billing', subject: 'creator', text: 'for a subscription to {name}', fallback: 'a creator' }),
     Object.freeze({ id: 'refund', match: 'refund', site: 'billing', text: 'for a refund' }),

@@ -3,7 +3,7 @@
 /**
  * The plain words for a ledger row. The list and the formatter live in openvibe-contracts
  * (`billing.money-reason@1`, `lib/money-reasons.js`); Billing re-exports them when the installed
- * package has them and otherwise answers from the same list copied at 0.390.0. One site never
+ * package has them and otherwise answers from the same list copied at 0.392.0. One site never
  * builds the sentence itself: every read here returns `{ label, subject }` already made.
  */
 let canonical = null;
