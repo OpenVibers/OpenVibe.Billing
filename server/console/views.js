@@ -58,7 +58,7 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}dt{c
 .shipped{max-width:1180px;margin:24px auto;padding:0 16px 24px;color:var(--muted);font-size:.85rem}
 `;
 const CSS_HASH = `sha256-${crypto.createHash('sha256').update(CSS).digest('base64')}`;
-const CSP = `default-src 'none'; style-src '${CSS_HASH}'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`;
+const CSP = `default-src 'none'; style-src '${CSS_HASH}'; img-src 'self' https://openvibe.media; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`;
 
 // ── Formatting ───────────────────────────────────────────────
 const n = (v) => Number(v || 0).toLocaleString('en-US');
