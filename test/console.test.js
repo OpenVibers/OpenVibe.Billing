@@ -168,6 +168,7 @@ const DAY = 86_400_000;
             assert.strictEqual(r.headers.get('x-robots-tag'), 'noindex, nofollow');
             assert.strictEqual(r.headers.get('cache-control'), 'no-store');
             assert.match(r.headers.get('content-security-policy'), /default-src 'none'.*form-action 'self'.*frame-ancestors 'none'/);
+            assert.match(r.headers.get('content-security-policy'), /img-src 'self' https:\/\/openvibe\.media(?:;|$)/, `${p} lets an avatar from openvibe.media show`);
             assert.strictEqual(r.headers.get('x-frame-options'), 'DENY');
         }
         const anon = await get('/cashouts');
