@@ -36,14 +36,15 @@ const { boot, fund, check, done } = require('./helpers/app');
     await check('own balances and newest five events merge Network and Billing with site attribution', async () => {
         coins = 45;
         await fund(t, alice.id, 120);
-        history = Array.from({ length: 5 }, (_, i) => ({ id: i, delta: 9, app_id: 'quest', reason: 'Daily quest', created_at: new Date(t.ctx.now() - (i + 1) * 60000).toISOString() }));
+        history = Array.from({ length: 5 }, (_, i) => ({ id: i, delta: 9, app_id: 'quest', reason: 'Media request: A film', created_at: new Date(t.ctx.now() - (i + 1) * 60000).toISOString() }));
         const r = await read();
         assert.strictEqual(r.status, 200, r.text);
         assert.strictEqual(r.json.balances.coins.amount, '45');
         assert.strictEqual(r.json.balances.vibes.amount, '120');
         assert.strictEqual(r.json.recent_activity.length, 5);
         assert.strictEqual(r.json.recent_activity[0].kind, 'vibes');
-        assert.strictEqual(r.json.recent_activity[1].site, 'quest');
+        assert.strictEqual(r.json.recent_activity[1].site, 'OpenVibe.Live');
+        assert.strictEqual(r.json.recent_activity[1].label, 'for the stream A film');
     });
     await check('no cookies, forged tokens, service tokens or subject overrides can read another wallet', async () => {
         const before = requests;
