@@ -35,6 +35,12 @@ assert.ok(tls.indexOf(fromBalance[0]) < tls.indexOf('location ^~ /api/ { return 
 const activity = tls.match(/location = \/api\/me\/activity \{([^}]*)\}/);
 assert.ok(activity && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(activity[1]) && /limit_req /.test(activity[1]), 'a rate-limited location for /api/me/activity');
 assert.ok(tls.indexOf(activity[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
+const balanceChanges = tls.match(/location = \/api\/me\/balances\/changes \{([^}]*)\}/);
+assert.ok(balanceChanges && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(balanceChanges[1]) && /limit_req /.test(balanceChanges[1]), 'a rate-limited location for /api/me/balances/changes');
+assert.ok(tls.indexOf(balanceChanges[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
+const balanceRead = tls.match(/location = \/api\/me\/balances\/read \{([^}]*)\}/);
+assert.ok(balanceRead && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(balanceRead[1]) && /limit_req /.test(balanceRead[1]), 'a rate-limited location for /api/me/balances/read');
+assert.ok(tls.indexOf(balanceRead[0]) < tls.indexOf('location ^~ /api/ { return 404; }'), 'before the /api 404');
 // nginx reads an unquoted "{" in a location regex as the block's start ("unknown directive"): quote any regex with a brace.
 for (const m of tls.matchAll(/^\s*location\s+~\*?\s+(\S+)\s+\{/gm)) {
     assert.ok(!/[{}]/.test(m[1]) || /^".*"$/.test(m[1]), `quote the location regex ${m[1]}: nginx -t fails on an unquoted brace`);
@@ -56,4 +62,4 @@ assert.match(tls, /location \^~ \/api\/v1 \{ deny all; \}/);
 const vibesApi = tls.match(/location \^~ \/api\/v1\/vibes\/ \{([^}]*)\}/);
 assert.ok(vibesApi && /limit_req zone=ovbilling_apps/.test(vibesApi[1]) && /proxy_pass http:\/\/127\.0\.0\.1:4600;/.test(vibesApi[1]), 'a rate-limited public location for /api/v1/vibes/');
 assert.ok(tls.indexOf(vibesApi[0]) < tls.indexOf('location ^~ /api/v1 { deny all; }'), 'before the /api/v1 deny');
-console.log('nginx vhost: the policy is indexable, the rest noindex; /api/me/vibes, /api/me/balance, /api/me/balance/transfers, /api/me/vibes/from-balance, /api/me/activity, /api/me/credits and /api/me/credits/topups public; /api/v1/vibes/ public to apps (app tokens); the rest of /api/v1 loopback only');
+console.log('nginx vhost: the policy is indexable, the rest noindex; /api/me/vibes, /api/me/balance, /api/me/balance/transfers, /api/me/vibes/from-balance, /api/me/activity, /api/me/credits, /api/me/credits/topups, /api/me/balances/changes and /api/me/balances/read public; /api/v1/vibes/ public to apps (app tokens); the rest of /api/v1 loopback only');
