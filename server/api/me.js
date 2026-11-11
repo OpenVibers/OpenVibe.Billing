@@ -14,6 +14,12 @@
  *   GET /api/me/balance    the person's Balance plus the Balance of every project they administer
  *   GET /api/me/credits    the same answer (the old wire path stays an alias)
  *   GET /api/me/activity   the person's own Balance and Vibes movements, newest first (before=<txn id>)
+ *   GET /api/me/balances/changes?currency=vibes&since=<txn id>&limit=
+ *     → 200 { currency, balance, moves, parts: { earned, spent, received, sent }, net, cursor, ... }:
+ *           what changed in the person's Vibes since the cursor (or since they last looked:
+ *           an omitted since falls back to their stored read state), oldest first
+ *   PUT /api/me/balances/read { currency, cursor }
+ *     → 200 { currency, read_cursor }: store "I looked" (monotonic: looking backwards is refused)
  *   POST /api/me/balance/transfers  { to_project_id, amount_nano_usd, idempotency_key }
  *   POST /api/me/vibes/from-balance { vibes, idempotency_key }
  *
@@ -31,6 +37,7 @@ const topups = require('../ops/topups');
 const balances = require('../ops/balance');
 const vibesPay = require('../ops/vibes');
 const activity = require('../ops/activity');
+const gainLoss = require('../ops/balance-changes');
 
 const HOST_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 let origins = null;
@@ -55,7 +62,7 @@ function meRouter({ ctx, config, keys, limits, adapters }) {
         const origin = req.get('origin');
         res.set({ 'Cache-Control': 'private, no-store', Vary: 'Origin' });
         if (origin && firstPartyOrigins().has(origin)) {
-            res.set({ 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Max-Age': '600' });
+            res.set({ 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Allow-Methods': 'GET, POST, PUT', 'Access-Control-Max-Age': '600' });
         }
         if (req.method === 'OPTIONS') return res.status(204).end();
         return next();
@@ -119,6 +126,30 @@ function meRouter({ ctx, config, keys, limits, adapters }) {
             return failure(req, res, e, 'the activity is unavailable');
         }
     });
+
+    // Ask 273: what changed in the person's balances since they last looked — the bar's gain or loss
+    // with its reason, per currency, with the cursor and the person's own read state. Their token,
+    // their accounts only: there is no subject parameter, so another person's balance is unreachable.
+    r.get('/balances/changes', person, limits.selfRead, async (req, res) => {
+        if (config.authority !== 'billing') return problem(res, 409, 'billing.not_authoritative', 'OpenVibe.Live keeps Vibes balances until the switch to OpenVibe.Billing');
+        try {
+            return res.json(await gainLoss.changes(ctx, req.person.subject, {
+                currency: req.query.currency || 'vibes', since: req.query.since, limit: req.query.limit,
+            }));
+        } catch (e) {
+            return failure(req, res, e, 'the balance changes are unavailable');
+        }
+    });
+
+    r.put('/balances/read', express.json({ limit: '16kb' }), person,
+        limits.budget('billing.balance.read-mark', (req) => req.person && req.person.subject), async (req, res) => {
+            const body = req.body || {};
+            try {
+                return res.json(await gainLoss.markRead(ctx, req.person.subject, { currency: body.currency || 'vibes', cursor: body.cursor }));
+            } catch (e) {
+                return failure(req, res, e, 'the read state is unavailable');
+            }
+        });
 
     // Move money from the person's Balance to a project they administer (D12): atomic, idempotent, never below zero.
     r.post('/balance/transfers', express.json({ limit: '16kb' }), person, body('billing.balance-transfer-request@1'),

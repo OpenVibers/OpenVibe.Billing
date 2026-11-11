@@ -35,6 +35,8 @@ const BUDGETS = {
     'billing.credits.topup.create': { minute: 5, hour: 30 },
     // Moving Balance to a project (POST /api/me/balance/transfers) is a wallet write, not a checkout.
     'billing.balance.transfer': { minute: 10, hour: 100 },
+    // Marking balances read (PUT /api/me/balances/read, ask 273) only stores a cursor: generous.
+    'billing.balance.read-mark': { minute: 60, hour: 1200 },
     // Getting Vibes with Balance (POST /api/me/vibes/from-balance): a few buys at a time.
     'billing.vibes.from_balance': { minute: 5, hour: 30 },
     // A tip, donation or paid interaction from a person's credit: one a second at most, above Tips' own

@@ -9,8 +9,13 @@ const { ids, validate } = require('openvibe-contracts');
 
 const ACTOR = { type: 'service', id: 'billing' };
 
-/** actor defaults to the service itself; staff actions pass the person ({ type: 'user', id }). */
-async function enqueue(ctx, { event_type, subject, payload, priority = 'important', traceId, actor }) {
+/**
+ * actor defaults to the service itself; staff actions pass the person ({ type: 'user', id }).
+ * visibility is 'internal' (service principals only) unless the caller names 'subject': then only
+ * the user the subject names sees it over Events realtime — how an open page learns its own
+ * balance changed without a reload (ask 273: billing.balance.changed).
+ */
+async function enqueue(ctx, { event_type, subject, payload, priority = 'important', traceId, actor, visibility = 'internal' }) {
     const ms = ctx.now();
     const env = {
         event_id: ids.newId('event', ms),
@@ -20,7 +25,7 @@ async function enqueue(ctx, { event_type, subject, payload, priority = 'importan
         actor: actor || ACTOR,
         timestamp: new Date(ms).toISOString(),
         priority,
-        visibility: 'internal',
+        visibility,
         subject,
         payload: payload || {},
     };
