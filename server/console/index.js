@@ -38,7 +38,7 @@ const admin = require('../ops/admin');
 const providers = require('../providers');
 const { reconcile } = require('../reconcile');
 const { CAP } = require('../api/v1');
-const { createSessions, sameString, random } = require('./session');
+const { createSessions, parseCookies, sameString, random } = require('./session');
 const sso = require('./sso');
 const audit = require('./audit');
 const q = require('./queries');
@@ -191,6 +191,7 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
 
     r.get('/auth/callback', wrap(async (req, res) => {
         const flow = sessions.takeFlow(req, res);
+        if (req.query.error && flow && flow.q === 1) return res.redirect(303, '/?sso=none');
         if (req.query.error) return send(res, 400, pages.signIn({ message: `Sign-in was not completed (${String(req.query.error).slice(0, 60)}).` }));
         if (!flow || !req.query.code || !sameString(req.query.state, flow.s)) {
             return send(res, 400, pages.signIn({ message: 'The sign-in could not be verified (expired or mismatched state). Please try again.' }));
@@ -211,12 +212,14 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
                 reason: !who.subject ? 'token carries no subject' : !who.money ? `the token does not hold ${cc.staffCapability} (role ${who.role || 'none'})` : 'not listed in BILLING_STAFF_SUBJECTS',
                 requestId: requestId(req), ipHash: ipHash(req),
             });
+            if (flow.q === 1) return res.redirect(303, 'https://openvibe.network/wallet');
             return send(res, 403, pages.message({ title: 'Not authorized', text: 'This console is only for OpenVibe.Network admins who are Billing staff. Your sign-in was recorded.' }));
         }
         await money(db, async () => {
             await sessions.create(res, { subject: who.subject, username: who.username, role: who.role, ip: req.ip });
             await audit.record(ctx, { actor: { subject: who.subject, username: who.username }, action: 'session.sign_in', requestId: requestId(req), ipHash: ipHash(req), traceId: trace(req) });
         });
+        res.clearCookie('ovb_sso_hint', { path: '/', sameSite: 'Lax', secure: cc.cookieSecure, httpOnly: true });
         return res.redirect(303, flow.n || '/');
     }));
 
@@ -226,12 +229,21 @@ function consoleRouter({ ctx, adapters, keys, fetchImpl = globalThis.fetch }) {
             await record(req, { action: 'session.sign_out' });
         });
         sessions.clear(res);
+        res.cookie('ovb_sso_hint', 'guest', { path: '/', sameSite: 'Lax', secure: cc.cookieSecure, httpOnly: true, maxAge: 24 * 60 * 60 * 1000 });
         res.redirect(303, '/');
     });
 
     // ── Dashboard ────────────────────────────────────────────
     r.get('/', async (req, res) => {
-        if (!req.staff) return send(res, 200, pages.signIn({}));
+        if (!req.staff) {
+            const browserArrival = /\btext\/html\b/.test(String(req.get('accept') || ''));
+            if (browserArrival && req.query.sso !== 'none' && parseCookies(req).ovb_sso_hint !== 'guest') {
+                const started = consoleSso.start({ silent: true });
+                sessions.setFlow(res, { s: started.state, v: started.verifier, n: '/', q: 1 });
+                return res.redirect(302, started.url);
+            }
+            return send(res, 200, pages.signIn({}));
+        }
         return send(res, 200, pages.dashboard({
             ...await common(req), freeze: await admin.freezeState(db), last: await q.lastReconciliation(db), totals: await q.outstanding(db),
             counts: await q.counts(db, ctx.now()), rates: ctx.rates,
