@@ -45,8 +45,8 @@ function createConsoleSso({ ctx, keys, fetchImpl = globalThis.fetch }) {
     });
 
     /** The authorize URL and the state/verifier the flow cookie must keep. → { url, state, verifier } */
-    function start() {
-        return client.authorizeUrl();
+    function start({ silent = false } = {}) {
+        return client.authorizeUrl({ silent });
     }
 
     /** Redeem the code with the SDK, verify the person's token, revoke the refresh token Billing will not use. */

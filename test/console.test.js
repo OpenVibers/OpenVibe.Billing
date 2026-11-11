@@ -143,6 +143,25 @@ const DAY = 86_400_000;
         assert.strictEqual((await staffEvents('session.sign_in')).length, 0, 'refusals are not published');
     });
 
+    await check('browser arrival silently checks Network, sending a verified non-staff account to its Wallet', async () => {
+        const nav = { Accept: 'text/html,application/xhtml+xml', 'Sec-Fetch-Mode': 'navigate' };
+        const arrival = await get('/', null, nav);
+        assert.strictEqual(arrival.status, 302);
+        const loc = new URL(arrival.headers.get('location'));
+        assert.strictEqual(loc.searchParams.get('prompt'), 'none');
+        const flow = arrival.cookies.find((c) => c.startsWith('ovb_flow=')).split(';')[0];
+        const code = network.authorize({ subject_id: listedNonAdmin, role: 'user', username: 'visitor', challenge: loc.searchParams.get('code_challenge'), redirect_uri: loc.searchParams.get('redirect_uri') });
+        const callback = await get(`/auth/callback?code=${code}&state=${encodeURIComponent(loc.searchParams.get('state'))}`, flow);
+        assert.strictEqual(callback.status, 303);
+        assert.strictEqual(callback.headers.get('location'), 'https://openvibe.network/wallet');
+        assert.ok(!callback.cookies.some((c) => c.startsWith('__Host-ovb_staff=') && !c.startsWith('__Host-ovb_staff=;')));
+
+        const noNetwork = await get(`/auth/callback?error=login_required&state=${encodeURIComponent(loc.searchParams.get('state'))}`, flow);
+        assert.strictEqual(noNetwork.headers.get('location'), '/?sso=none');
+        assert.strictEqual((await get('/?sso=none', null, nav)).status, 200, 'a guest has one bounded silent attempt');
+        assert.strictEqual((await get('/', 'ovb_sso_hint=guest', nav)).status, 200, 'explicit guest hint skips Network');
+    });
+
     await check('staff sign in: host-only, HttpOnly, Secure, SameSite=Strict, short-lived session cookie', async () => {
         const r = await signIn(staff, { username: 'goosely' });
         assert.strictEqual(r.cb.status, 303);
