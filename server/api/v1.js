@@ -70,6 +70,12 @@ function v1Router({ ctx, auth, adapters, limits, subjectAssertion }) {
     const txnOut = (t, extra = {}) => ({ transaction: presentTxn(t), ...extra });
     const pathSubject = (v) => userSubject(String(v), 'subject');
 
+    // Public offers only: no customer, creator or ledger records.
+    r.get('/plans', (req, res) => {
+        res.set('Cache-Control', 'public, max-age=600');
+        res.json(require('../public-plans').publicPlans(ctx.rates, ctx.now()));
+    });
+
     // ── Rates (public: prices the UI shows) ──────────────────
     r.get('/rates', (req, res) => {
         const rt = ctx.rates;
