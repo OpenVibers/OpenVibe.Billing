@@ -23,6 +23,7 @@
  * the movement it guards are one atomic unit.
  */
 const { ids } = require('openvibe-contracts');
+const { enqueue } = require('./outbox');
 
 const NANO_USD = 'nano-usd';
 const isBigCurrency = (currency) => currency === NANO_USD;
@@ -161,6 +162,32 @@ async function post(ctx, spec) {
             const acct = await accountId(db, m, nowIso);
             await insEntry.run(id, acct, m.amount);
             await bump.run(m.amount, nowIso, acct);
+        }
+        // Ask 273: one subject-visible message per person whose Vibes moved, in the same transaction
+        // as the movement, so an open page updates without a reload. Non-Vibes and non-person entries
+        // (provider clearing, revenue, project accounts) announce nothing here.
+        if (ctx.outbox) {
+            const perUser = new Map();
+            for (const m of merged.values()) {
+                if (m.amount == 0 || m.currency !== 'vibes-bits') continue;
+                if (m.kind !== 'user_credit' && m.kind !== 'creator_payable') continue;
+                if (!ids.isSubjectId('user', m.owner)) continue;
+                perUser.set(m.owner, (perUser.get(m.owner) || 0) + m.amount);
+            }
+            for (const [owner, delta] of perUser) {
+                if (delta == 0) continue;
+                await enqueue(ctx, {
+                    event_type: 'billing.balance.changed',
+                    subject: { type: 'user', id: owner },
+                    visibility: 'subject',
+                    payload: {
+                        currency: 'vibes', delta,
+                        credit: await balance(db, { kind: 'user_credit', owner, currency: 'vibes-bits' }),
+                        payable: await balance(db, { kind: 'creator_payable', owner, currency: 'vibes-bits' }),
+                        txn: id, type: spec.type,
+                    },
+                });
+            }
         }
         return { txn: await getTxn(db, id), replay: false };
     };

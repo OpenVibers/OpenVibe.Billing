@@ -40,7 +40,8 @@
     "billing.receipt.external",
     "billing.credit.settled",
     "billing.vibes.charge.paid",
-    "billing.vibes.charge.refunded"
+    "billing.vibes.charge.refunded",
+    "billing.balance.changed"
   ],
   "eventsConsumed": [],
   "namespacesOwned": [

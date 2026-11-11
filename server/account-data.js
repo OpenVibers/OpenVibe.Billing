@@ -51,6 +51,9 @@ const TABLES = [
     // charge they never paid has no payer and is not their data; the app's own settings are not people's records.
     { table: 'vibes_charges', subject: 'payer_subject', file: 'vibes-pay-charges.json', columns: ['id', 'app_id', 'project_id', 'amount', 'description', 'reference', 'status', 'sandbox', 'paid_at', 'refunded_at', 'created_at'], erase: { keep: ledger } },
     { table: 'vibes_payers', subject: 'subject', file: 'vibes-pay-payers.json', columns: ['app_id', 'payer_ref', 'created_at'], erase: { keep: ledger } },
+    // Ask 273: the "since I last looked" cursor is ephemeral UI state, not the person's data: no export
+    // file, erased with the account like staff sessions.
+    { table: 'balance_reads', subject: 'subject', file: null },
 ];
 
 /** Accounts with their balances (a balance is the account's cached sum of ledger entries). */

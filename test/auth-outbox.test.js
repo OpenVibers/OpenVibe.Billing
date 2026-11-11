@@ -50,7 +50,8 @@ const { startEvents } = require('./helpers/stubs');
             const v = validate('events.event-envelope@1', e);
             assert.ok(v.valid, JSON.stringify(v.errors));
             assert.deepStrictEqual([e.source, e.actor.type, e.actor.id], ['billing', 'service', 'billing']);
-            assert.ok(['transaction', 'entitlement', 'cashout', 'subscription'].includes(e.subject.type));
+            assert.ok(['transaction', 'entitlement', 'cashout', 'subscription', 'user'].includes(e.subject.type),
+                `subject type ${e.subject.type} of ${e.event_type} is one the outbox sends`);
         }
         const txnCount = (await t.db.prepare('SELECT COUNT(*) AS n FROM transactions').get()).n;
         const refused = await t.call('POST', '/api/v1/transfers', { body: { from: a, to: b, amount: 999999 } });
