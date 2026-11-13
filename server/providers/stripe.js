@@ -31,7 +31,7 @@ function createStripe(cfg, { fetchImpl = globalThis.fetch } = {}) {
             signal: AbortSignal.timeout(15000),
         });
         const json = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(`${method} ${path} → ${res.status}: ${(json.error && json.error.message) || 'error'}`);
+        if (!res.ok) throw new Error(`${method} ${path} failed with ${res.status}: ${(json.error && json.error.message) || 'error'}`);
         return json;
     }
 
