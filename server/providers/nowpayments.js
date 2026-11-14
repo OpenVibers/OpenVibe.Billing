@@ -65,7 +65,7 @@ function createNowpayments(cfg, { fetchImpl = globalThis.fetch } = {}) {
             signal: AbortSignal.timeout(15000),
         });
         const j = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(`NOWPayments invoice → ${res.status}`);
+        if (!res.ok) throw new Error(`NOWPayments invoice failed with ${res.status}`);
         return { url: j.invoice_url, providerRef: String(j.id || j.invoice_id || '') || null };
     }
 

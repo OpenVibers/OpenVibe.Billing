@@ -22,7 +22,7 @@ function createPaypal(cfg, { fetchImpl = globalThis.fetch } = {}) {
     async function json(url, opts) {
         const res = await fetchImpl(url, { ...opts, signal: AbortSignal.timeout(15000) });
         const body = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(`${opts.method || 'GET'} ${url} → ${res.status}: ${body.message || body.error_description || body.error || 'error'}`);
+        if (!res.ok) throw new Error(`${opts.method || 'GET'} ${url} failed with ${res.status}: ${body.message || body.error_description || body.error || 'error'}`);
         return body;
     }
     async function token() {
