@@ -40,7 +40,7 @@ const SECRETS = [PANEL_KEY, LIVE_KEY, BAD_KEY, WEBHOOK];
     await check('every field of every Billing namespace has a title, a 30+ character description and labelled options', async () => {
         const r = await cfg('GET', '/internal/config');
         assert.strictEqual(r.status, 200, r.text);
-        assert.deepStrictEqual(r.json.namespaces.map((n) => n.namespace), ['billing.credits', 'billing.vibes', 'billing.cards']);
+        assert.deepStrictEqual(r.json.namespaces.map((n) => n.namespace), ['billing.credits', 'billing.vibes', 'billing.cards', 'billing.payments']);
         for (const ns of r.json.namespaces) assert.deepStrictEqual(lintSchema(ns.schema), [], `${ns.namespace}: ${lintSchema(ns.schema).join('; ')}`);
     });
 

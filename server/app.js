@@ -26,11 +26,12 @@ const { createKeyProvider, createIdentity, createProjects, createApps } = requir
 const { createAuth } = require('./api/auth');
 const { v1Router } = require('./api/v1');
 const { internalRouter } = require('./api/internal');
-const { createBillingConfig, createVibesConfig, createCardsConfig, stripeSettings, applyValues, applyVibesValues } = require('./config-store');
+const { createBillingConfig, createVibesConfig, createCardsConfig, createPaymentsConfig, stripeSettings, paymentsSettings, applyValues, applyVibesValues } = require('./config-store');
 const { internalConfigRouter } = require('./internal-config');
 const { createVibesWebhooks } = require('./ops/vibes-webhooks');
 const { createActorLimits } = require('./api/actor-limits');
 const { webhooksRouter } = require('./api/webhooks');
+const { checkoutWebhooksRouter } = require('./api/checkout-webhooks');
 const { consoleRouter } = require('./console');
 const providers = require('./providers');
 const { isFrozen } = require('./ops/common');
@@ -69,6 +70,10 @@ async function createApp(opts = {}) {
     // use time, the panel's sealed value first and the environment's STRIPE_* as the fallback.
     ctx.cardsConfigStore = await createCardsConfig({ db, env: ctx.env, log });
     config.providers.stripe = stripeSettings(ctx.cardsConfigStore, config.providers.stripe);
+    // The checkout providers beyond Stripe (owner-setup design, plan §AB.16): their keys, their live
+    // switches and their webhook secrets live in the vault (billing.payments) and are read at use time.
+    ctx.paymentsConfigStore = await createPaymentsConfig({ db, env: ctx.env, log });
+    config.providers.checkout = paymentsSettings(ctx.paymentsConfigStore).providers;
     // Network's project-membership reads (D12): the projects a person administers and one role check.
     ctx.projects = opts.projects || createProjects(config, { fetchImpl });
     // Network's app registry (D12 Vibes Pay): the app name/icon on the pay sheet. Best effort; Network's own
@@ -77,6 +82,12 @@ async function createApp(opts = {}) {
     // Per-app Vibes Pay webhook settings (D12): a D11 namespace each, sealed with the service KEK when present.
     ctx.vibesWebhooks = createVibesWebhooks({ db, config, env: ctx.env, log });
     const adapters = opts.adapters || providers.createAdapters(config, { fetchImpl, network: identity });
+    // The checkout adapters (Coinbase Commerce, Square, Paddle, Lemon Squeezy): they verify a notice and
+    // record it; the checkout adapter that takes the money comes later.
+    const checkoutAdapters = {};
+    for (const [id, cfg] of Object.entries(config.providers.checkout || {})) {
+        checkoutAdapters[id] = providers.createCheckoutAdapter(id, cfg, { fetchImpl });
+    }
     const auth = createAuth({ config, keys });
 
     const app = express();
@@ -126,6 +137,7 @@ async function createApp(opts = {}) {
     // Owner settings (D11): Network's service token, capability billing.config.manage. Before every public route.
     app.use(internalConfigRouter({ ctx, auth }));
     app.use('/webhooks', webhooksRouter({ ctx, adapters }));
+    app.use('/checkout/webhooks', checkoutWebhooksRouter({ ctx, adapters: checkoutAdapters }));
     // Account export and deletion (ADR-033, server/account-data.js): OpenVibe.Events delivers network.account.* to
     // 127.0.0.1:4600 directly (the consumer refuses anything that came through a proxy; nginx 404s /internal/ too), and
     // the parts and confirmations go to Network with Billing's own token. A test injects a stand-in through opts.accountSend.

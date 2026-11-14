@@ -10,8 +10,8 @@
  *   - x-required-for, when present, names a feature.
  */
 // openvibe-shared 4.125.0's OWNER_INPUT_GROUPS ids, and the members an x-owner-input may have.
-const GROUPS = new Set(['money', 'ai-providers', 'gpus', 'voices', 'chat-apps', 'sign-in-apps', 'data-sources',
-    'design-publishing', 'domains', 'legal']);
+const GROUPS = new Set(['money', 'ai-providers', 'gpus', 'servers', 'email', 'voices', 'chat-apps', 'sign-in-apps',
+    'data-sources', 'design-publishing', 'domains', 'legal']);
 const MEMBERS = new Set(['group', 'unlocks', 'get_it_at', 'get_it_how', 'test']);
 
 function lintField(name, f, out) {
