@@ -22,6 +22,7 @@
  * (stripeSettings below), so nothing changes until the owner enters a key.
  */
 const config = require('openvibe-shared/config');
+const { PROVIDERS: PAYMENT_PROVIDERS, detailsOf } = require('./payments');
 const { MAX_RECEIPT_CENTS } = require('./ops/common');
 const { iso, prefixedId } = require('./ledger');
 
@@ -32,6 +33,7 @@ const VIBES_NAMESPACE = 'billing.vibes';
 const VIBES_GROUP = 'Vibes';
 const CARDS_NAMESPACE = 'billing.cards';
 const CARDS_GROUP = 'Card payments';
+const PAYMENTS_NAMESPACE = 'billing.payments';
 
 const SCHEMA = {
     $schema: 'https://json-schema.org/draft/2020-12/schema',
@@ -173,6 +175,56 @@ const CARDS_SCHEMA = {
 };
 const CARD_SECRET_KEYS = new Set(['stripe.secret_key', 'stripe.publishable_key', 'stripe.webhook_secret']);
 const cardsClassify = (key) => (CARD_SECRET_KEYS.has(key) ? 'secret' : 'internal');
+
+/**
+ * The checkout providers beyond Stripe (plan §AB.16): PayPal, Coinbase Commerce, Square, Paddle and
+ * Lemon Squeezy. One provider is one row of the owner's Setup tab: its keys, the test/live switch and
+ * the webhook signing secret are fields of the same row, and every field of that row shares one
+ * x-required-for, so the guide shows the provider once with its fields under it.
+ *
+ * The schema is built from the provider registry (server/payments.js), so a provider is described in
+ * one place only. Secret-class fields (the credentials and the webhook secrets) are write-only and
+ * sealed with the service's KEK; the live switch is danger-class, so turning it on needs a fresh
+ * sign-in. No x-env pins: the vault is the only place these values live, and nothing reads them from
+ * the environment.
+ */
+
+const PAYMENTS_SCHEMA = Object.freeze({
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    title: 'Payment providers',
+    description: 'The payment providers OpenVibe can take money with, beyond Stripe: PayPal, Coinbase Commerce, Square, Paddle and Lemon Squeezy. A provider with no keys is skipped; a test key or a test mode never touches real money.',
+    type: 'object',
+    additionalProperties: false,
+    properties: Object.fromEntries(PAYMENT_PROVIDERS.flatMap((provider) => provider.keys.map((key) => {
+        const details = detailsOf(provider, key);
+        const prop = {
+            type: key.live ? 'boolean' : 'string',
+            title: key.title,
+            description: key.description,
+            'x-group': provider.group,
+            'x-owner-input': {
+                group: 'money',
+                unlocks: details.unlocks,
+                get_it_at: details.getItAt,
+                get_it_how: details.getItHow,
+                test: key.test === true,
+            },
+            'x-required-for': provider.requiredFor,
+        };
+        if (key.live) {
+            prop.default = false;
+            prop['x-danger'] = true;
+        } else {
+            prop.minLength = 4;
+            prop.maxLength = 512;
+        }
+        return [key.name, prop];
+    }))),
+});
+
+/** The secret-class fields of the payment providers: the credentials and the webhook secrets. */
+const paymentSecretKeys = new Set(PAYMENT_PROVIDERS.flatMap((p) => p.keys.filter((k) => k.secret).map((k) => k.name)));
+const paymentsClassify = (key) => (paymentSecretKeys.has(key) ? 'secret' : 'internal');
 
 /**
  * The Stripe settings the adapter reads at use time: the panel's value when one is set, else the environment's
@@ -370,7 +422,63 @@ async function createCardsConfig({ db, env, log = console, schema = CARDS_SCHEMA
     return store;
 }
 
+/**
+ * The payment providers namespace (billing.payments): the keys of the five checkout providers, their
+ * live switches and their webhook secrets, all sealed in the vault.
+ */
+async function createPaymentsConfig({ db, env, log = console, schema = PAYMENTS_SCHEMA }) {
+    const store = await config.createConfigStore({
+        db, service: SERVICE, namespace: PAYMENTS_NAMESPACE, schema,
+        env: env || {},
+        classify: paymentsClassify,
+        onChange: async (change) => await auditChange(db, { ...change, namespace: PAYMENTS_NAMESPACE, service: SERVICE }, log),
+        log,
+    });
+    if (store.sealed) {
+        try { await store.reseal(); } catch (err) { log.warn(`[config] ${PAYMENTS_NAMESPACE} reseal at boot failed: ${err && err.message ? err.message.split('\n')[0] : 'unknown error'}`); }
+    }
+    return store;
+}
+
+/**
+ * The providers' settings, read at use time from the vault (server/payments.js settingsOf): the
+ * values the owner entered, the live switch, and where a value came from (the vault only: these
+ * keys have no environment pin).
+ */
+function paymentsSettings(store) {
+    const { settingsOf } = require('./payments');
+    const out = { providers: {} };
+    for (const provider of PAYMENT_PROVIDERS) {
+        // The values are read at use time, so a key the owner just pasted works without a restart.
+        const values = () => (store ? store.get() : {});
+        const live = () => values()[provider.keys.find((k) => k.live).name] === true;
+        const cfg = { get live() { return live(); } };
+        for (const k of provider.keys) {
+            if (k.live) continue;
+            const local = k.name.split('.').slice(1).join('.');
+            Object.defineProperty(cfg, local, { get: () => { const v = values()[k.name]; return v == null ? '' : v; }, enumerable: true });
+        }
+        // The provider's own base address, which follows the live switch.
+        Object.defineProperty(cfg, 'base', {
+            enumerable: true,
+            get: () => settingsOf(provider.id, values(), live()).base,
+        });
+        // Where a value came from: these keys have no environment pin, so it is the vault or nothing.
+        cfg.source = (key) => {
+            const full = provider.keys.find((k) => k.name.split('.').slice(1).join('.') === key);
+            const v = full ? values()[full.name] : undefined;
+            const empty = v == null || v === '';
+            return { value: empty ? '' : v, source: empty ? null : 'vault', env: null };
+        };
+        out.providers[provider.id] = cfg;
+    }
+    return out;
+}
+
 module.exports = {
-    SERVICE, NAMESPACE, VIBES_NAMESPACE, CARDS_NAMESPACE, SCHEMA, VIBES_SCHEMA, CARDS_SCHEMA, parseAmounts, storeEnv, valuesFromEnv, applyValues,
-    vibesStoreEnv, applyVibesValues, createBillingConfig, createVibesConfig, createCardsConfig, stripeSettings, auditChange,
+    SERVICE, NAMESPACE, VIBES_NAMESPACE, CARDS_NAMESPACE, PAYMENTS_NAMESPACE,
+    SCHEMA, VIBES_SCHEMA, CARDS_SCHEMA, PAYMENTS_SCHEMA, PAYMENT_PROVIDERS,
+    parseAmounts, storeEnv, valuesFromEnv, applyValues,
+    vibesStoreEnv, applyVibesValues, createBillingConfig, createVibesConfig, createCardsConfig, createPaymentsConfig,
+    stripeSettings, paymentsSettings, auditChange,
 };

@@ -17,6 +17,7 @@ const express = require('express');
 const { capabilities } = require('openvibe-contracts');
 const { adminRoutes } = require('openvibe-shared/config');
 const { testRoute, testStripeKey, testStripeWebhook } = require('./owner-inputs');
+const payments = require('./payments');
 
 const CAP = 'billing.config.manage';
 const USER_SUBJECT_RE = /^usr_[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -25,7 +26,7 @@ function internalConfigRouter({ ctx, auth }) {
     const r = express.Router();
     // The store is the only caller of the config routes, so its body parser needs to run only on these paths.
     r.use('/internal/config', express.json({ limit: '64kb' }));
-    const routes = adminRoutes([ctx.configStore, ctx.vibesConfigStore, ...(ctx.cardsConfigStore ? [ctx.cardsConfigStore] : [])], {
+    const routes = adminRoutes([ctx.configStore, ctx.vibesConfigStore, ...(ctx.cardsConfigStore ? [ctx.cardsConfigStore] : []), ...(ctx.paymentsConfigStore ? [ctx.paymentsConfigStore] : [])], {
         requireAdmin: auth.needs(CAP),
         basePath: '/internal/config',
         actor: (req) => {
@@ -49,14 +50,30 @@ function internalConfigRouter({ ctx, auth }) {
         log: ctx.log,
         now: ctx.now,
         resolve: (namespace, key) => {
+            if (namespace === 'billing.payments') {
+                // A checkout provider's own key: the vault value, and where it came from.
+                const provider = payments.PROVIDERS.find((p) => p.keys.some((k) => k.name === key && k.test));
+                if (!provider) return null;
+                const cfg = ctx.config.providers.checkout && ctx.config.providers.checkout[provider.id];
+                if (!cfg || typeof cfg.source !== 'function') return null;
+                return cfg.source(key.split('.').slice(1).join('.'));
+            }
             const stripe = ctx.config.providers.stripe;
             if (namespace !== 'billing.cards' || !stripe || typeof stripe.source !== 'function') return null;
             if (key !== 'stripe.secret_key' && key !== 'stripe.webhook_secret') return null;
             return stripe.source(key);
         },
-        run: (namespace, key, value) => (key === 'stripe.secret_key'
-            ? testStripeKey(ctx.config.providers.stripe, value, { fetchImpl: ctx.fetchImpl || globalThis.fetch })
-            : testStripeWebhook(ctx.config.providers.stripe, value, { fetchImpl: ctx.fetchImpl || globalThis.fetch })),
+        run: (namespace, key, value) => {
+            if (namespace === 'billing.payments') {
+                const provider = payments.PROVIDERS.find((p) => p.keys.some((k) => k.name === key && k.test));
+                const cfg = ctx.config.providers.checkout && ctx.config.providers.checkout[provider.id];
+                // One cheap authenticated read of the provider's own API: it never charges and never sends.
+                return provider.test(cfg, { fetchImpl: ctx.fetchImpl || globalThis.fetch });
+            }
+            return key === 'stripe.secret_key'
+                ? testStripeKey(ctx.config.providers.stripe, value, { fetchImpl: ctx.fetchImpl || globalThis.fetch })
+                : testStripeWebhook(ctx.config.providers.stripe, value, { fetchImpl: ctx.fetchImpl || globalThis.fetch });
+        },
     }));
     return r;
 }

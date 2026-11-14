@@ -38,6 +38,7 @@ const { createStripe } = require('./stripe');
 const { createPaypal } = require('./paypal');
 const { createCcbill } = require('./ccbill');
 const { createNowpayments } = require('./nowpayments');
+const { createCheckoutAdapter } = require('./checkout');
 
 function createAdapters(config, deps = {}) {
     const p = config.providers;
@@ -154,4 +155,4 @@ function present(row) {
     };
 }
 
-module.exports = { createAdapters, store, process, processPending, reprocess, applyPlan, present, parseRow };
+module.exports = { createAdapters, createCheckoutAdapter, store, process, processPending, reprocess, applyPlan, present, parseRow };
