@@ -13,7 +13,10 @@ const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
 let checked = 0;
 let branches = 0;
 for (const spec of Object.values(pkg.dependencies || {})) {
-    const m = /codeload\.github\.com\/OpenVibers\/(OpenVibe\.[A-Za-z]+)\/tar\.gz\/refs\/tags\/v(\d+\.\d+\.\d+)$/.exec(String(spec));
+    // A release pin on GitHub (…/tar.gz/refs/tags/vX.Y.Z) or on our own forge (git.openvibe.codes …/archive/vX.Y.Z.tar.gz,
+    // the pin bot's default since openvibe-shared 4.284.0).
+    const t = /codeload\.github\.com\/OpenVibers\/(OpenVibe\.[A-Za-z]+)\/tar\.gz\/refs\/tags\/v(\d+\.\d+\.\d+)$|git\.openvibe\.codes\/api\/v1\/repos\/openvibers\/(openvibe\.[a-z]+)\/archive\/v(\d+\.\d+\.\d+)\.tar\.gz$/i.exec(String(spec));
+    const m = t && [t[0], t[1] || t[3], t[2] || t[4]];
     if (!m) {
         // A branch pin (a library whose release is not cut yet): no version to print in the README.
         if (/codeload\.github\.com\/OpenVibers\/OpenVibe\.[A-Za-z]+\/tar\.gz\/refs\/heads\//.test(String(spec))) branches++;
