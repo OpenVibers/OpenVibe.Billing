@@ -14,8 +14,9 @@ let questCache = { at: 0, names: new Map() };
  * billing.money-reason@1 names this URL). Best-effort and cached: without it a slug still names the
  * quest ("for the quest Publish a video") and the address is still built from the id.
  */
-async function questNames(ctx) {
-    if (questCache.at && Date.now() - questCache.at < QUEST_TTL_MS) return questCache.names;
+let questLoading = null;
+
+async function readQuests(ctx) {
     const base = String(ctx.config.quests && ctx.config.quests.url || 'https://openvibe.quest').replace(/\/+$/, '');
     const names = new Map();
     try {
@@ -30,8 +31,23 @@ async function questNames(ctx) {
             }
         }
     } catch { /* the slug and the id still answer */ }
-    questCache = { at: Date.now(), names };
     return names;
+}
+
+/**
+ * The names, best-effort. Past ten minutes the names it has answer at once and one read runs behind them (11-18: the
+ * read leaves through Cloudflare and takes 1.1 s from this server, so every expiry held a wallet that long; the wallet
+ * was 2.1 s at p95). Only the first read after a start is waited for, and a failed read keeps the names it had.
+ */
+async function questNames(ctx) {
+    if (questCache.at && Date.now() - questCache.at < QUEST_TTL_MS) return questCache.names;
+    if (!questLoading) {
+        questLoading = readQuests(ctx)
+            .then((names) => { questCache = names.size || !questCache.names.size ? { at: Date.now(), names } : { ...questCache, at: Date.now() }; return questCache.names; })
+            .finally(() => { questLoading = null; });
+    }
+    if (questCache.at) return questCache.names;
+    return questLoading;
 }
 
 // Network remains authoritative for OpenCoins. Never request with=vibes here: that asks Billing again.
@@ -95,4 +111,4 @@ async function wallet(ctx, subject, authorization) {
     };
 }
 
-module.exports = { wallet };
+module.exports = { wallet, questNames };
