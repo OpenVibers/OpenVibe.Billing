@@ -99,9 +99,13 @@ const donation = (data, streamer = 'openvibe') => ({ type: 'donation.completed',
         // pcdon resolves its creator through the Network (async), so the deliveries really interleave.
         const env = donation({ eventId: 'don-race-2', amountUsdCents: 250, appExternalRef: `pcdon:${streamerLiveId}:0` });
         const rs = await Promise.all(Array.from({ length: 20 }, (_, n) => t.powerchat(env, { deliveryId: `dlv-race-2-${n}` })));
-        const effects = rs.map((r) => r.json.result.effect).sort();
+        // A delivery that lost the race for the event's lock answers 'received, not processed yet' (processed false,
+        // result null): the one holding it settles the payment. (11-28: this assumed every answer carried an effect and
+        // failed once on a pin PR.) What matters: exactly one settles, none settles twice, and the money moves once.
+        const effects = rs.map((r) => (r.json.result ? r.json.result.effect : (r.json.processed === false ? 'in_flight' : 'none'))).sort();
         assert.strictEqual(effects.filter((e) => e === 'settled').length, 1, effects.join(','));
-        assert.strictEqual(effects.filter((e) => e === 'duplicate_receipt').length, 19);
+        assert.strictEqual(effects.filter((e) => e === 'duplicate_receipt' || e === 'in_flight').length, 19, effects.join(','));
+        assert.ok(rs.every((r) => r.status === 200 && r.json.received === true), 'every delivery is received');
         assert.strictEqual((await t.balances(siteStreamer)).payable, credit + 250);
         await t.assertReconciled('after a redelivery race');
     });
